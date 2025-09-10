@@ -1,230 +1,295 @@
 #!/usr/bin/env python3
-"""
-Dashcam Speaker Diarization → RTTM (one per CORE)
-
-- Scans dashcam videos under /dashcam (dated tree) and extracts mono 16k MP3s
-  into flat /dashcam/audio (KEEPING _F/_R/_FR in the filename).
-- Builds one RTTM per CORE at /dashcam/transcriptions/<CORE>.rttm
-  (CORE = YYYY_MMDD_HHMMSS; F/R/FR variants collapse to same RTTM).
-- Skips MP3s named exactly <CORE>.mp3 to avoid duplicate/inneficient work.
-- Also leverages base audio under /fileserver/audio (dated tree) when helpful.
-
-Env:
-  HF_TOKEN          : Hugging Face token for pyannote/speaker-diarization-3.1
-  MIN_SPEAKERS      : default 1
-  MAX_SPEAKERS      : default 5
-"""
-
-import os, re, sys, subprocess, argparse, logging
+import os, re, sys, subprocess, shutil
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
-# Optional; if unavailable, we error at runtime when needed
+# Optional: faster-whisper for local Python transcription fallback
 try:
-    from pyannote.audio import Pipeline
-except Exception as e:
-    Pipeline = None
+    from faster_whisper import WhisperModel  # type: ignore
+    HAVE_FASTER_WHISPER = True
+except Exception:
+    HAVE_FASTER_WHISPER = False
 
-# ===== Paths =====
-DASHCAM_ROOT       = Path("/mnt/8TB_2025/fileserver/dashcam")     # dated videos live under here
-DASHCAM_AUDIO_DIR  = DASHCAM_ROOT / "audio"                        # FLAT dir for extracted MP3s from dashcam
-TRANSCRIPTIONS_DIR = DASHCAM_ROOT / "transcriptions"               # FLAT dir for RTTMs (one per CORE)
-FILES_AUDIO_ROOT   = Path("/mnt/8TB_2025/fileserver/audio")        # dated audio tree (general/base audio)
+import torch  # noqa: F401
+from pyannote.audio import Pipeline
+
+# ---------- Config ----------
+DASHCAM_BASE           = Path("/mnt/8TB_2025/fileserver/dashcam")
+DASHCAM_AUDIO_BASE     = Path("/mnt/8TB_2025/fileserver/dashcam/audio")
+DASHCAM_TRANS_BASE     = Path("/mnt/8TB_2025/fileserver/dashcam/transcriptions")
+
+BODYCAM_BASE           = Path("/mnt/8TB_2025/fileserver/bodycam")
+
+AUDIO_BASE             = Path("/mnt/8TB_2025/fileserver/audio")
+AUDIO_TRANS_BASE       = Path("/mnt/8TB_2025/fileserver/audio/transcriptions")
+
+HF_TOKEN               = os.getenv("HF_TOKEN")  # do NOT hardcode tokens
+MIN_SPEAKERS           = int(os.getenv("MIN_SPEAKERS", "1"))
+MAX_SPEAKERS           = int(os.getenv("MAX_SPEAKERS", "5"))
+
+# Transcription controls
+DO_TRANSCRIBE          = os.getenv("DO_TRANSCRIBE", "1") not in {"0", "false", "False", ""}
+WHISPER_MODEL_SIZE     = os.getenv("WHISPER_MODEL", "medium")  # for CLI or faster-whisper
+WHISPER_LANGUAGE       = os.getenv("WHISPER_LANG", "en")
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi"}
 AUDIO_EXTS = {".wav", ".mp3", ".m4a"}
 
-HF_TOKEN     = os.getenv("HF_TOKEN", "<HF_TOKEN>")
-MIN_SPEAKERS = int(os.getenv("MIN_SPEAKERS", "1"))
-MAX_SPEAKERS = int(os.getenv("MAX_SPEAKERS", "5"))
-
-# ===== Logging =====
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
-log = logging.getLogger("speakers")
-
-# ===== Name parsing =====
-CORE_RE = re.compile(r"^(?P<core>\d{4}_\d{4}_\d{6})$")
-VIEW_RE = re.compile(r"^(?P<core>\d{4}_\d{4}_\d{6})(?P<view>_(?:FR|F|R))$")
-
-def parse_core(stem: str) -> Optional[Tuple[str, Optional[str]]]:
-    """Return (core, view) where view ∈ {None, _F, _R, _FR} if name matches."""
-    m = VIEW_RE.match(stem)
-    if m:
-        return m.group("core"), m.group("view")
-    m = CORE_RE.match(stem)
-    if m:
-        return m.group("core"), None
-    return None
-
-def is_core_mp3(p: Path) -> bool:
-    """True if file is an MP3 named exactly CORE.mp3 (no _F/_R/_FR)."""
-    return p.suffix.lower() == ".mp3" and parse_core(p.stem) == (p.stem, None)
+# ---------- Helpers ----------
+def run(cmd: List[str]) -> None:
+    subprocess.run(cmd, check=True)
 
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
-def run(cmd: List[str]) -> None:
-    """Run a command, raising with captured output on failure."""
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"Command failed ({proc.returncode}): {' '.join(cmd)}\nSTDERR:\n{proc.stderr}")
+def has_cmd(cmd: str) -> bool:
+    return shutil.which(cmd) is not None
 
-# ===== Discovery =====
 def walk_videos(root: Path) -> Iterable[Path]:
-    if not root.exists(): return []
+    if not root.exists():
+        return []
     return (p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_EXTS)
 
 def walk_audio(root: Path) -> Iterable[Path]:
-    if not root.exists(): return []
-    for p in root.rglob("*"):
-        if not p.is_file(): continue
-        if p.suffix.lower() not in AUDIO_EXTS: continue
-        got = parse_core(p.stem)
-        if not got: continue
-        # Exclude bare CORE.mp3 to avoid duplication
-        if is_core_mp3(p):
-            continue
-        yield p
+    if not root.exists():
+        return []
+    return (p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXTS)
 
-# ===== Extraction =====
-def extract_audio_if_needed(video_path: Path, out_dir: Path) -> Path:
+# --------- Key parsing & naming (dashcam & bodycam) ----------
+def dashcam_key_and_suffix(stem: str) -> Optional[Tuple[str, Optional[str]]]:
     """
-    Extract mono 16k MP3 into flat /dashcam/audio, preserving the original stem
-    (including _F/_R/_FR). This prevents collisions with core-only MP3s.
+    DASHCAM file stems look like: YYYY_MMDD_HHMMSS_{F,R,FR,...}
+    We keep legacy behavior: key = YYYY_MMDD_HHMMSS, and for *_R we drop suffix.
+    Return (key, cam_suffix) where cam_suffix is None for *_R (legacy) else e.g. '_F', '_FR'.
     """
-    ensure_dir(out_dir)
-    out_mp3 = out_dir / f"{video_path.stem}.mp3"
-    if not out_mp3.exists():
-        log.info(f"[extract] {video_path.name} → {out_mp3.name}")
-        run([
-            "ffmpeg", "-y",
-            "-i", str(video_path),
-            "-vn", "-ac", "1", "-ar", "16000",
-            "-b:a", "128k",
-            str(out_mp3)
-        ])
-    return out_mp3
+    m = re.match(r"^(\d{4}_\d{4}_\d{6})(?:_([A-Za-z]+))?$", stem)
+    if not m:
+        return None
+    key = m.group(1)
+    tail = m.group(2)
+    # Legacy: only accept *_R for audio extraction; diarization uses base key
+    if tail and tail.upper() != "R":
+        return (key, f"_{tail.upper()}")
+    return (key, None)
 
-# ===== Pipeline (singleton) =====
-_PIPELINE = None
-def get_pipeline() -> "Pipeline":
-    global _PIPELINE
-    if _PIPELINE is None:
-        if Pipeline is None:
-            raise RuntimeError("pyannote.audio not installed; please `pip install pyannote.audio`.")
-        if not HF_TOKEN or HF_TOKEN == "<HF_TOKEN>":
-            raise RuntimeError("HF_TOKEN is not set. Export a valid Hugging Face token for pyannote.")
-        log.info("Loading pyannote pipeline: pyannote/speaker-diarization-3.1 …")
-        _PIPELINE = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            use_auth_token=HF_TOKEN
-        )
-    return _PIPELINE
+def is_dashcam_right_cam(path: Path) -> bool:
+    return path.stem.upper().endswith("_R")
 
-# ===== RTTM target =====
-def rttm_path_for_core(core: str) -> Path:
-    """RTTM lives in flat transcriptions dir named <CORE>.rttm."""
-    ensure_dir(TRANSCRIPTIONS_DIR)
-    return TRANSCRIPTIONS_DIR / f"{core}.rttm"
+def bodycam_key_and_suffix(stem: str) -> Optional[Tuple[str, str]]:
+    """
+    BODYCAM stems like: 20250405212855_000029 or 20250405212855
+    Convert to key 'YYYY_MMDD_HHMMSS' and suffix '_BC' or '_BC-000029' if index present.
+    """
+    m = re.match(r"^(\d{14})(?:_(\d+))?$", stem)  # 14-digit timestamp
+    if not m:
+        return None
+    ts14 = m.group(1)
+    idx = m.group(2)
+    y, mo, d, hh, mm, ss = ts14[0:4], ts14[4:6], ts14[6:8], ts14[8:10], ts14[10:12], ts14[12:14]
+    key = f"{y}_{mo}{d}_{hh}{mm}{ss}"
+    suffix = f"_BC-{idx}" if idx else "_BC"
+    return (key, suffix)
 
-# ===== Strategy: choose one source per CORE =====
-def build_core_sources() -> Dict[str, Path]:
-    """
-    Build a map of core -> audio path with precedence:
-      1) dashcam/audio (flat)  [preferred]
-      2) fileserver/audio (dated)
-    Excludes bare CORE.mp3.
-    """
-    mapping: Dict[str, Path] = {}
-    # 1) Preferred: dashcam/audio
-    for ap in walk_audio(DASHCAM_AUDIO_DIR):
-        core, view = parse_core(ap.stem)  # type: ignore
-        if core not in mapping:
-            mapping[core] = ap
-    # 2) Fallback: fileserver/audio
-    for ap in walk_audio(FILES_AUDIO_ROOT):
-        core, view = parse_core(ap.stem)  # type: ignore
-        if core not in mapping:
-            mapping[core] = ap
-    return mapping
+def audio_stem(key: str, suffix: Optional[str]) -> str:
+    """Build audio base stem: dashcam R => key; others append suffix."""
+    return f"{key}{suffix or ''}"
 
-# ===== Diarization =====
-def diarize_to_rttm(audio_path: Path, out_rttm: Path, overwrite: bool = True, dry_run: bool = False) -> bool:
-    """
-    Run diarization and write RTTM. Returns True if wrote (new or replaced).
-    """
-    if out_rttm.exists() and not overwrite:
-        return False
-    if dry_run:
-        log.info(f"[dry-run] would write RTTM: {out_rttm.name} (from {audio_path.name})")
+def out_mp3_path(key: str, suffix: Optional[str]) -> Path:
+    ensure_dir(AUDIO_BASE)
+    return AUDIO_BASE / f"{audio_stem(key, suffix)}.mp3"
+
+def rttm_path_for(key: str, suffix: Optional[str]) -> Path:
+    ensure_dir(AUDIO_BASE)
+    return AUDIO_BASE / f"{audio_stem(key, suffix)}_speakers.rttm"
+
+def transcript_paths_for(key: str, suffix: Optional[str]) -> Tuple[Path, Path]:
+    ensure_dir(AUDIO_TRANS_BASE)
+    base = AUDIO_TRANS_BASE / audio_stem(key, suffix)
+    return base.with_suffix(".txt"), base.with_suffix(".csv")
+
+def transcript_already_exists(key: str, suffix: Optional[str]) -> bool:
+    txt, csv = transcript_paths_for(key, suffix)
+    if txt.exists() and csv.exists():
         return True
-    diar = get_pipeline()(str(audio_path), min_speakers=MIN_SPEAKERS, max_speakers=MAX_SPEAKERS)
-    with out_rttm.open("w", encoding="utf-8") as f:
+    # Also check legacy dashcam transcription folder
+    legacy_txt = (DASHCAM_TRANS_BASE / audio_stem(key, suffix)).with_suffix(".txt")
+    legacy_csv = (DASHCAM_TRANS_BASE / audio_stem(key, suffix)).with_suffix(".csv")
+    return legacy_txt.exists() and legacy_csv.exists()
+
+# ---------- Extraction ----------
+def extract_audio_ffmpeg(src_video: Path, dst_mp3: Path) -> None:
+    if dst_mp3.exists():
+        return
+    ensure_dir(dst_mp3.parent)
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+        "-i", str(src_video),
+        "-vn", "-ac", "1", "-ar", "16000", "-b:a", "128k",
+        str(dst_mp3),
+    ]
+    run(cmd)
+
+# ---------- Diarization ----------
+def build_diarization_pipeline() -> Optional[Pipeline]:
+    if not HF_TOKEN:
+        print("WARN: HF_TOKEN not set; skipping diarization.", file=sys.stderr)
+        return None
+    return Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=HF_TOKEN)
+
+def diarize_once(pipeline: Optional[Pipeline], audio_path: Path, rttm_path: Path) -> None:
+    if rttm_path.exists():
+        return
+    if pipeline is None:
+        return
+    diar = pipeline(str(audio_path), min_speakers=MIN_SPEAKERS, max_speakers=MAX_SPEAKERS)
+    with rttm_path.open("w") as f:
         diar.write_rttm(f)
+
+# ---------- Transcription ----------
+def transcribe_cli_whisper(audio_path: Path, txt_out: Path, csv_out: Path) -> bool:
+    """
+    Use openai-whisper CLI if available. Returns True if success or already exists.
+    """
+    if txt_out.exists() and csv_out.exists():
+        return True
+    if not has_cmd("whisper"):
+        return False
+    ensure_dir(txt_out.parent)
+    # whisper writes multiple formats; we ask for txt & csv to output_dir
+    cmd = [
+        "whisper", str(audio_path),
+        "--model", WHISPER_MODEL_SIZE,
+        "--language", WHISPER_LANGUAGE,
+        "--task", "transcribe",
+        "--output_dir", str(txt_out.parent),
+        "--output_format", "txt,csv",
+        "--verbose", "False",
+    ]
+    run(cmd)
+    # whisper names files based on input basename; we need to move/rename to our exact stem
+    produced_txt = txt_out.parent / (audio_path.stem + ".txt")
+    produced_csv = txt_out.parent / (audio_path.stem + ".csv")
+    # If whisper output used the input's stem, we're already aligned; otherwise rename if needed
+    if produced_txt.exists() and produced_txt != txt_out:
+        produced_txt.rename(txt_out)
+    if produced_csv.exists() and produced_csv != csv_out:
+        produced_csv.rename(csv_out)
+    return txt_out.exists() and csv_out.exists()
+
+def transcribe_faster_whisper(audio_path: Path, txt_out: Path, csv_out: Path) -> bool:
+    if txt_out.exists() and csv_out.exists():
+        return True
+    if not HAVE_FASTER_WHISPER:
+        return False
+    ensure_dir(txt_out.parent)
+    model = WhisperModel(WHISPER_MODEL_SIZE, device="cuda" if torch.cuda.is_available() else "cpu", compute_type="float16" if torch.cuda.is_available() else "int8")
+    segments, _ = model.transcribe(str(audio_path), language=WHISPER_LANGUAGE)
+    # Write .txt
+    with txt_out.open("w", encoding="utf-8") as ft:
+        for seg in segments:
+            ft.write(seg.text.strip() + "\n")
+    # Re-run to iterate again for CSV (segments is a generator)
+    segments, _ = model.transcribe(str(audio_path), language=WHISPER_LANGUAGE)
+    with csv_out.open("w", encoding="utf-8") as fc:
+        fc.write("start,end,text\n")
+        for seg in segments:
+            fc.write(f"{seg.start:.2f},{seg.end:.2f},\"{seg.text.replace('\"','')}\"\n")
     return True
 
-# ===== CLI =====
-def main():
-    ap = argparse.ArgumentParser(description="Dashcam → Speaker RTTM (one per CORE)")
-    ap.add_argument("--skip-extract", action="store_true",
-                    help="Do not extract audio from dashcam videos (use existing MP3s only).")
-    ap.add_argument("--overwrite", action="store_true", default=True,
-                    help="Overwrite existing RTTMs (default: True).")
-    ap.add_argument("--no-overwrite", dest="overwrite", action="store_false",
-                    help="Do not overwrite existing RTTMs.")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="Plan only; do not run the diarization model.")
-    ap.add_argument("--limit", type=int, default=None,
-                    help="Process at most N cores (after discovery).")
-    ap.add_argument("--only-cores", type=str, nargs="*", default=None,
-                    help="Restrict processing to these COREs (space-separated).")
-    args = ap.parse_args()
+def transcribe_audio(audio_path: Path, key: str, suffix: Optional[str]) -> None:
+    if not DO_TRANSCRIBE:
+        return
+    if transcript_already_exists(key, suffix):
+        return
+    txt_out, csv_out = transcript_paths_for(key, suffix)
+    # Prefer CLI whisper if present; fallback to faster-whisper if available
+    if transcribe_cli_whisper(audio_path, txt_out, csv_out):
+        return
+    if transcribe_faster_whisper(audio_path, txt_out, csv_out):
+        return
+    print(f"WARN: No transcription backend available for {audio_path.name}. Install `whisper` or `faster-whisper`.", file=sys.stderr)
 
-    # 1) Optional extraction from dashcam videos → flat dashcam/audio
-    if not args.skip_extract:
-        vids = list(walk_videos(DASHCAM_ROOT))
-        log.info(f"Found {len(vids)} dashcam video(s) to consider for extraction.")
-        for vp in vids:
-            got = parse_core(vp.stem)
-            if not got:
-                continue
-            try:
-                extract_audio_if_needed(vp, DASHCAM_AUDIO_DIR)
-            except Exception as e:
-                log.warning(f"[extract ERR] {vp}: {e}")
-
-    # 2) Build core → audio source map (dashcam/audio preferred, then fileserver/audio)
-    sources = build_core_sources()
-    cores = sorted(sources.keys())
-
-    if args.only-cores:
-        only = set(args.only_cores)
-        cores = [c for c in cores if c in only]
-        missing = [c for c in args.only_cores if c not in sources]
-        if missing:
-            log.warning(f"--only-cores requested but not found: {missing}")
-
-    if args.limit:
-        cores = cores[:args.limit]
-
-    log.info(f"Will process {len(cores)} core(s). overwrite={args.overwrite} dry_run={args.dry_run}")
-
-    wrote, skipped = 0, 0
-    for i, core in enumerate(cores, 1):
-        src = sources[core]
-        out = rttm_path_for_core(core)
+# ---------- Main passes ----------
+def process_dashcam_videos(pipeline: Optional[Pipeline]) -> None:
+    right_videos = [vp for vp in walk_videos(DASHCAM_BASE) if is_dashcam_right_cam(vp)]
+    print(f"🎥 DASHCAM: {len(right_videos)} rear-camera video(s) (*_R.*)")
+    for vp in right_videos:
         try:
-            did = diarize_to_rttm(src, out, overwrite=args.overwrite, dry_run=args.dry_run)
-            if did: wrote += 1
-            else:   skipped += 1
-            log.info(f"[{i}/{len(cores)}] {core} ← {src.name} → {out.name} ({'wrote' if did else 'skipped'})")
+            parsed = dashcam_key_and_suffix(vp.stem)
+            if not parsed:
+                print(f"SKIP (DC parse): {vp.name}", file=sys.stderr); continue
+            key, cam_suffix = parsed  # cam_suffix is None for *_R (legacy)
+            mp3 = out_mp3_path(key, cam_suffix)  # cam_suffix None => legacy stem
+            extract_audio_ffmpeg(vp, mp3)
+            rttm = rttm_path_for(key, cam_suffix)
+            diarize_once(pipeline, mp3, rttm)
+            transcribe_audio(mp3, key, cam_suffix)
+            print(f"OK DC: {vp.name} → {mp3.name}")
+        except subprocess.CalledProcessError as e:
+            print(f"ERR (ffmpeg DC): {vp} :: {e}", file=sys.stderr)
         except Exception as e:
-            log.exception(f"[{i}/{len(cores)}] FAILED {core}: {e}")
+            print(f"ERR (DC): {vp} :: {e}", file=sys.stderr)
 
-    log.info(f"Done. wrote={wrote} skipped={skipped} total={len(cores)}")
+def process_bodycam_videos(pipeline: Optional[Pipeline]) -> None:
+    vids = list(walk_videos(BODYCAM_BASE))
+    print(f"🎥 BODYCAM: {len(vids)} video(s)")
+    for vp in vids:
+        try:
+            parsed = bodycam_key_and_suffix(vp.stem)
+            if not parsed:
+                print(f"SKIP (BC parse): {vp.name}", file=sys.stderr); continue
+            key, bc_suffix = parsed
+            mp3 = out_mp3_path(key, bc_suffix)
+            extract_audio_ffmpeg(vp, mp3)
+            rttm = rttm_path_for(key, bc_suffix)
+            diarize_once(pipeline, mp3, rttm)
+            transcribe_audio(mp3, key, bc_suffix)
+            print(f"OK BC: {vp.name} → {mp3.name}")
+        except subprocess.CalledProcessError as e:
+            print(f"ERR (ffmpeg BC): {vp} :: {e}", file=sys.stderr)
+        except Exception as e:
+            print(f"ERR (BC): {vp} :: {e}", file=sys.stderr)
+
+def process_audio_dirs_for_diarization_and_transcription(pipeline: Optional[Pipeline]) -> None:
+    # Pass over centralized and legacy audio bases
+    for root in [AUDIO_BASE, DASHCAM_AUDIO_BASE]:
+        auds = list(walk_audio(root))
+        print(f"🔊 AUDIO SWEEP: {len(auds)} file(s) in {root}")
+        for ap in auds:
+            try:
+                # Try dashcam naming first, then bodycam
+                parsed = dashcam_key_and_suffix(ap.stem)
+                suffix = None
+                if parsed:
+                    key, suffix = parsed
+                else:
+                    parsed_bc = bodycam_key_and_suffix(ap.stem)
+                    if not parsed_bc:
+                        # If neither matches, skip (keeps strictness)
+                        continue
+                    key, suffix = parsed_bc
+
+                rttm = rttm_path_for(key, suffix)
+                diarize_once(pipeline, ap, rttm)
+                transcribe_audio(ap, key, suffix)
+            except Exception as e:
+                print(f"ERR (audio sweep): {ap} :: {e}", file=sys.stderr)
+
+def main():
+    ensure_dir(AUDIO_BASE)
+    ensure_dir(AUDIO_TRANS_BASE)
+
+    # Build diarization pipeline once (if token present)
+    pipeline = build_diarization_pipeline()
+
+    # 1) Dashcam: extract from *_R only → diarize+transcribe
+    process_dashcam_videos(pipeline)
+
+    # 2) Bodycam: extract from ALL videos → diarize+transcribe
+    process_bodycam_videos(pipeline)
+
+    # 3) Sweep existing audio in both locations → fill any missing RTTM/transcripts
+    process_audio_dirs_for_diarization_and_transcription(pipeline)
 
 if __name__ == "__main__":
     main()
