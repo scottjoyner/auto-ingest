@@ -18,11 +18,12 @@ Where:
 
 Non-matching or invalid-date filenames are skipped (with a warning).
 """
-
+# python move_files.py -i /mnt/8TB_2025/fileserver/audio -o /mnt/8TB_2025/fileserver/audio --dry-run --recursive
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from dataclasses import dataclass
 import hashlib
 import logging
 import os
@@ -33,32 +34,55 @@ import sys
 from datetime import datetime
 from typing import Optional, Tuple
 
+
 NAME_PATTERN = re.compile(
-    r'^(?P<year>\d{4})_(?P<md>\d{4})_(?P<hms>\d{6})_(?P<tail>.+)$'
+    r'^(?P<ts>(?:\d{4}_\d{4}_\d{6}|\d{14}))(?:[_.].*)?$'
 )
 
-def parse_name(basename: str) -> Optional[Tuple[int, int, int]]:
-    """
-    Parse the leading timestamp from a basename and validate Y-M-D H:M:S.
-    Returns (year, month, day) if valid; None otherwise.
-    """
+@dataclass
+class ParsedName:
+    year: int
+    month: int
+    day: int
+    hour: int
+    minute: int
+    second: int
+    ts_compact: str        # e.g. 20250911223045
+    ts_underscored: str    # e.g. 2025_0911_223045
+
+def parse_name(basename: str) -> Optional[ParsedName]:
     m = NAME_PATTERN.match(basename)
     if not m:
         return None
-    year = int(m.group("year"))
-    md = m.group("md")
-    hms = m.group("hms")
-    month = int(md[:2])
-    day = int(md[2:])
-    hour = int(hms[:2])
-    minute = int(hms[2:4])
-    second = int(hms[4:6])
-    try:
-        # Validate actual calendar/time
-        datetime(year, month, day, hour, minute, second)
-    except ValueError:
-        return None
-    return year, month, day
+
+    ts = m.group('ts')
+    if '_' in ts:
+        # YYYY_MMDD_HHMMSS
+        year  = ts[0:4]
+        month = ts[5:7]
+        day   = ts[7:9]
+        hour  = ts[10:12]
+        minute= ts[12:14]
+        second= ts[14:16]
+    else:
+        # YYYYMMDDHHMMSS
+        year  = ts[0:4]
+        month = ts[4:6]
+        day   = ts[6:8]
+        hour  = ts[8:10]
+        minute= ts[10:12]
+        second= ts[12:14]
+
+    # Build normalized forms
+    ts_compact = f"{year}{month}{day}{hour}{minute}{second}"
+    ts_underscored = f"{year}_{month}{day}_{hour}{minute}{second}"
+
+    return ParsedName(
+        year=int(year), month=int(month), day=int(day),
+        hour=int(hour), minute=int(minute), second=int(second),
+        ts_compact=ts_compact, ts_underscored=ts_underscored
+    )
+
 
 def compute_hash(path: Path, algo: str = "md5", chunk_size: int = 1024 * 1024) -> str:
     h = getattr(hashlib, algo)()
@@ -76,21 +100,34 @@ def choose_collision_action(
     """
     Decide final destination for a move considering collisions.
     Returns the finalized destination Path, or None if we should skip.
+    NOTE: dst must be a FILE path (not a directory).
     """
+    # If somehow caller passed a directory, place file inside it
+    if dst.exists() and dst.is_dir():
+        dst = dst / src.name
+
+    # If the exact same path, nothing to do
+    try:
+        if src.resolve() == dst.resolve():
+            logging.info("Skip (same path): %s", src)
+            return None
+    except Exception:
+        pass
+
     if not dst.exists():
         return dst
 
     if strategy == "skip":
-        # If same file (optionally hash), skip; else skip with warning.
+        # Consider it the same if sizes match; optionally confirm by hash
         same = False
         try:
             if src.stat().st_size == dst.stat().st_size:
+                same = True
                 if hash_algo:
                     same = compute_hash(src, hash_algo) == compute_hash(dst, hash_algo)
-                else:
-                    same = True  # heuristic: same size -> likely same content
         except OSError:
-            pass
+            same = False
+
         if same:
             logging.info("Skip (duplicate): %s -> %s", src, dst)
         else:
@@ -105,9 +142,9 @@ def choose_collision_action(
 
     if strategy == "rename":
         # Append suffix _1, _2, ... before extension
+        parent = dst.parent
         stem = dst.stem
         suffix = dst.suffix
-        parent = dst.parent
         n = 1
         while True:
             candidate = parent / f"{stem}_{n}{suffix}"
@@ -118,11 +155,15 @@ def choose_collision_action(
     raise ValueError(f"Unknown strategy: {strategy}")
 
 def build_destination(root_out: Path, basename: str) -> Optional[Path]:
+    """
+    Return the FULL destination file path:
+      <root_out>/YYYY/MM/DD/<basename>
+    """
     parsed = parse_name(basename)
     if not parsed:
         return None
-    year, month, day = parsed
-    return root_out / f"{year:04d}" / f"{month:02d}" / f"{day:02d}" / basename
+    subdir = Path(f"{parsed.year:04d}") / f"{parsed.month:02d}" / f"{parsed.day:02d}"
+    return (root_out / subdir / basename)
 
 def move_one(
     src: Path,
@@ -137,6 +178,7 @@ def move_one(
         logging.warning("Name does not match pattern, skipping: %s", src)
         return "skipped"
 
+    # Ensure parent directory exists before collision decision where needed
     final_dst = choose_collision_action(src, dst, strategy=strategy, hash_algo=hash_algo)
     if final_dst is None:
         return "skipped"
@@ -147,7 +189,6 @@ def move_one(
 
     final_dst.parent.mkdir(parents=True, exist_ok=True)
 
-    # Prefer atomic rename when possible; shutil.move handles cross-device moves
     try:
         shutil.move(str(src), str(final_dst))
         logging.info("Moved: %s -> %s", src, final_dst)
