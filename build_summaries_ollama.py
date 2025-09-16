@@ -144,10 +144,11 @@ TASKS_PROMPT_PREFIX = (
       "- Keep titles imperative and <= 12 words."
       "- Include an 'agent' suggestion with confidence (0..1) and short rationale."
       "- Include a 'plan' with 1..6 ordered steps; keep tools generic (e.g., 'calendar', 'email', 'neo4j', 'filesystem', 'ticketing', 'browser')."
-      "- Prefer agent-neutral owner_hint like 'Developer', 'Personal', 'Legal', 'Personal', etc."
-      "- Use labels for routing (e.g., ['Developer','Urgent'])."
+      "- Prefer agent-neutral owner_hint like 'DevOps', 'Finance', 'Legal', 'Personal'."
+      "- Use labels for routing (e.g., ['DevOps','Urgent'])."
       "Transcript begins:"
 )
+
 
 # ----------------------------
 # Helpers
@@ -302,7 +303,7 @@ def _normalize_tasks(tasks_any: Any) -> List[Dict[str, Any]]:
             "agent": {"name": agent_name[:60], "confidence": agent_conf, "rationale": agent_rat[:200]},
             "plan": norm_plan
         })
-    return out
+        return out
     for t in tasks_any:
         if not isinstance(t, dict):
             continue
@@ -324,6 +325,115 @@ def _normalize_tasks(tasks_any: Any) -> List[Dict[str, Any]]:
             "owner_hint": owner_hint[:100]
         })
     return out
+
+def _choose_best_path(dirpath: Path, stem: str, candidates: List[Path]) -> Optional[Path]:
+    """
+    Pick the best transcript file for a given (dir, stem) based on TRANSCRIPT_PATTERNS priority.
+    `candidates` is the list of files found in that dir for that stem.
+    """
+    names = {p.name for p in candidates}
+    # 1) Prefer literal matches among the candidate set (fast path)
+    for pat in TRANSCRIPT_PATTERNS:
+        expected = pat.format(stem=stem)
+        if expected in names:
+            return dirpath / expected
+    # 2) As a fallback, check disk existence in priority order (in case candidates was incomplete)
+    for pat in TRANSCRIPT_PATTERNS:
+        cand = dirpath / pat.format(stem=stem)
+        try:
+            if cand.exists():
+                return cand
+        except Exception:
+            continue
+    return None
+
+
+def _discover_stems(roots: List[Path]) -> List[Tuple[Path, str, List[Path]]]:
+    """
+    Scan all roots recursively, bucket files by (directory, stem) using _detect_stem(),
+    and return a list of (dirpath, stem, files_for_stem).
+    """
+    buckets: Dict[Tuple[str, str], List[Path]] = {}
+    for root in roots:
+        if not root.exists():
+            continue
+        for dirpath, _, files in os.walk(root):
+            dp = Path(dirpath)
+            for name in files:
+                p = dp / name
+                st = _detect_stem(p)
+                if not st:
+                    continue
+                buckets.setdefault((str(dp), st), []).append(p)
+    out: List[Tuple[Path, str, List[Path]]] = []
+    for (dp_str, st), paths in buckets.items():
+        out.append((Path(dp_str), st, paths))
+    return out
+
+
+def _auto_sleep(state: Dict[str, Any], success: bool, last_duration: float) -> None:
+    """
+    Simple auto-throttle:
+      - base sleep = 0.25 * last_duration
+      - +0.4 sec per consecutive failure
+      - clamped to [sleep_min, sleep_max]
+      - only sleeps if state['auto_throttle'] is True
+    """
+    if success:
+        state["consec_fail"] = 0
+    else:
+        state["consec_fail"] = int(state.get("consec_fail", 0)) + 1
+
+    base = 0.25 * max(0.0, float(last_duration))
+    penalty = 0.4 * float(state.get("consec_fail", 0))
+    sleep_min = float(state.get("sleep_min", 0.1))
+    sleep_max = float(state.get("sleep_max", 2.0))
+    sleep_sec = min(sleep_max, max(sleep_min, base + penalty))
+
+    if state.get("auto_throttle", False):
+        time.sleep(sleep_sec)
+
+
+def _read_json_file(p: Path) -> Optional[Dict[str, Any]]:
+    """Read a JSON file into a dict; return None on failure."""
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            j = json.load(f)
+        return j if isinstance(j, dict) else None
+    except Exception as e:
+        log.warning("Failed reading JSON %s: %s", p, e)
+        return None
+
+
+def _read_vtt_to_text(p: Path) -> Optional[str]:
+    """
+    Convert a .vtt (WebVTT) caption file to plain text:
+      - strips 'WEBVTT' header
+      - drops cue numbers and timestamp lines
+      - returns concatenated text lines
+    """
+    try:
+        lines: List[str] = []
+        with p.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                s = line.rstrip("\n")
+                if not s:
+                    continue
+                if s.upper().startswith("WEBVTT"):
+                    continue
+                # cue numbers (e.g., "12")
+                if re.fullmatch(r"\d+", s):
+                    continue
+                # timestamp lines
+                if re.match(r"^\d{2}:\d{2}:\d{2}\.\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}\.\d{3}", s) or \
+                   re.match(r"^\d{2}:\d{2}\.\d{3}\s+-->\s+\d{2}:\d{2}\.\d{3}", s):
+                    continue
+                lines.append(s)
+        txt = "\n".join(lines).strip()
+        return txt or None
+    except Exception as e:
+        log.warning("Failed reading VTT %s: %s", p, e)
+        return None
 
 # ----------------------------
 # Lightweight heuristics for agent routing & plan (fallback if model omits)
@@ -432,20 +542,59 @@ def process_transcript(path: Path, client: OllamaClient, model: str, opts: Dict[
         else:
             return _read_text_file(p)
 
-    # If summary exists and not overwriting: generate only tasks (if missing)
+    # Fast skip: if both summary and tasks already exist and not overwriting, return immediately
+    if (out_summary.exists() and out_tasks.exists()) and not overwrite:
+        _auto_sleep(state, True, 0.02)
+        return
+
+    # If summary exists and not overwriting: prefer existing summary to derive tasks
     if out_summary.exists() and not overwrite:
+        # 1) Try to read tasks directly from summary (no model call)
+        sdoc = None
+        try:
+            sdoc = json.loads(out_summary.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        existing_tasks = []
+        if isinstance(sdoc, dict):
+            existing_tasks = _normalize_tasks(sdoc.get("tasks"))
+        if existing_tasks:
+            existing_tasks = _enrich_tasks_with_agent_plan(existing_tasks)
+            task_doc = {
+                "tasks": existing_tasks,
+                "_meta": {
+                    "source_transcript": str(path),
+                    "generated_by_model": model,
+                    "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "schema": "tasks.sidecar.v1",
+                    "derived_from": str(out_summary)
+                }
+            }
+            tmp = Path(str(out_tasks) + ".tmp")
+            tmp.write_text(json.dumps(task_doc, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(out_tasks)
+            log.info("Wrote tasks %s (from existing summary; no model call)", out_tasks)
+            _auto_sleep(state, True, 0.02)
+            return
+
+        # 2) If tasks sidecar already exists, nothing to do
         if out_tasks.exists():
+            _auto_sleep(state, True, 0.02)
             return
-        transcript_text = _load_text(path)
-        if not transcript_text:
-            return
-        if len(transcript_text) > state["prompt_chars"]:
-            head = int(state["prompt_chars"] * 0.7)
-            tail = int(state["prompt_chars"] * 0.25)
-            transcript_text = transcript_text[:head] + "" + transcript_text[-tail:]
-        prompt = TASKS_PROMPT_PREFIX + transcript_text + PROMPT_END
+
+        # 3) Otherwise, build a compact tasks-only prompt from the existing summary fields (NOT the full transcript)
+        parts = []
+        if isinstance(sdoc, dict):
+            if sdoc.get("summary"): parts.append(str(sdoc["summary"]))
+            for k in ("key_points","topics","people","organizations","places"):
+                v = sdoc.get(k)
+                if isinstance(v, list) and v:
+                    parts.append(f"{k}: " + ", ".join(str(x) for x in v))
+        summary_ctx = "".join(parts).strip() or f"Summary present but minimal: {out_summary.name}"
+
+        prompt = TASKS_PROMPT_PREFIX + summary_ctx + PROMPT_END
         if dry_run:
-            log.info("DRY-RUN would create tasks for %s", path)
+            log.info("DRY-RUN would create tasks for %s from summary context", path)
             return
         start = time.time()
         try:
@@ -453,7 +602,7 @@ def process_transcript(path: Path, client: OllamaClient, model: str, opts: Dict[
             state["consec_fail"] = 0
         except Exception as e:
             state["consec_fail"] += 1
-            log.error("Task extraction failed for %s: %s", stem, e)
+            log.error("Task extraction (from summary) failed for %s: %s", stem, e)
             return
         finally:
             state["last_duration"] = max(0.0, time.time() - start)
@@ -474,19 +623,15 @@ def process_transcript(path: Path, client: OllamaClient, model: str, opts: Dict[
                 "generated_by_model": model,
                 "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "schema": "tasks.sidecar.v1",
+                "derived_from": str(out_summary)
             }
         }
         tmp = Path(str(out_tasks) + ".tmp")
         tmp.write_text(json.dumps(task_doc, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(out_tasks)
-        log.info("Wrote tasks %s (summary existed)", out_tasks)
+        log.info("Wrote tasks %s (from summary context)", out_tasks)
 
-        # auto-throttle
-        base = 0.25 * state["last_duration"]
-        penalty = 0.4 * state["consec_fail"]
-        sleep_sec = min(state["sleep_max"], max(state["sleep_min"], base + penalty)) if state["auto_throttle"] else state["sleep_min"]
-        if sleep_sec > 0:
-            time.sleep(sleep_sec)
+        _auto_sleep(state, True, state["last_duration"])
         return
 
     # Build transcript text for new summary + tasks
@@ -573,7 +718,7 @@ def process_transcript(path: Path, client: OllamaClient, model: str, opts: Dict[
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", required=True, help="Root directory to scan")
+    ap.add_argument("--roots", nargs="+", required=True, help="Root directories to scan (recursive)")
     ap.add_argument("--model", default=os.getenv("OLLAMA_MODEL", "gemma3:4b"))
     ap.add_argument("--ollama-host", default=os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"))
     ap.add_argument("--overwrite", action="store_true")
@@ -584,10 +729,10 @@ def main():
     ap.add_argument("--ctx", type=int, default=1536, help="Ollama num_ctx")
     ap.add_argument("--predict", type=int, default=512, help="Ollama num_predict")
     ap.add_argument("--prompt-chars", type=int, default=100_000, help="Max transcript characters to send")
+    ap.add_argument("--limit", type=int, default=0, help="Process at most N stems (0 = no limit)")
     args = ap.parse_args()
 
     client = OllamaClient(args.ollama_host)
-
     opts = {"num_ctx": args.ctx, "num_predict": args.predict, "temperature": 0.2}
     state = {
         "auto_throttle": args.auto_throttle,
@@ -598,59 +743,28 @@ def main():
         "consec_fail": 0,
     }
 
-    total = 0
-    for dirpath, _, files in os.walk(args.root):
-        for f in files:
-            stem = _detect_stem(Path(f))
-            if not stem:
-                continue
-            for pat in TRANSCRIPT_PATTERNS:
-                cand = Path(dirpath) / pat.format(stem=stem)
-                if cand.exists():
-                    process_transcript(cand, client, args.model, opts, state, overwrite=args.overwrite, dry_run=args.dry_run)
-                    total += 1
-                    break
-    log.info("Completed sequentially. Files checked: %d", total)
+    roots = [Path(r).expanduser().resolve() for r in args.roots]
+    roots = [r for r in roots if r.exists()]
+    if not roots:
+        log.error("No valid roots provided.")
+        return
 
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--root", required=True, help="Root directory to scan")
-    ap.add_argument("--model", default=os.getenv("OLLAMA_MODEL", "gemma3:4b"))
-    ap.add_argument("--ollama-host", default=os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"))
-    ap.add_argument("--overwrite", action="store_true")
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--auto-throttle", action="store_true", help="Adapt sleep based on generation time and failures")
-    ap.add_argument("--sleep-min", type=float, default=0.1)
-    ap.add_argument("--sleep-max", type=float, default=2.0)
-    ap.add_argument("--ctx", type=int, default=1536, help="Ollama num_ctx")
-    ap.add_argument("--predict", type=int, default=512, help="Ollama num_predict")
-    ap.add_argument("--prompt-chars", type=int, default=100_000, help="Max transcript characters to send")
-    args = ap.parse_args()
-
-    client = OllamaClient(args.ollama_host)
-
-    opts = {"num_ctx": args.ctx, "num_predict": args.predict, "temperature": 0.2}
-    state = {
-        "auto_throttle": args.auto_throttle,
-        "sleep_min": args.sleep_min,
-        "sleep_max": args.sleep_max,
-        "prompt_chars": args.prompt_chars,
-        "last_duration": 0.0,
-        "consec_fail": 0,
-    }
+    stems = _discover_stems(roots)
+    log.info("Found %d stem groups", len(stems))
 
     total = 0
-    for dirpath, _, files in os.walk(args.root):
-        for f in files:
-            stem = _detect_stem(Path(f))
-            if not stem:
-                continue
-            for pat in TRANSCRIPT_PATTERNS:
-                cand = Path(dirpath) / pat.format(stem=stem)
-                if cand.exists():
-                    process_transcript(cand, client, args.model, opts, state, overwrite=args.overwrite, dry_run=args.dry_run)
-                    total += 1
-                    break
-    log.info("Completed sequentially. Files checked: %d", total)
+    ok = 0
+    for dirpath, stem, files_for_stem in stems:
+        if args.limit and total >= args.limit:
+            break
+        total += 1
+        best = _choose_best_path(dirpath, stem, files_for_stem)
+        if not best:
+            continue
+        process_transcript(best, client, args.model, opts, state, overwrite=args.overwrite, dry_run=args.dry_run)
+        ok += 1
+
+    log.info("Completed sequentially. stems=%d processed=%d", total, ok)
 
 if __name__ == "__main__":
     main()
