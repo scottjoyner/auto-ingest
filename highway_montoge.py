@@ -663,3 +663,39 @@ def main() -> int:
 if __name__ == "__main__":
     import sys
     sys.exit(main())
+
+"""
+# 1) Highway traffic plan (favor heavy traffic), write heatmaps:
+python highway_montage.py \
+  plan-highway \
+  --bases /mnt/8TB_2025/fileserver/dashcam \
+  --min-mph 55 --max-mph 120 \
+  --limit 500 \
+  --pre 1.0 --post 2.0 --min-gap 3.5 \
+  --max-scenes 20 \
+  --artifacts-dir ./out/heatmaps \
+  --plan ./out/plan_highway.json
+
+# 2) Similar-action plan from a seed frame, then mph filter:
+python highway_montage.py \
+  plan-similar \
+  --frame-id 8fd2b0e9-... \
+  --min-mph 45 --max-mph 135 \
+  --topk 300 \
+  --pre 1.2 --post 2.4 --min-gap 4.0 \
+  --max-scenes 24 \
+  --artifacts-dir ./out/heatmaps_sim \
+  --plan ./out/plan_similar.json
+
+# 3) Render montage (uses speed_time.png as a 1.0s intro bumper):
+python highway_montage.py \
+  render \
+  --plan ./out/plan_highway.json \
+  --out ./out/highway_montage.mp4 \
+  --width 1080 --height 1920 \
+  --bitrate 10M \
+  --heatmap-key speed_time \
+  --heatmap-secs 1.2 \
+  --max-scenes 14 --max-shots 60
+
+"""
