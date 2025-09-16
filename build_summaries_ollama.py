@@ -1,179 +1,88 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Build JSON summaries (sidecars) for existing audio transcription files using Ollama (llama3:latest by default).
+Build JSON summary sidecars for transcripts using a single local Ollama instance.
 
-- Scans one or more roots for transcripts (prefers *_medium_transcription.txt then *_transcription.txt then *_transcription.csv)
-- For each found transcript, asks the LLM for a STRICT-JSON summary payload and writes <stem>_summary.json alongside the transcript
-- Never touches Neo4j; this is offline prep for later ingestion
-- Safe to re-run: skips items that already have a valid _summary.json unless --overwrite
+Key features for low-memory stability (mlx / MacBook Air):
+- SEQUENTIAL ONLY (one request at a time)
+- AUTO-THROTTLE (pacing derived from last gen duration + failures)
+- Memory-friendly defaults for small models (e.g., gemma3:4b)
+- Robust JSON extraction and normalization (no more `"version"` KeyError)
+- Idempotent: skips existing valid <stem>_summary.json unless --overwrite
+- Prefers higher-quality transcript files:
+    1) *_medium_transcription.txt
+    2) *_transcription.txt
+    3) *_transcription.csv (concats text columns)
 
-Tested on macOS (Apple Silicon) with Ollama running locally.
+Outputs (alongside transcript):
+  <stem>_summary.json
+  <stem>_summary.bad.txt   (if model output wasn’t valid JSON)
 
-Usage examples:
-  python build_summaries_ollama.py --roots /Volumes/Untitled/audio --model llama3:latest --max-concurrent 2
-  OLLAMA_HOST=http://127.0.0.1:11434 python build_summaries_ollama.py --roots /mnt/8TB_2025/fileserver/audio --dry-run
-
-Environment:
-  OLLAMA_HOST   Default http://127.0.0.1:11434
-  OLLAMA_MODEL  Default "llama3:latest" (can be overridden by --model)
+Usage example:
+  python build_summaries_ollama.py \
+    --roots /Volumes/Untitled/audio \
+    --model gemma3:4b \
+    --auto-throttle \
+    --ctx 1536 --predict 512 --prompt-chars 100000
 """
 
-import os, re, sys, csv, json, time, math, logging, argparse, pathlib, concurrent.futures
-from typing import Optional, Tuple, Dict, Any, List
+import os, re, csv, json, time, logging, argparse
 from pathlib import Path
 from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
 import http.client
 from urllib.parse import urlparse
 
-# ----------------------------------
+# ----------------------------
 # Logging
-# ----------------------------------
+# ----------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("summaries")
 
-# ----------------------------------
-# CLI
-# ----------------------------------
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Build JSON summaries from transcripts using Ollama.")
-    p.add_argument("--roots", nargs="+", required=True, help="Root directory(ies) to scan (recursive)")
-    p.add_argument("--model", default=os.getenv("OLLAMA_MODEL", "llama3:latest"), help="Ollama model name")
-    p.add_argument("--ollama-host", default=os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"), help="Ollama base URL")
-    p.add_argument("--max-concurrent", type=int, default=max(1, os.cpu_count() or 1)//2, help="Parallel workers")
-    p.add_argument("--overwrite", action="store_true", help="Recreate existing _summary.json files")
-    p.add_argument("--dry-run", action="store_true", help="Print what would happen, do not call the model or write files")
-    p.add_argument("--limit", type=int, default=0, help="Process at most N items (0 = no limit)")
-    return p.parse_args()
-
-# ----------------------------------
-# File helpers
-# ----------------------------------
-
-TRANSCRIPT_TXT_PATTERNS = [
-    "{stem}_medium_transcription.txt",
-    "{stem}_transcription.txt",
-]
-TRANSCRIPT_CSV_PATTERNS = [
-    "{stem}_transcription.csv",
-]
-
+# ----------------------------
+# Patterns & Limits
+# ----------------------------
+# Accepted stems:
+#   2024_1229_194226
+#   20250827061344
+#   20250405212855_000029  (suffix allowed)
 STEM_RE = re.compile(r"^(\d{4}_\d{4}_\d{6}|\d{12,})(?:_[0-9]{6})?", re.ASCII)
 
-@dataclass
-class Transcript:
-    stem: str
-    text: str
-    source_path: Path
-
-
-def _detect_stem(p: Path) -> Optional[str]:
-    m = STEM_RE.match(p.stem)
-    return m.group(0) if m else None
-
-
-def _read_text_file(p: Path) -> Optional[str]:
-    try:
-        return p.read_text(encoding="utf-8", errors="replace").strip()
-    except Exception as e:
-        log.warning("Failed reading %s: %s", p, e)
-        return None
-
-
-def _read_csv_concat_text(p: Path) -> Optional[str]:
-    try:
-        rows: List[str] = []
-        with p.open("r", encoding="utf-8", newline="") as f:
-            rdr = csv.DictReader(f)
-            # Heuristics: prefer 'text' column; else join all stringy columns
-            if rdr.fieldnames is None:
-                return None
-            prefer = None
-            for name in rdr.fieldnames:
-                if name.lower() in ("text", "utterance", "transcript", "content"):
-                    prefer = name
-                    break
-            for row in rdr:
-                if prefer and row.get(prefer):
-                    rows.append(str(row[prefer]))
-                else:
-                    # Fallback: join non-empty values
-                    vals = [str(v) for k,v in row.items() if isinstance(v, str) and v.strip()]
-                    if vals:
-                        rows.append(" ".join(vals))
-        text = "\n".join(rows).strip()
-        return text or None
-    except Exception as e:
-        log.warning("Failed reading CSV %s: %s", p, e)
-        return None
-
-
-def find_best_transcript_for_stem(dirpath: Path, stem: str) -> Optional[Transcript]:
-    # Try text patterns first
-    for pat in TRANSCRIPT_TXT_PATTERNS:
-        cand = dirpath / pat.format(stem=stem)
-        if cand.exists():
-            txt = _read_text_file(cand)
-            if txt:
-                return Transcript(stem=stem, text=txt, source_path=cand)
-    # Then CSV patterns
-    for pat in TRANSCRIPT_CSV_PATTERNS:
-        cand = dirpath / pat.format(stem=stem)
-        if cand.exists():
-            txt = _read_csv_concat_text(cand)
-            if txt:
-                return Transcript(stem=stem, text=txt, source_path=cand)
-    return None
-
-
-def iter_candidate_stems(root: Path) -> List[Tuple[str, Path]]:
-    """Return list of (stem, dirpath) discovered under root.
-    Strategy: look for known transcript filename patterns and extract stems.
-    """
-    out: List[Tuple[str, Path]] = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dp = Path(dirpath)
-        for name in filenames:
-            if name.endswith("_transcription.txt") or name.endswith("_transcription.csv"):
-                stem = _detect_stem(Path(name))
-                if stem:
-                    out.append((stem, dp))
-    # Deduplicate while preserving order
-    seen = set()
-    uniq: List[Tuple[str, Path]] = []
-    for stem, dp in out:
-        key = (stem, str(dp))
-        if key not in seen:
-            seen.add(key)
-            uniq.append((stem, dp))
-    return uniq
-
-# ----------------------------------
-# Ollama client (no third-party deps)
-# ----------------------------------
-
+TRANSCRIPT_PATTERNS = [
+    "{stem}_large-v3_transcription.txt",
+    "{stem}_BC_medium_transcription.txt",
+    "{stem}_medium_transcription.txt",
+    "{stem}_BC_transcription.csv",
+    "{stem}_transcription.txt",
+    "{stem}_transcription.csv",
+    "{stem}.json",
+    "{stem}.txt",
+    "{stem}.vtt"
+]
+# ----------------------------
+# Ollama client (SEQUENTIAL)
+# ----------------------------
 class OllamaClient:
+    """Minimal HTTP client for Ollama /api/generate; single instance / sequential calls."""
     def __init__(self, base_url: str):
         u = urlparse(base_url)
         if not u.scheme.startswith("http"):
-            raise ValueError("OLLAMA_HOST must be http(s) URL")
+            raise ValueError("OLLAMA_HOST must be http(s) URL, e.g. http://127.0.0.1:11434")
         self._is_https = (u.scheme == "https")
         self._host = u.hostname or "127.0.0.1"
         self._port = u.port or (443 if self._is_https else 11434)
         self._base_path = u.path.rstrip("/")
 
-    def generate(self, model: str, prompt: str, options: Optional[Dict[str, Any]] = None, retries: int = 3, timeout: float = 120.0) -> str:
-        payload = {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-        }
+    def generate(self, model: str, prompt: str,
+                 retries: int = 3, timeout: float = 180.0,
+                 options: Dict[str, Any] | None = None) -> str:
+        payload = {"model": model, "prompt": prompt, "stream": False}
         if options:
             payload["options"] = options
         body = json.dumps(payload).encode("utf-8")
         path = f"{self._base_path}/api/generate" if self._base_path else "/api/generate"
-        for attempt in range(1, retries+1):
+
+        for attempt in range(1, retries + 1):
             try:
                 conn_cls = http.client.HTTPSConnection if self._is_https else http.client.HTTPConnection
                 conn = conn_cls(self._host, self._port, timeout=timeout)
@@ -188,167 +97,391 @@ class OllamaClient:
                     raise RuntimeError("No 'response' in Ollama output")
                 return out
             except Exception as e:
-                log.warning("Ollama call failed (attempt %d/%d): %s", attempt, retries, e)
-                time.sleep(min(2**attempt, 10))
+                log.warning("Ollama call failed (%d/%d): %s", attempt, retries, e)
+                time.sleep(min(2 ** attempt, 8))
         raise RuntimeError("Ollama call failed after retries")
 
-# ----------------------------------
-# Prompt
-# ----------------------------------
-
+# ----------------------------
+# Prompt (NO str.format on schema-containing string)
+# ----------------------------
 SUMMARY_SCHEMA_HINT = {
     "version": "1.0",
-    "language": "<ISO 639-1 two-letter, e.g., en>",
-    "summary": "<5-9 sentence natural-language summary of the whole transcript>",
-    "key_points": ["<bullet 1>", "<bullet 2>", "..."] ,
-    "topics": ["<topic-1>", "<topic-2>", "..."],
-    "people": ["<full name if present>", "..."],
+    "language": "<ISO 639-1, e.g., en>",
+    "summary": "<5-9 sentence summary>",
+    "key_points": ["<bullet 1>", "<bullet 2>"],
+    "topics": ["<topic-1>", "<topic-2>"],
+    "people": ["<name>", "..."],
     "organizations": ["<org>", "..."],
     "places": ["<place>", "..."],
-    "quality_notes": "<any issues noticed in transcript: mishears, noise, music, language mix, etc.>",
+    "quality_notes": "<noticed noise/mishears/language mix/etc.>",
 }
 
-PROMPT_TEMPLATE = (
-    "You are a precise summarization model. Given a transcript, output STRICT JSON only, no prose, matching this schema: "
-    + json.dumps(SUMMARY_SCHEMA_HINT, ensure_ascii=False)
-    + "\nRules:\n"
-      "- Output ONLY JSON, no markdown, no preface.\n"
-      "- Keep arrays deduplicated.\n"
-      "- If a field is unknown, use an empty array or empty string accordingly.\n"
-      "- Language should reflect the transcript language.\n"
-      "\nTranscript begins:\n\n{transcript}\n\nEND."
+PROMPT_SCHEMA = (
+    "You are a precise summarizer. Provided raw data files of arbitrary content, transcriptions, diraitizations. OUTPUT STRICT JSON ONLY (no markdown/code fences/prose), "
+    "matching this schema exactly: " + json.dumps(SUMMARY_SCHEMA_HINT, ensure_ascii=False) + "\n"
+    "Rules:\n"
+    "- Output ONLY JSON (no preface/trailing text).\n"
+    "- Use empty arrays/strings when unknown.\n"
+    "- Deduplicate arrays.\n"
+    "- Keep it concise and factual.\n\n"
+    "- No mentions the file strucutre, format in the summary\n"
+    "Transcript begins:\n\n"
 )
+PROMPT_END = "\n\nEND."
 
-# ----------------------------------
-# Main worker
-# ----------------------------------
-
+# ----------------------------
+# Types & Helpers
+# ----------------------------
 @dataclass
-class Task:
+class Transcript:
     stem: str
-    dirpath: Path
-    transcript: Transcript
-    out_path: Path
+    text: str
+    source_path: Path
 
+def _detect_stem(p: Path) -> Optional[str]:
+    m = STEM_RE.match(p.stem)
+    return m.group(0) if m else None
 
-def make_task(dirpath: Path, stem: str, overwrite: bool) -> Optional[Task]:
-    tr = find_best_transcript_for_stem(dirpath, stem)
-    if not tr:
-        return None
-    out_path = dirpath / f"{stem}_summary.json"
-    if out_path.exists() and not overwrite:
-        # quick validity check (is it JSON?)
-        try:
-            json.loads(out_path.read_text(encoding="utf-8"))
-            return None  # skip
-        except Exception:
-            pass  # will rewrite
-    return Task(stem=stem, dirpath=dirpath, transcript=tr, out_path=out_path)
-
-
-def process_task(task: Task, client: OllamaClient, model: str, dry_run: bool) -> Tuple[str, str]:
-    stem = task.stem
-    src = task.transcript.source_path
-    dst = task.out_path
-    # Trim very long transcripts to keep prompt under control, but still useful
-    transcript_text = task.transcript.text.strip()
-    if len(transcript_text) > 120_000:
-        log.debug("%s transcript too long (%d chars), truncating head+tail", stem, len(transcript_text))
-        head = transcript_text[:80_000]
-        tail = transcript_text[-20_000:]
-        transcript_text = head + "\n...\n" + tail
-
-    prompt = PROMPT_TEMPLATE.format(transcript=transcript_text)
-
-    if dry_run:
-        log.info("DRY-RUN would summarize: %s -> %s", src, dst)
-        return (stem, "DRY-RUN")
-
-    raw = client.generate(model=model, prompt=prompt, options={"temperature": 0.2})
-
-    # Some models occasionally wrap JSON in code fences; try to strip safely
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`\n ")
-        if cleaned.lower().startswith("json"):
-            cleaned = cleaned[4:].lstrip("\n")
-
+def _read_text_file(p: Path) -> Optional[str]:
     try:
-        payload = json.loads(cleaned)
-    except Exception:
-        # As a fallback, try to extract the first {...} block
-        m = re.search(r"\{.*\}\s*$", cleaned, re.DOTALL)
-        if not m:
-            raise
-        payload = json.loads(m.group(0))
+        return p.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception as e:
+        log.warning("Failed reading %s: %s", p, e)
+        return None
 
-    # Add provenance
-    payload["_meta"] = {
-        "source_transcript": str(src),
-        "generated_by_model": model,
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "schema": "summary.sidecar.v1",
-    }
+def _read_csv_concat_text(p: Path) -> Optional[str]:
+    try:
+        rows: List[str] = []
+        with p.open("r", encoding="utf-8", newline="") as f:
+            rdr = csv.DictReader(f)
+            if not rdr.fieldnames:
+                return None
+            prefer = None
+            for name in rdr.fieldnames:
+                if name and name.lower() in ("text", "utterance", "transcript", "content"):
+                    prefer = name
+                    break
+            for row in rdr:
+                if prefer and (prefer in row) and row[prefer]:
+                    rows.append(str(row[prefer]))
+                else:
+                    vals = [str(v) for v in row.values() if isinstance(v, str) and v.strip()]
+                    if vals:
+                        rows.append(" ".join(vals))
+        text = "\n".join(rows).strip()
+        return text or None
+    except Exception as e:
+        log.warning("Failed reading CSV %s: %s", p, e)
+        return None
 
-    tmp = Path(str(dst) + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(dst)
-    return (stem, str(dst))
+def _choose_best_transcript(dirpath: Path, stem: str) -> Optional[Transcript]:
+    for pat in TRANSCRIPT_PATTERNS:
+        cand = dirpath / pat.format(stem=stem)
+        try:
+            if not cand.exists():
+                continue
+        except Exception:
+            continue
+        if cand.suffix.lower() == ".csv":
+            txt = _read_csv_concat_text(cand)
+        else:
+            txt = _read_text_file(cand)
+        if txt:
+            return Transcript(stem=stem, text=txt, source_path=cand)
+    return None
 
-# ----------------------------------
-# Entrypoint
-# ----------------------------------
+def _iter_unique_stems(roots: List[Path]) -> List[Tuple[str, Path]]:
+    """Scan roots for *_transcription.(txt|csv), return unique (stem, dirpath) pairs (per directory)."""
+    found: List[Tuple[str, Path]] = []
+    for root in roots:
+        for dirpath, _, files in os.walk(root):
+            dp = Path(dirpath)
+            for name in files:
+                if name.endswith("_transcription.txt") or name.endswith("_transcription.csv"):
+                    stem = _detect_stem(Path(name))
+                    if stem:
+                        found.append((stem, dp))
+    # dedupe while preserving order
+    seen = set()
+    uniq: List[Tuple[str, Path]] = []
+    for stem, dp in found:
+        key = (stem, str(dp))
+        if key not in seen:
+            seen.add(key)
+            uniq.append((stem, dp))
+    return uniq
+
+def _extract_first_json_object(s: str) -> Optional[str]:
+    """Extract the first top-level balanced {...} block, tolerating pre/post junk or code fences."""
+    t = s.strip()
+    if t.startswith("```"):
+        t = t.strip("`\n ")
+        if t.lower().startswith("json"):
+            t = t[4:].lstrip("\n")
+
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(t):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        else:
+            if ch == '"':
+                in_str = True
+                continue
+            if ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                if depth > 0:
+                    depth -= 1
+                    if depth == 0 and start != -1:
+                        return t[start:i+1]
+    return None
+
+def _as_list_of_strings(x: Any) -> List[str]:
+    out: List[str] = []
+    if isinstance(x, list):
+        for v in x:
+            if isinstance(v, str):
+                v2 = v.strip()
+                if v2:
+                    out.append(v2)
+    # dedupe preserving order
+    return list(dict.fromkeys(out))
+
+def _normalize_payload(any_payload: Any) -> Dict[str, Any]:
+    """Coerce arbitrary model output into our dict schema with sane defaults."""
+    if isinstance(any_payload, list):
+        for el in any_payload:
+            if isinstance(el, dict):
+                any_payload = el
+                break
+        else:
+            any_payload = {"summary": " ".join(str(x) for x in any_payload)}
+    elif isinstance(any_payload, str):
+        any_payload = {"summary": any_payload}
+
+    if not isinstance(any_payload, dict):
+        any_payload = {}
+
+    any_payload.setdefault("version", "1.0")
+    any_payload["language"] = str(any_payload.get("language") or "")
+    any_payload["summary"] = str(any_payload.get("summary") or "")
+    any_payload["key_points"] = _as_list_of_strings(any_payload.get("key_points"))
+    any_payload["topics"] = _as_list_of_strings(any_payload.get("topics"))
+    any_payload["people"] = _as_list_of_strings(any_payload.get("people"))
+    any_payload["organizations"] = _as_list_of_strings(any_payload.get("organizations"))
+    any_payload["places"] = _as_list_of_strings(any_payload.get("places"))
+    any_payload["quality_notes"] = str(any_payload.get("quality_notes") or "")
+    return any_payload
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    head = int(limit * 0.70)
+    tail = int(limit * 0.25)
+    return text[:head] + "\n...\n" + text[-tail:]
+
+# ----------------------------
+# Core processing (sequential + auto-throttle)
+# ----------------------------
+def summarize_one(transcript: Transcript, client: OllamaClient, model: str,
+                  overwrite: bool,
+                  options: Dict[str, Any],
+                  prompt_chars: int,
+                  throttle_state: Dict[str, Any]) -> bool:
+    stem = transcript.stem
+    src = transcript.source_path
+    out_path = src.parent / f"{stem}_summary.json"
+    bad_path = src.parent / f"{stem}_summary.bad.txt"
+
+    # Skip if valid summary exists unless overwrite
+    if out_path.exists() and not overwrite:
+        try:
+            existing = json.loads(out_path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict) and "version" in existing:
+                log.debug("Skip existing valid summary: %s", out_path)
+                # Still apply pacing to be gentle when skipping many
+                _apply_sleep(throttle_state, success=True, last_duration=0.02)
+                return True
+        except Exception:
+            pass  # will rewrite if corrupt
+
+    text = _truncate(transcript.text.strip(), prompt_chars)
+    # Build prompt WITHOUT str.format on schema-containing string
+    prompt = PROMPT_SCHEMA + text + PROMPT_END
+
+    # Sequential single call + timing
+    start = time.time()
+    try:
+        raw = client.generate(model=model, prompt=prompt, timeout=180.0, options=options)
+        cleaned = raw.strip()
+
+        # Parse JSON
+        obj_text = _extract_first_json_object(cleaned)
+        if obj_text is None:
+            try:
+                payload = json.loads(cleaned)
+            except Exception:
+                bad_path.write_text(cleaned, encoding="utf-8")
+                log.error("JSON not found for %s. Saved raw to %s", stem, bad_path)
+                _apply_sleep(throttle_state, success=False, last_duration=time.time() - start)
+                return False
+        else:
+            try:
+                payload = json.loads(obj_text)
+            except Exception:
+                try:
+                    payload = json.loads(cleaned)
+                except Exception:
+                    bad_path.write_text(cleaned, encoding="utf-8")
+                    log.error("JSON parse error for %s. Saved raw to %s", stem, bad_path)
+                    _apply_sleep(throttle_state, success=False, last_duration=time.time() - start)
+                    return False
+
+        payload = _normalize_payload(payload)
+        payload["_meta"] = {
+            "source_transcript": str(src),
+            "generated_by_model": model,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "schema": "summary.sidecar.v1",
+        }
+
+        tmp = Path(str(out_path) + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(out_path)
+        log.info("Wrote summary %s", out_path)
+
+        _apply_sleep(throttle_state, success=True, last_duration=time.time() - start)
+        return True
+
+    except Exception as e:
+        log.error("Ollama error on %s: %s", stem, e)
+        _apply_sleep(throttle_state, success=False, last_duration=time.time() - start)
+        return False
+
+def _apply_sleep(throttle_state: Dict[str, Any], success: bool, last_duration: float) -> None:
+    """
+    Auto-throttle: pace based on last wall-clock duration + consecutive failures.
+    sleep = clamp( max(min_sleep, 0.25 * last_duration + 0.4 * consec_fail), max_sleep )
+    """
+    if success:
+        throttle_state["consec_fail"] = 0
+    else:
+        throttle_state["consec_fail"] += 1
+
+    base = 0.25 * max(0.0, last_duration)
+    penalty = 0.4 * throttle_state["consec_fail"]
+    sleep_sec = max(throttle_state["sleep_min"], base + penalty)
+    sleep_sec = min(sleep_sec, throttle_state["sleep_max"])
+    if throttle_state["auto_throttle"] or throttle_state["force_sleep"]:
+        time.sleep(sleep_sec)
+
+# ----------------------------
+# CLI / Entrypoint
+# ----------------------------
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description="Build JSON summaries (sidecars) for transcripts using local Ollama.")
+    ap.add_argument("--roots", nargs="+", help="One or more root directories to scan (recursive)")
+    ap.add_argument("--root", help="(deprecated) single root directory; kept for compatibility")
+    ap.add_argument("--model", default=os.getenv("OLLAMA_MODEL", "gemma3:4b"), help="Ollama model name")
+    ap.add_argument("--ollama-host", default=os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"), help="Ollama base URL")
+    ap.add_argument("--overwrite", action="store_true", help="Re-generate even if _summary.json exists and is valid")
+    ap.add_argument("--dry-run", action="store_true", help="Plan only; do not call model or write files")
+
+    # Auto-throttle & memory knobs
+    ap.add_argument("--auto-throttle", action="store_true", help="Adapt pacing from last gen time and failures")
+    ap.add_argument("--sleep-min", type=float, default=0.1, help="Minimum sleep between calls")
+    ap.add_argument("--sleep-max", type=float, default=2.0, help="Maximum sleep between calls")
+    ap.add_argument("--force-sleep", action="store_true", help="Always sleep using the computed schedule (even on skips)")
+
+    ap.add_argument("--ctx", type=int, default=1536, help="Ollama num_ctx (prompt context)")
+    ap.add_argument("--predict", type=int, default=512, help="Ollama num_predict (max new tokens)")
+    ap.add_argument("--temperature", type=float, default=0.2, help="Ollama temperature")
+    ap.add_argument("--prompt-chars", type=int, default=120_000, help="Max transcript chars to send in prompt")
+
+    ap.add_argument("--limit", type=int, default=0, help="Process at most N items (0 = no limit)")
+    return ap.parse_args()
 
 def main() -> None:
     args = parse_args()
+
+    # Resolve roots
+    roots: List[Path] = []
+    if args.roots:
+        roots = [Path(r).expanduser().resolve() for r in args.roots]
+    elif args.root:
+        roots = [Path(args.root).expanduser().resolve()]
+    else:
+        raise SystemExit("Provide --roots <dir...> or --root <dir>")
+
+    roots = [r for r in roots if r.exists()]
+    if not roots:
+        log.error("No valid roots.")
+        return
+
     client = OllamaClient(args.ollama_host)
-    model = args.model
 
-    # Discover work
-    pairs: List[Tuple[str, Path]] = []
-    for r in args.roots:
-        root = Path(r).expanduser().resolve()
-        if not root.exists():
-            log.warning("Root does not exist: %s", root)
-            continue
-        pairs.extend(iter_candidate_stems(root))
+    # Memory-friendly defaults (esp. for gemma3:4b)
+    ollama_opts = {
+        "num_ctx": int(args.ctx),
+        "num_predict": int(args.predict),
+        "temperature": float(args.temperature),
+        # You can also add:
+        # "repeat_penalty": 1.1,
+        # "top_p": 0.9,
+    }
 
+    # Auto-throttle state
+    throttle_state = {
+        "consec_fail": 0,
+        "sleep_min": max(0.0, float(args.sleep_min)),
+        "sleep_max": max(float(args.sleep_min), float(args.sleep_max)),
+        "auto_throttle": bool(args.auto_throttle),
+        "force_sleep": bool(args.force_sleep),
+    }
+
+    pairs = _iter_unique_stems(roots)
     if not pairs:
-        log.info("No transcripts found under roots: %s", ", ".join(args.roots))
+        log.info("No transcripts found under: %s", ", ".join(str(x) for x in roots))
         return
 
-    # Build tasks
-    tasks: List[Task] = []
-    for stem, dp in pairs:
-        t = make_task(dp, stem, args.overwrite)
-        if t:
-            tasks.append(t)
-
-    if args.limit and len(tasks) > args.limit:
-        tasks = tasks[:args.limit]
-
-    if not tasks:
-        log.info("Nothing to do (all summaries exist or no transcripts found).")
-        return
-
-    log.info("Work items: %d (model=%s, workers=%d, overwrite=%s)", len(tasks), model, args.max_concurrent, args.overwrite)
-
-    # Parallel execution
+    # Sequential deterministic loop
+    total = 0
     ok = 0
-    errs = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.max_concurrent)) as ex:
-        futs = [ex.submit(process_task, t, client, model, args.dry_run) for t in tasks]
-        for f in concurrent.futures.as_completed(futs):
-            try:
-                stem, where = f.result()
-                ok += 1
-                log.info("Done %-20s -> %s", stem, where)
-            except Exception as e:
-                errs += 1
-                log.error("Failed on a task: %s", e)
+    for stem, dp in pairs:
+        if args.limit and total >= args.limit:
+            break
+        tr = _choose_best_transcript(dp, stem)
+        if not tr:
+            continue
+        total += 1
+        if args.dry_run:
+            # still pace gently when dry-running
+            _apply_sleep(throttle_state, success=True, last_duration=0.05)
+            continue
+        res = summarize_one(
+            transcript=tr,
+            client=client,
+            model=args.model,
+            overwrite=args.overwrite,
+            options=ollama_opts,
+            prompt_chars=int(args.prompt_chars),
+            throttle_state=throttle_state,
+        )
+        if res:
+            ok += 1
 
-    log.info("Completed. ok=%d, errors=%d", ok, errs)
-
+    log.info("Completed. items=%d ok=%d errors=%d", total, ok, total - ok)
 
 if __name__ == "__main__":
     main()
