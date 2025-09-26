@@ -23,3 +23,6 @@ CALL db.index.vector.queryNodes('DashcamSceneIndex', 50, $probeVec) YIELD node, 
 WHERE node.level = 'second'
 RETURN node.key, node.view, node.t0 AS sec, node.lat, node.lon, node.mph, score
 ORDER BY score DESC LIMIT 20;
+
+
+python organize_by_timestamp.py -i /mnt/8TB_2025/fileserver/dashcam/audio -o /mnt/8TB_2025/fileserver/dashcam -n -r
