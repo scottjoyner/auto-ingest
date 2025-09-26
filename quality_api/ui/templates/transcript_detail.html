@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}Transcript {{ transcript.id }} · Quality Toolkit{% endblock %}
+
+{% block content %}
+<article class="card transcript-header">
+  <header>
+    <h2>Transcript {{ transcript.key or transcript.id }}</h2>
+    {% if transcript.started_at %}
+      <p class="muted">Started at {{ transcript.started_at }}</p>
+    {% endif %}
+  </header>
+  <div class="transcript-meta">
+    {% if transcript.media_path %}
+      <a class="link" href="{{ url_for('quality.media', path=transcript.media_path) }}" target="_blank" rel="noopener">Listen to source audio</a>
+    {% endif %}
+    {% if transcript.rttm_path %}
+      <span class="muted">RTTM: {{ transcript.rttm_path }}</span>
+    {% endif %}
+  </div>
+</article>
+
+{% if transcript.location and transcript.location.is_valid %}
+  <section class="card">
+    <h3>Location context</h3>
+    <div id="transcript-map" class="map"></div>
+    <p class="muted">Source: {{ transcript.location.source or 'Transcription metadata' }}</p>
+  </section>
+{% endif %}
+
+<section class="card">
+  <header class="section-header">
+    <h3>Utterances</h3>
+    <p class="muted">Ordered chronologically, including speaker labels.</p>
+  </header>
+  <ol class="utterance-list">
+    {% for utterance in transcript.utterances %}
+      <li class="utterance-item">
+        <div class="utterance-timestamps">
+          <span>{{ '%.2f'|format(utterance.start or 0) }}s – {{ '%.2f'|format(utterance.end or 0) }}s</span>
+          {% if utterance.absolute_start is not none and utterance.absolute_end is not none %}
+            <span class="muted">abs {{ '%.2f'|format(utterance.absolute_start) }}s → {{ '%.2f'|format(utterance.absolute_end) }}s</span>
+          {% endif %}
+        </div>
+        <p class="utterance-text">{{ utterance.text }}</p>
+        {% if utterance.speakers %}
+          <ul class="speaker-tags">
+            {% for sp in utterance.speakers %}
+              <li>{{ sp.label or sp.id }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        {% if utterance.segment %}
+          <p class="muted">Segment {{ utterance.segment.idx }} ({{ utterance.segment.id }})</p>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ol>
+</section>
+{% endblock %}
+
+{% block scripts %}
+{% if transcript.location and transcript.location.is_valid %}
+<script>
+  (function() {
+    const location = {{ transcript.location|tojson }};
+    if (!location || location.latitude === null || location.longitude === null) {
+      return;
+    }
+    const map = L.map('transcript-map', {scrollWheelZoom: false}).setView([location.latitude, location.longitude], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+    const marker = L.marker([location.latitude, location.longitude]).addTo(map);
+    const label = location.label || 'Recording location';
+    marker.bindPopup(label).openPopup();
+  })();
+</script>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Transcript Quality Toolkit{% endblock %}</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha384-o9N1lSKqzZo4PMBVXrS5aXoaZySUdkGFUTkOcJCIZy9lEi5Vf3L7hIwrKyYV+3zD" crossorigin="">
+  <link rel="stylesheet" href="{{ url_for('quality.static', filename='css/app.css') }}">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <header class="page-header">
+    <h1><a href="{{ url_for('quality.index') }}">Transcript Quality Toolkit</a></h1>
+    <p class="tagline">Search, validate, and review transcriptions with spatial context.</p>
+  </header>
+  <main class="page-content">
+    {% block content %}{% endblock %}
+  </main>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha384-yAYCzmiEJeZVrDCTnhgypKekJy5o+1OtSWT8gJtIhXCTITVEWilR92pT9bkOuM54" crossorigin=""></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
