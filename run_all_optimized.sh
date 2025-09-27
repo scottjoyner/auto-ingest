@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-cd ~/git/video-automation || { echo "❌ Failed to cd into ~/git/video-automation"; exit 1; }
+cd ~/git/auto-ingest || { echo "❌ Failed to cd into ~/git/auto-ingest"; exit 1; }
 
 
 
@@ -48,10 +48,10 @@ echo "▶️ Speaker diarization (dashcam videos + standalone audio)"
 # ./.venv/bin/python3 ingest_transcriptions.py || echo "❌ Failed: ingest_transcriptions.py"
 
 echo "▶️ Ingest (transcripts + RTTM → Neo4j)"
-./.venv/bin/python3 ingest_transcriptsv5.py \
-  --batch-size 100 \
-  --transcript-emb-v2 || echo "❌ Failed: ingest_transcripts.py"
-
+# ./.venv/bin/python3 ingest_transcriptsv5.py \
+#   --batch-size 100 \
+#   --transcript-emb-v2 || echo "❌ Failed: ingest_transcripts.py"
+./run_ingest_all.sh || echo "❌ Failed: ingest_transcripts.py"
 
 echo "▶️ Ingest speakers_reconcile (transcripts + RTTM → Neo4j)"
 ./.venv/bin/python3 speakers_reconcile.py \
