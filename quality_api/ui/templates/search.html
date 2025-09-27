@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+
+{% block title %}Transcript Search · Quality Toolkit{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h2>Semantic transcript search</h2>
+  <form id="search-form">
+    <label for="query">Query</label>
+    <textarea id="query" name="query" rows="3" required>{{ initial_query or "" }}</textarea>
+    <div class="form-grid">
+      <label>
+        Top K
+        <input type="number" name="k" min="1" max="100" value="{{ initial_k or defaults.default_top_k }}">
+      </label>
+      <label>
+        Utterance pool
+        <input type="number" name="m" min="50" max="2000" value="{{ initial_m or defaults.default_pool_size }}">
+      </label>
+      <label>
+        Mode
+        <select name="mode">
+          <option value="both" {% if initial_mode == 'both' %}selected{% endif %}>Compare v1 &amp; v2</option>
+          <option value="v1" {% if initial_mode == 'v1' %}selected{% endif %}>v1 only</option>
+          <option value="v2" {% if initial_mode == 'v2' %}selected{% endif %}>v2 only</option>
+        </select>
+      </label>
+      <button type="submit" class="primary">Search</button>
+    </div>
+  </form>
+</section>
+
+<section id="results" class="results-grid" data-has-results="{{ 'true' if initial_results else 'false' }}">
+  {% if initial_results %}
+    {% for variant, hits in initial_results.items() %}
+      <article class="card">
+        <header class="result-header">
+          <h3>{{ variant|upper }}</h3>
+          <p class="muted">{{ hits|length }} hits</p>
+        </header>
+        {% if hits %}
+          <ol class="result-list">
+            {% for hit in hits %}
+              <li class="result-item">
+                <div class="result-meta">
+                  <span class="badge">{{ loop.index }}</span>
+                  <span class="mono">{{ hit.key or hit.id }}</span>
+                  <span class="muted">score {{ '%.4f'|format(hit.score or 0) }}</span>
+                </div>
+                {% if hit.best_utterance %}
+                  <p class="utterance-text">{{ hit.best_utterance.text }}</p>
+                  <p class="muted">{{ '%.2f'|format(hit.best_utterance.start or 0) }}s – {{ '%.2f'|format(hit.best_utterance.end or 0) }}s</p>
+                  {% if hit.best_utterance.speakers %}
+                    <ul class="speaker-tags">
+                      {% for sp in hit.best_utterance.speakers %}
+                        <li>{{ sp.label or sp.id }}</li>
+                      {% endfor %}
+                    </ul>
+                  {% endif %}
+                {% endif %}
+                <div class="result-actions">
+                  <a class="link" href="{{ url_for('quality.transcript_detail', transcription_id=hit.id) }}">Open transcript</a>
+                  {% if hit.media_path %}
+                    <a class="link" href="{{ url_for('quality.media', path=hit.media_path) }}" target="_blank" rel="noopener">Audio</a>
+                  {% endif %}
+                </div>
+                {% if hit.location and hit.location.is_valid %}
+                  <p class="muted">Location: {{ '%.4f'|format(hit.location.latitude) }}, {{ '%.4f'|format(hit.location.longitude) }}</p>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ol>
+        {% else %}
+          <p class="muted">No hits for this embedding variant.</p>
+        {% endif %}
+      </article>
+    {% endfor %}
+  {% else %}
+    <article class="card empty-state">
+      <p>Submit a query to explore your transcripts.</p>
+    </article>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('quality.static', filename='js/search.js') }}"></script>
+{% endblock %}
