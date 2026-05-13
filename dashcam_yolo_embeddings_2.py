@@ -1693,8 +1693,8 @@ def walk_date_dirs(base: str) -> List[str]:
 def main():
     parser = argparse.ArgumentParser(description="YOLO structure embeddings with location augmentation → Neo4j")
     parser.add_argument("--bases", nargs="+", default=[
-        "/mnt/8TB_2025/fileserver/dashcam/",
-        "/mnt/8TBHDD/fileserver/dashcam/"
+        "/media/scott/NAS/fileserver/dashcam/",
+        "/media/scott/NAS/fileserver/dashcam/"
     ])
     parser.add_argument("--grid", default="16x9")
     parser.add_argument("--pyramid", action="store_true")

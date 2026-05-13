@@ -124,7 +124,7 @@ def list_directories(base_path):
                     print(current, total, current/total)
 
 
-base_directory = "/mnt/8TBHDD/fileserver/dashcam/"  # Adjust this path to your base directory
+base_directory = "/media/scott/NAS/fileserver/dashcam/"  # Adjust this path to your base directory
 list_directories(base_directory)
-base_directory = "/mnt/8TB_2025/fileserver/dashcam/"  # Adjust this path to your base directory
+base_directory = "/media/scott/NAS/fileserver/dashcam/"  # Adjust this path to your base directory
 list_directories(base_directory)

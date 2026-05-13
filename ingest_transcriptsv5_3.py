@@ -40,19 +40,19 @@ log = logging.getLogger("ingest_transcripts")
 EMA_ALPHA = float(os.getenv("EMA_ALPHA", "0.2"))
 
 DEFAULT_SCAN_ROOTS = [
-    "/mnt/8TB_2025/fileserver/dashcam/audio",
-    "/mnt/8TB_2025/fileserver/dashcam/transcriptions",
-    "/mnt/8TB_2025/fileserver/audio",
-    "/mnt/8TB_2025/fileserver/audio/transcriptions",
-    "/mnt/8TB_2025/fileserver/bodycam",
-    "/mnt/8TB_2025/fileserver/dashcam",
-    "/mnt/8TBHDD/fileserver/dashcam",
+    "/media/scott/NAS/fileserver/dashcam/audio",
+    "/media/scott/NAS/fileserver/dashcam/transcriptions",
+    "/media/scott/NAS/fileserver/audio",
+    "/media/scott/NAS/fileserver/audio/transcriptions",
+    "/media/scott/NAS/fileserver/bodycam",
+    "/media/scott/NAS/fileserver/dashcam",
+    "/media/scott/NAS/fileserver/dashcam",
 ]
 SCAN_ROOTS = [p.strip() for p in os.getenv("SCAN_ROOTS", ",".join(DEFAULT_SCAN_ROOTS)).split(",") if p.strip()]
 
 # extra scan for metadata under dashcam
-DASHCAM_ROOT = os.getenv("DASHCAM_ROOT", "/mnt/8TB_2025/fileserver/dashcam")
-OLD_DASHCAM_ROOT = os.getenv("OLD_DASHCAM_ROOT", "/mnt/8TBHDD/fileserver/dashcam")
+DASHCAM_ROOT = os.getenv("DASHCAM_ROOT", "/media/scott/NAS/fileserver/dashcam")
+OLD_DASHCAM_ROOT = os.getenv("OLD_DASHCAM_ROOT", "/media/scott/NAS/fileserver/dashcam")
 
 
 LOCAL_TZ = os.getenv("LOCAL_TZ", "America/New_York")
@@ -68,7 +68,7 @@ NEO4J_ENABLED = bool(NEO4J_URI and NEO4J_USER and NEO4J_PASSWORD)
 
 DEFAULT_BATCH_SIZE = int(os.getenv("EMBED_BATCH", "32"))
 
-AUDIO_BASE = Path("/mnt/8TB_2025/fileserver/audio")
+AUDIO_BASE = Path("/media/scott/NAS/fileserver/audio")
 PAT_TRANS_JSON_TXT = re.compile(r"_([A-Za-z0-9\-\._]+)_transcription\.txt$", re.IGNORECASE)
 PAT_TRANS_CSV      = re.compile(r"_transcription\.csv$", re.IGNORECASE)
 PAT_ENTITIES       = re.compile(r"_transcription_(entites|entities)\.csv$", re.IGNORECASE)
@@ -88,8 +88,8 @@ MODEL_PREF = [s.strip() for s in os.getenv("MODEL_PREF", ",".join(DEFAULT_MODEL_
 
 # RTTM discovery
 DEFAULT_RTTM_DIRS = [
-    "/mnt/8TB_2025/fileserver/audio",
-    "/mnt/8TB_2025/fileserver/dashcam/audio",
+    "/media/scott/NAS/fileserver/audio",
+    "/media/scott/NAS/fileserver/dashcam/audio",
 ]
 RTTM_DIRS = [p.strip() for p in os.getenv("RTTM_DIRS", ",".join(DEFAULT_RTTM_DIRS)).split(",") if p.strip()]
 PAT_RTTM_FILE = re.compile(r"_speakers\.rttm$", re.IGNORECASE)

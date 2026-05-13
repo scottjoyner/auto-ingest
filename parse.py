@@ -16,7 +16,7 @@ def list_files(directory):
     return file_keys
 
 # Example usage:
-file_path = "/Volumes/Untitled/DCIM/Movie" # replace with your own file path
+file_path = "/media/scott/NAS/" # replace with your own file path
 # file_path = "/Users/scottjoyner/Documents/rides"
 key_list = list_files(file_path)
 count = 0
@@ -81,7 +81,7 @@ for filename in key_list:
     #     metadata.append(result)
     #     print(result)
     #     os.remove('frame.png')
-    metadata_file = f"/Volumes/Untitled/DCIM/Movie/{filename}_metadata.txt"
+    metadata_file = f"/media/scott/NAS//{filename}_metadata.txt"
     with open(metadata_file, 'w') as f:
         for line in metadata:
             f.write(f"{line}\n")

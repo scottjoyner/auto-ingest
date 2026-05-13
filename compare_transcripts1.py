@@ -21,7 +21,7 @@ EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))
 EMBED_BATCH = int(os.getenv("EMBED_BATCH", "32"))
 
 # IMPORTANT: only serve audio from within this base dir
-MEDIA_BASE = os.getenv("MEDIA_BASE", "/mnt/8TB_2025/fileserver/audio")
+MEDIA_BASE = os.getenv("MEDIA_BASE", "/media/scott/NAS/fileserver/audio")
 
 # ANN index names (must exist)
 IDX_TRANS_V1 = os.getenv("IDX_TRANS_V1", "transcription_embedding_index")

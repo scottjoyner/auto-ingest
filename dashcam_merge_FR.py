@@ -300,7 +300,7 @@ def main(argv: List[str]) -> int:
             return 2
     if not bases and not args.single_dirs:
         # default to your common base if nothing was supplied
-        bases = ["/mnt/8TB_2025/fileserver/dashcam/"]
+        bases = ["/media/scott/NAS/fileserver/dashcam/"]
 
     base_paths = [Path(b).resolve() for b in bases]
     single_dirs = [Path(s).resolve() for s in args.single_dirs]

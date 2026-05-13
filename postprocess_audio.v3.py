@@ -15,7 +15,7 @@ Usage
 # Ingest everything with info logs, read taxonomy, write confmats:
 ./.venv/bin/python3 ingest_transcripts.py \
   --taxonomy /path/to/taxonomy.yml \
-  --confmat-out /mnt/8TB_2025/fileserver/audio/_reports \
+  --confmat-out /media/scott/NAS/fileserver/audio/_reports \
   --log-level INFO
 
 # Dry run (no writes), show decisions
@@ -63,11 +63,11 @@ EMA_ALPHA = float(os.getenv("EMA_ALPHA", "0.2"))
 
 # Default scan roots (env override: SCAN_ROOTS="a,b,c")
 DEFAULT_SCAN_ROOTS = [
-    "/mnt/8TB_2025/fileserver/dashcam/audio",
-    "/mnt/8TB_2025/fileserver/dashcam/transcriptions",
-    "/mnt/8TB_2025/fileserver/audio",
-    "/mnt/8TB_2025/fileserver/audio/transcriptions",
-    "/mnt/8TB_2025/fileserver/bodycam",
+    "/media/scott/NAS/fileserver/dashcam/audio",
+    "/media/scott/NAS/fileserver/dashcam/transcriptions",
+    "/media/scott/NAS/fileserver/audio",
+    "/media/scott/NAS/fileserver/audio/transcriptions",
+    "/media/scott/NAS/fileserver/bodycam",
 ]
 SCAN_ROOTS = [p.strip() for p in os.getenv("SCAN_ROOTS", ",".join(DEFAULT_SCAN_ROOTS)).split(",") if p.strip()]
 
@@ -89,7 +89,7 @@ NEO4J_ENABLED = bool(NEO4J_URI and NEO4J_USER and NEO4J_PASSWORD)
 DEFAULT_BATCH_SIZE = int(os.getenv("EMBED_BATCH", "32"))
 
 # Filenames and patterns (JSON lives in <model>_transcription.txt per new pipeline)
-AUDIO_BASE = Path("/mnt/8TB_2025/fileserver/audio")
+AUDIO_BASE = Path("/media/scott/NAS/fileserver/audio")
 PAT_TRANS_JSON_TXT   = re.compile(r"_([A-Za-z0-9\-\._]+)_transcription\.txt$", re.IGNORECASE)
 PAT_TRANS_CSV        = re.compile(r"_transcription\.csv$", re.IGNORECASE)
 PAT_ENTITIES         = re.compile(r"_transcription_(entites|entities)\.csv$", re.IGNORECASE)

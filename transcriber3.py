@@ -161,7 +161,7 @@ def list_directories(base_path, whisper_model):
                 )
 
 if __name__ == "__main__":
-    # base_directory = "/media/deathstar/8TBHDD/fileserver/dashcam/"  # Adjust this path to your base directory
+    # base_directory = "/media/scott/NAS/8TBHDD/fileserver/dashcam/"  # Adjust this path to your base directory
     # list_directories(base_directory)
-    base_directory = "/media/deathstar/8TB_2025/fileserver/dashcam/"
+    base_directory = "/media/scott/NAS/8TB_2025/fileserver/dashcam/"
     list_directories(base_directory, whisper_model="base")

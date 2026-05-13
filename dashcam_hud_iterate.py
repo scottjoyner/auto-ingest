@@ -17,7 +17,7 @@ Neo4j (optional):
 
 Example:
     python dashcam_hud_iterate.py \
-      --base /mnt/8TB_2025/fileserver/dashcam \
+      --base /media/scott/NAS/fileserver/dashcam \
       --neo4j-uri bolt://localhost:7687 --neo4j-user neo4j --neo4j-pass password
 """
 

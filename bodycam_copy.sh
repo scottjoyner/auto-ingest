@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # ======= CONFIG =======
-DEST_BODYCAM_ROOT="/mnt/8TB_2025/fileserver/bodycam"   # where video/photo go (dated)
-DEST_AUDIO_ROOT="/mnt/8TB_2025/fileserver/audio"       # where audio (and extracted audio) go (dated)
+DEST_BODYCAM_ROOT="/media/scott/NAS/fileserver/bodycam"   # where video/photo go (dated)
+DEST_AUDIO_ROOT="/media/scott/NAS/fileserver/audio"       # where audio (and extracted audio) go (dated)
 TRANS_SUBDIR="transcriptions"                          # under DEST_AUDIO_ROOT for transcripts/diarization
 
 # Source folder names (case-insensitive) expected at device root

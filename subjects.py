@@ -22,7 +22,7 @@ def list_files(directory):
             file_keys.add(filename.rsplit('_medium_transcription.txt', 1)[0])
     file_keys_copy = file_keys.copy()
     for filename in file_keys_copy:
-        if os.path.exists(f"/media/deathstar/8TB_2025/fileserver/dashcam/transcriptions/{filename}_medium_transcription_entities.csv"):
+        if os.path.exists(f"/media/scott/NAS/8TB_2025/fileserver/dashcam/transcriptions/{filename}_medium_transcription_entities.csv"):
             file_keys.remove(filename)
     return sorted(list(file_keys))
 
@@ -35,7 +35,7 @@ def is_valid_date_structure(dir_name):
 
 def list_directories(base_path):
 
-    transcriptions = "/media/deathstar/8TB_2025/fileserver/dashcam/transcriptions"
+    transcriptions = "/media/scott/NAS/8TB_2025/fileserver/dashcam/transcriptions"
     
     key_list = list_files(transcriptions)
 
@@ -68,5 +68,5 @@ def list_directories(base_path):
 
 
 
-# list_directories("/media/deathstar/8TBHDD/fileserver/dashcam/")
-list_directories("/mnt/8TB_2025/fileserver/dashcam/")
+# list_directories("/media/scott/NAS/8TBHDD/fileserver/dashcam/")
+list_directories("/media/scott/NAS/fileserver/dashcam/")

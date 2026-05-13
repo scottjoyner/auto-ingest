@@ -686,8 +686,8 @@ def process_directory(
 def main():
     parser = argparse.ArgumentParser(description="Build structure-preserving YOLO embeddings (per-second & per-minute) and ingest into Neo4j.")
     parser.add_argument("--bases", nargs="+", default=[
-        "/mnt/8TBHDD/fileserver/dashcam/",
-        "/mnt/8TB_2025/fileserver/dashcam/"
+        "/media/scott/NAS/fileserver/dashcam/",
+        "/media/scott/NAS/fileserver/dashcam/"
     ], help="One or more base directories to walk (expects YYYY/MM/DD subdirs)")
     parser.add_argument("--grid", default="16x9", help="Primary grid WxH (e.g., 16x9)")
     parser.add_argument("--pyramid", action="store_true", help="Use spatial pyramid (adds 8x4 and 32x18 to the base grid)")

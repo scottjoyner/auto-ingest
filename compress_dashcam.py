@@ -260,12 +260,12 @@ if __name__ == "__main__":
 
 # # Dry run the last ~10,000 newest files to preview commands
 # python3 compress_dashcam.py \
-#   --input-root /mnt/8TB_2025/fileserver/dashcam \
+#   --input-root /media/scott/NAS/fileserver/dashcam \
 #   --output-root /mnt/8TB_2025/portable/dashcam_portable \
 #   --order newest --limit 10000 --dry-run
 
 # # Now actually run, newest first, in parallel
 # python3 compress_dashcam.py \
-#   --input-root /mnt/8TB_2025/fileserver/dashcam \
-#   --output-root /media/deathstar/3863-3833/dashcam \
+#   --input-root /media/scott/NAS/fileserver/dashcam \
+#   --output-root /media/scott/NAS/3863-3833/dashcam \
 #   --order newest --limit 1000 --workers 1

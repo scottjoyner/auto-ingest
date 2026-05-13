@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ======= CONFIG =======
-DEST_ROOT="/mnt/8TB_2025/fileserver/audio"   # where to store organized audio
+DEST_ROOT="/media/scott/NAS/fileserver/audio"   # where to store organized audio
 TRANS_SUBDIR="transcriptions"                # subfolder under DEST_ROOT for transcripts/diarization
 SRC_FOLDER_NAME="RECORD"                     # folder on the removable drive(s)
 DELETE_AFTER_COPY=false                      # true to move (delete source after copy)

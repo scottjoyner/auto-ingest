@@ -37,7 +37,7 @@ def list_files(directory):
             file_keys.add(filename.rsplit('_R.', 1)[0])
     file_keys_copy = file_keys.copy()
     for filename in file_keys_copy:
-        if os.path.exists(f"/media/deathstar/8TB_2025/fileserver/dashcam/audio/{filename}_speakers.rttm"):
+        if os.path.exists(f"/media/scott/NAS/8TB_2025/fileserver/dashcam/audio/{filename}_speakers.rttm"):
             file_keys.remove(filename)
     return sorted(list(file_keys))
 
@@ -56,8 +56,8 @@ def list_directories(base_path):
         if is_valid_date_structure(temp_path):
             print(f"Valid directory structure found: {root}")
             file_path = root
-            transcriptions = "/media/deathstar/8TB_2025/fileserver/dashcam/transcriptions"
-            audio_dir = "/media/deathstar/8TB_2025/fileserver/dashcam/audio"
+            transcriptions = "/media/scott/NAS/8TB_2025/fileserver/dashcam/transcriptions"
+            audio_dir = "/media/scott/NAS/8TB_2025/fileserver/dashcam/audio"
             
             key_list = list_files(file_path)
 
@@ -67,7 +67,7 @@ def list_directories(base_path):
             for x in range(len(key_list)):
                 if os.path.exists(f"{transcriptions}/{key_list[x]}_medium_transcription.txt"):
                     with open(f"{transcriptions}/{key_list[x]}_medium_transcription.txt", 'r') as file:
-                        if not os.path.exists(f"/media/deathstar/8TB_2025/fileserver/dashcam/audio/{key_list[x]}.mp3"):
+                        if not os.path.exists(f"/media/scott/NAS/8TB_2025/fileserver/dashcam/audio/{key_list[x]}.mp3"):
                             try:
                                 print(key_list[x])
                                 video = VideoFileClip(f"{file_path}/{key_list[x]}_R.MP4")
@@ -78,5 +78,5 @@ def list_directories(base_path):
                             except AttributeError:
                                 continue
 
-list_directories("/media/deathstar/8TBHDD/fileserver/dashcam/")
-list_directories("/media/deathstar/8TB_2025/fileserver/dashcam/")
+list_directories("/media/scott/NAS/8TBHDD/fileserver/dashcam/")
+list_directories("/media/scott/NAS/8TB_2025/fileserver/dashcam/")

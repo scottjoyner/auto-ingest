@@ -43,7 +43,7 @@ except Exception:
     HAVE_REQUESTS = False
 
 # ------------- Defaults & Config -------------
-AUDIO_BASE_DEFAULT = "/mnt/8TB_2025/fileserver/audio"
+AUDIO_BASE_DEFAULT = "/media/scott/NAS/fileserver/audio"
 DERIVED_DIRNAME    = "_derived"
 MANIFEST_DIRNAME   = "_manifests"
 STATE_DIRNAME      = "_state"

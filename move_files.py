@@ -18,7 +18,7 @@ Where:
 
 Non-matching or invalid-date filenames are skipped (with a warning).
 """
-# python move_files.py -i /mnt/8TB_2025/fileserver/audio -o /mnt/8TB_2025/fileserver/audio --dry-run --recursive
+# python move_files.py -i /media/scott/NAS/fileserver/audio -o /media/scott/NAS/fileserver/audio --dry-run --recursive
 from __future__ import annotations
 
 import argparse

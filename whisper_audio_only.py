@@ -105,7 +105,7 @@ def main():
     parser.add_argument(
         "--audio-root",
         type=Path,
-        default=Path("/mnt/8TB_2025/fileserver/audio"),
+        default=Path("/media/scott/NAS/fileserver/audio"),
         help="Root directory to scan for .wav/.mp3 files.",
     )
     parser.add_argument(

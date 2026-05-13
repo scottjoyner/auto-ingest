@@ -645,7 +645,7 @@ def build_compilation(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build one 9:16 short from vector/geo/speed-selected scenes.")
     # Data roots / output
-    p.add_argument("--base", dest="bases", action="append", default=["/mnt/8TB_2025/fileserver/dashcam"], help="Dashcam root (repeatable).")
+    p.add_argument("--base", dest="bases", action="append", default=["/media/scott/NAS/fileserver/dashcam"], help="Dashcam root (repeatable).")
     p.add_argument("--out", type=Path, default=Path("./short_compilation.mp4"))
     # Geometry / style
     p.add_argument("--width", type=int, default=1080)

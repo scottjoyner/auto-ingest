@@ -298,9 +298,9 @@ def main():
     idx = None
     if args.allow_discovery:
         search_dirs = args.rttm_dir or [
-            "/mnt/8TB_2025/fileserver/dashcam/audio",
-            "/mnt/8TB_2025/fileserver/audio",
-            "/mnt/8TB_2025/fileserver/dashcam",
+            "/media/scott/NAS/fileserver/dashcam/audio",
+            "/media/scott/NAS/fileserver/audio",
+            "/media/scott/NAS/fileserver/dashcam",
         ]
         idx = index_rttm_dirs(search_dirs)
 

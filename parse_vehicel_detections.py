@@ -8,7 +8,7 @@ from datetime import datetime
 
 def save_image(key, xyxy):
     
-    source_dir = "/media/deathstar/8TBHDD/fileserver/dashcam"
+    source_dir = "/media/scott/NAS/8TBHDD/fileserver/dashcam"
     # Split the string by underscores
     parts = key.split('_')
 
@@ -22,7 +22,7 @@ def save_image(key, xyxy):
 
     # Build the file path
     dir_path = f"{source_dir}/{year}/{month}/{day}/{timestamp}.MP4"
-    save_dir = f"/media/deathstar/324ab5fd-8cb6-4a27-bd56-e648a5fcdb7a/images/{timestamp}"
+    save_dir = f"/media/scott/NAS/324ab5fd-8cb6-4a27-bd56-e648a5fcdb7a/images/{timestamp}"
     # Output
     print("dir =", dir_path)
     print("frame =", frame)
@@ -51,7 +51,7 @@ def list_files(directory):
             file_keys.add(filename.rsplit('.MP4', 1)[0])
     file_keys_copy = file_keys.copy()
     for filename in file_keys_copy:
-        save_dir = f"/media/deathstar/324ab5fd-8cb6-4a27-bd56-e648a5fcdb7a/images/{filename}"
+        save_dir = f"/media/scott/NAS/324ab5fd-8cb6-4a27-bd56-e648a5fcdb7a/images/{filename}"
         if os.path.exists(save_dir):
             file_keys.remove(filename)
     return sorted(list(file_keys))
@@ -95,8 +95,8 @@ def list_directories(base_path):
         if is_valid_date_structure(temp_path):
             print(f"Valid directory structure found: {root}")
             file_path = root
-            transcriptions = "/media/deathstar/8TB_2025/fileserver/dashcam/transcriptions"
-            audio_dir = "/media/deathstar/8TB_2025/fileserver/dashcam/audio"
+            transcriptions = "/media/scott/NAS/8TB_2025/fileserver/dashcam/transcriptions"
+            audio_dir = "/media/scott/NAS/8TB_2025/fileserver/dashcam/audio"
             
             key_list = list_files(file_path)
 
@@ -138,5 +138,5 @@ def list_directories(base_path):
                         for index, row in df_unique.iterrows():
                             save_image(row['Key'], row['xyxy'])
 
-list_directories("/media/deathstar/8TBHDD/fileserver/dashcam/")
-list_directories("/media/deathstar/8TB_2025/fileserver/dashcam/")
+list_directories("/media/scott/NAS/8TBHDD/fileserver/dashcam/")
+list_directories("/media/scott/NAS/8TB_2025/fileserver/dashcam/")

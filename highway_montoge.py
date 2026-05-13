@@ -30,7 +30,7 @@ Key capabilities
 Assumptions
 -----------
 - Neo4j nodes :Frame have fields like (key, frame, millis, mph, lat, long, veh_count?) but we auto-fallback.
-- Matching *_FR.MP4 files live under bases like /mnt/8TB_2025/fileserver/dashcam/YYYY/MM/DD/<KEY>_FR.MP4
+- Matching *_FR.MP4 files live under bases like /media/scott/NAS/fileserver/dashcam/YYYY/MM/DD/<KEY>_FR.MP4
 - Adjacent Whisper JSON (optional captions): <KEY>_whisper.json or <KEY>_*_whisper.json
 
 CLI quickstart
@@ -595,7 +595,7 @@ def cmd_render(args) -> None:
 # --------- CLI ----------
 def build_cli() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Plan & render highway speed montages with traffic heatmaps.")
-    p.add_argument("--bases", action="append", default=["/mnt/8TB_2025/fileserver/dashcam"], help="Dashcam bases (repeatable).")
+    p.add_argument("--bases", action="append", default=["/media/scott/NAS/fileserver/dashcam"], help="Dashcam bases (repeatable).")
     p.add_argument("--fps-fallback", type=float, default=30.0)
     p.add_argument("--log-level", default="INFO")
 
@@ -668,7 +668,7 @@ if __name__ == "__main__":
 # 1) Highway traffic plan (favor heavy traffic), write heatmaps:
 python highway_montage.py \
   plan-highway \
-  --bases /mnt/8TB_2025/fileserver/dashcam \
+  --bases /media/scott/NAS/fileserver/dashcam \
   --min-mph 55 --max-mph 120 \
   --limit 500 \
   --pre 1.0 --post 2.0 --min-gap 3.5 \

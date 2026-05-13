@@ -29,9 +29,9 @@ THR_SPEECH = 0.35     # be generous labeling speech
 SEGMENTS_SOURCE = os.getenv("SEGMENTS_SOURCE", "neo4j")  # "neo4j" or "sidecar"
 SIDECAR_SUFFIX  = ".music.json"
 AUDIO_ROOTS     = [
-    "/mnt/8TB_2025/fileserver/audio",
-    "/mnt/8TB_2025/fileserver/dashcam/audio",
-    "/mnt/8TB_2025/fileserver/bodycam/audio",
+    "/media/scott/NAS/fileserver/audio",
+    "/media/scott/NAS/fileserver/dashcam/audio",
+    "/media/scott/NAS/fileserver/bodycam/audio",
 ]
 
 # --------------- Helpers ---------------

@@ -137,6 +137,6 @@ def list_directories(base_path):
                     current += 1
 
 
-image_save_location = "/media/deathstar/324ab5fd-8cb6-4a27-bd56-e648a5fcdb7a/images/"
-base_directory = "/media/deathstar/8TBHDD/fileserver/video/"  # Adjust this path to your base directory
+image_save_location = "/media/scott/NAS/324ab5fd-8cb6-4a27-bd56-e648a5fcdb7a/images/"
+base_directory = "/media/scott/NAS/8TBHDD/fileserver/video/"  # Adjust this path to your base directory
 list_directories(base_directory)

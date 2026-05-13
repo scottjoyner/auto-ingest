@@ -48,10 +48,10 @@ except Exception:
 # -----------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-AUDIO_BASE = Path(os.getenv("AUDIO_BASE", "/mnt/8TB_2025/fileserver/audio"))
+AUDIO_BASE = Path(os.getenv("AUDIO_BASE", "/media/scott/NAS/fileserver/audio"))
 ALT_AUDIO_BASES = [
-    Path("/mnt/8TB_2025/fileserver/dashcam/audio"),
-    Path("/mnt/8TB_2025/fileserver/dashcam"),
+    Path("/media/scott/NAS/fileserver/dashcam/audio"),
+    Path("/media/scott/NAS/fileserver/dashcam"),
 ]
 AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".flac", ".aac", ".ogg"}
 

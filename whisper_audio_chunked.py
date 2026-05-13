@@ -14,7 +14,7 @@ Key features:
 
 Example:
     python transcribe_chunks.py \
-        --audio-root /mnt/8TB_2025/fileserver/audio \
+        --audio-root /media/scott/NAS/fileserver/audio \
         --model large-v3 \
         --fast-copy \
         --chunk-len 90 --stride 85 \
@@ -344,7 +344,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Transcribe audio; avoid chunking when possible; robust chunking for long files with safe formats."
     )
-    p.add_argument("--audio-root", type=Path, default=Path("/mnt/8TB_2025/fileserver/audio"),
+    p.add_argument("--audio-root", type=Path, default=Path("/media/scott/NAS/fileserver/audio"),
                    help="Root directory containing source audio files (wav/mp3/m4a/flac/ogg/aac).")
     p.add_argument("--transcriptions-root", type=Path, default=None,
                    help="Where to write transcription outputs. Default: <audio-root>/transcriptions")
@@ -618,8 +618,8 @@ if __name__ == "__main__":
 #   --model medium \
 #   --device cuda \
 #   --merge \
-#   --audio-root /mnt/8TB_2025/fileserver/audio \
-#   --transcriptions-root /mnt/8TB_2025/fileserver/audio/transcriptions \
+#   --audio-root /media/scott/NAS/fileserver/audio \
+#   --transcriptions-root /media/scott/NAS/fileserver/audio/transcriptions \
 #   --chunks-root /tmp/chunks \
 #   --pcm-wav \
 #   --chunk-len 90 --stride 85 \

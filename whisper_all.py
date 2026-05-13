@@ -365,7 +365,7 @@ def list_directories(base_path, whisper_model):
         if is_valid_date_structure(temp_path):
             print(f"Valid directory structure found: {root}")
             file_path = root
-            transcriptions = "/mnt/8TB_2025/fileserver/dashcam/transcriptions"
+            transcriptions = "/media/scott/NAS/fileserver/dashcam/transcriptions"
             key_list = list_files(file_path, transcriptions, whisper_model)
 
             total = len(key_list)
@@ -385,7 +385,7 @@ def list_directories(base_path, whisper_model):
                 finally:
                     print("Finally:", print(datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')))
 if __name__ == "__main__":
-    # base_directory = "/mnt/8TBHDD/fileserver/dashcam/"  # Adjust this path to your base directory
+    # base_directory = "/media/scott/NAS/fileserver/dashcam/"  # Adjust this path to your base directory
     # list_directories(base_directory, whisper_model="medium")
-    base_directory = "/mnt/8TB_2025/fileserver/dashcam/"
+    base_directory = "/media/scott/NAS/fileserver/dashcam/"
     list_directories(base_directory, whisper_model="medium")

@@ -201,7 +201,7 @@ def list_directories(base_path):
             # for file in files:
             #     print(f"  - {file}")
 # Example usage
-base_directory = "/mnt/8TBHDD/fileserver/dashcam/"  # Adjust this path to your base directory
+base_directory = "/media/scott/NAS/fileserver/dashcam/"  # Adjust this path to your base directory
 #list_directories(base_directory)
-base_directory = "/mnt/8TB_2025/fileserver/dashcam/"
+base_directory = "/media/scott/NAS/fileserver/dashcam/"
 list_directories(base_directory)

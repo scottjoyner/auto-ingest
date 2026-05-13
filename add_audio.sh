@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Directory containing the MP4 files
-dir="/Volumes/Untitled/DCIM/Movie"
+dir="/media/scott/NAS/"
 
 # Navigate to the directory
 cd "$dir"

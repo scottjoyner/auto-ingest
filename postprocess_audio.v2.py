@@ -23,11 +23,11 @@ Usage examples
 
 Env (common)
 ------------
-AUDIO_BASE=/mnt/8TB_2025/fileserver/audio
+AUDIO_BASE=/media/scott/NAS/fileserver/audio
 EMBED_MODEL_NAME=sentence-transformers/all-MiniLM-L6-v2
 NEO4J_URI=bolt://localhost:7687  NEO4J_USER=neo4j  NEO4J_PASSWORD=...
 GLINER_MODEL=urchade/gliner_large-v2
-GRAPH_PACK_DIR=/mnt/8TB_2025/fileserver/audio/_graphpack
+GRAPH_PACK_DIR=/media/scott/NAS/fileserver/audio/_graphpack
 """
 
 import os, re, uuid, csv, json, time, hashlib, logging, math, sqlite3, itertools
@@ -57,11 +57,11 @@ log = logging.getLogger("ingest_transcripts")
 EMA_ALPHA = float(os.getenv("EMA_ALPHA", "0.2"))
 
 DEFAULT_SCAN_ROOTS = [
-    "/mnt/8TB_2025/fileserver/dashcam/audio",
-    "/mnt/8TB_2025/fileserver/dashcam/transcriptions",
-    "/mnt/8TB_2025/fileserver/audio",
-    "/mnt/8TB_2025/fileserver/audio/transcriptions",
-    "/mnt/8TB_2025/fileserver/bodycam",
+    "/media/scott/NAS/fileserver/dashcam/audio",
+    "/media/scott/NAS/fileserver/dashcam/transcriptions",
+    "/media/scott/NAS/fileserver/audio",
+    "/media/scott/NAS/fileserver/audio/transcriptions",
+    "/media/scott/NAS/fileserver/bodycam",
 ]
 SCAN_ROOTS = [p.strip() for p in os.getenv("SCAN_ROOTS", ",".join(DEFAULT_SCAN_ROOTS)).split(",") if p.strip()]
 
@@ -93,11 +93,11 @@ SUBJ_THRESHOLD_SEGMENT       = float(os.getenv("SUBJ_THRESHOLD_S", "0.30"))
 SUBJ_THRESHOLD_UTTERANCE     = float(os.getenv("SUBJ_THRESHOLD_U", "0.30"))
 
 # Graph Pack (optional)
-GRAPH_PACK_DIR = os.getenv("GRAPH_PACK_DIR", "")  # e.g., /mnt/8TB_2025/fileserver/audio/_graphpack
+GRAPH_PACK_DIR = os.getenv("GRAPH_PACK_DIR", "")  # e.g., /media/scott/NAS/fileserver/audio/_graphpack
 GRAPH_PACK_APPEND = os.getenv("GRAPH_PACK_APPEND", "1") not in {"0","false","False",""}
 
 # Filenames and patterns
-AUDIO_BASE = Path("/mnt/8TB_2025/fileserver/audio")
+AUDIO_BASE = Path("/media/scott/NAS/fileserver/audio")
 PAT_TRANS_JSON_TXT = re.compile(r"_([A-Za-z0-9\-\._]+)_transcription\.txt$", re.IGNORECASE)
 PAT_TRANS_CSV      = re.compile(r"_transcription\.csv$", re.IGNORECASE)
 PAT_ENTITIES       = re.compile(r"_transcription_(entites|entities)\.csv$", re.IGNORECASE)

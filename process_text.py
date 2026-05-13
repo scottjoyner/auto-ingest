@@ -43,7 +43,7 @@ def list_directories(base_path):
         if is_valid_date_structure(temp_path):
             print(f"Valid directory structure found: {root}")
             file_path = root
-            transcriptions = "/mnt/8TB_2025/fileserver/dashcam/transcriptions"
+            transcriptions = "/media/scott/NAS/fileserver/dashcam/transcriptions"
             key_list = list_files(file_path)
 
             total = len(key_list)
@@ -66,5 +66,5 @@ def list_directories(base_path):
                         for segment in data["segments"]:
                             print(segment['text'], segment['tokens'])
 
-list_directories("/mnt/8TBHDD/fileserver/dashcam/")
-list_directories("/mnt/8TB_2025/fileserver/dashcam/")
+list_directories("/media/scott/NAS/fileserver/dashcam/")
+list_directories("/media/scott/NAS/fileserver/dashcam/")

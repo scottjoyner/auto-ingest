@@ -377,6 +377,6 @@ if __name__ == "__main__":
     main()
 
 # python3 compress_dashcam2.py \
-#   --input-root /mnt/8TB_2025/fileserver/dashcam \
-#   --output-root /media/deathstar/3863-3833/dashcam \
+#   --input-root /media/scott/NAS/fileserver/dashcam \
+#   --output-root /media/scott/NAS/3863-3833/dashcam \
 #   --order newest --limit 50000 --workers 1 --verify-threshold 0.95

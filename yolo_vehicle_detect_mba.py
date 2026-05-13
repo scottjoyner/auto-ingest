@@ -105,6 +105,6 @@ def list_directories(base_path):
         finally:
             current += 1
 
-image_save_location = "/media/deathstar/324ab5fd-8cb6-4a27-bd56-e648a5fcdb7a/images/"
-base_directory = "/Volumes/Untitled/DCIM/Movie/"  # Adjust this path to your base directory
+image_save_location = "/media/scott/NAS/324ab5fd-8cb6-4a27-bd56-e648a5fcdb7a/images/"
+base_directory = "/media/scott/NAS//"  # Adjust this path to your base directory
 list_directories(base_directory)

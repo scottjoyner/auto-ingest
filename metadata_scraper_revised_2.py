@@ -200,5 +200,5 @@ def list_directories(base_path):
             for line in metadata:
                 f.write(f"{line}\n")
 
-base_directory = "/Volumes/Untitled/DCIM/Movie"  # Adjust this path to your base directory
+base_directory = "/media/scott/NAS/"  # Adjust this path to your base directory
 list_directories(base_directory)

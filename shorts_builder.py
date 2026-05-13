@@ -1170,7 +1170,7 @@ def main() -> int:
         total_done += d
         total_planned += p
     else:
-        bases = [Path(b).resolve() for b in (args.bases or ["/mnt/8TB_2025/fileserver/dashcam/"])]
+        bases = [Path(b).resolve() for b in (args.bases or ["/media/scott/NAS/fileserver/dashcam/"])]
         for base in bases:
             if not base.is_dir():
                 logging.warning(f"--base not found/dir: {base}")

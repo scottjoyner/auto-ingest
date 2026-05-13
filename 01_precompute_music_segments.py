@@ -8,9 +8,9 @@ from tqdm import tqdm
 
 # ---------------- Config ----------------
 AUDIO_ROOTS = [
-    "/mnt/8TB_2025/fileserver/audio",
-    "/mnt/8TB_2025/fileserver/dashcam/audio",
-    "/mnt/8TB_2025/fileserver/bodycam/audio",
+    "/media/scott/NAS/fileserver/audio",
+    "/media/scott/NAS/fileserver/dashcam/audio",
+    "/media/scott/NAS/fileserver/bodycam/audio",
 ]  # add/remove as needed
 
 SIDEcar_SUFFIX = ".music.json"          # where we store music segments per audio

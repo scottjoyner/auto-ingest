@@ -19,8 +19,8 @@ except Exception:
 # =========================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-AUDIO_RTTM_DIR = "/mnt/8TB_2025/fileserver/dashcam/audio"
-TRANSCRIPTION_DIR = "/mnt/8TB_2025/fileserver/dashcam/transcriptions"
+AUDIO_RTTM_DIR = "/media/scott/NAS/fileserver/dashcam/audio"
+TRANSCRIPTION_DIR = "/media/scott/NAS/fileserver/dashcam/transcriptions"
 
 # Filenames we consider as sources
 PAT_TRANS_JSON = re.compile(r"_medium_transcription\.(json|txt)$", re.IGNORECASE)

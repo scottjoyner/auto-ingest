@@ -30,7 +30,7 @@ def list_files(directory):
     return sorted(list(file_keys))
 
 # Example usage:
-file_path = "/Volumes/Untitled/DCIM/Movie" # replace with your own file path
+file_path = "/media/scott/NAS/" # replace with your own file path
 
 key_list = list_files(file_path)
 

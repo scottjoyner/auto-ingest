@@ -8,7 +8,7 @@ from pydub import AudioSegment
 from sklearn.cluster import DBSCAN
 from sklearn.metrics.pairwise import cosine_distances
 # Path settings
-audio_dir = "/media/deathstar/8TB_2025/fileserver/dashcam/audio"
+audio_dir = "/media/scott/NAS/8TB_2025/fileserver/dashcam/audio"
 rttm_suffix = "_speakers.rttm"
 
 # Load embedding model
