@@ -148,14 +148,21 @@ for MOUNTPOINT in "${CANDIDATES[@]}"; do
   while IFS= read -r -d '' file; do
     bname="$(basename "$file")"
 
-    # Parse 14-digit stamp from filename if present: YYYYMMDDhhmmss.ext
+    # Parse timestamp from filename if present
     stamp=""
     year=""; month=""; day=""
     if [[ "$bname" =~ ^([0-9]{14})\.(wav|mp3)$ ]]; then
+      # YYYYMMDDhhmmss.ext
       stamp="${BASH_REMATCH[1]}"
       year="${stamp:0:4}"
       month="${stamp:4:2}"
       day="${stamp:6:2}"
+    elif [[ "$bname" =~ ^R([0-9]{8})-([0-9]{6})\.(mp3)$ ]]; then
+      # RYYYYMMDD-HHMMSS.mp3
+      stamp="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+      year="${BASH_REMATCH[1]:0:4}"
+      month="${BASH_REMATCH[1]:4:2}"
+      day="${BASH_REMATCH[1]:6:2}"
     else
       # Fallback to file modified date
       mod_date="$(stat -c %y "$file" 2>/dev/null | cut -d' ' -f1 || true)"
