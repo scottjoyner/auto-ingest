@@ -10,7 +10,7 @@ LOG_PREFIX="[audio_copy]"
 # ======================
 
 # What gets copied:
-# 1) Audio: *.wav, *.mp3 (case-insensitive)
+# 1) Audio/video: common recorder media (*.wav, *.mp3, *.mp4, *.m4a, etc.; case-insensitive)
 # 2) Audio sidecars (same folder as the audio), e.g.:
 #    <basename>.*            (e.g., 20250823030047.WAV.music.json)
 #    <stem>.{json,cue,md5,sha1,sha256,yaml,yml,ini,xml,info,tag}
@@ -29,7 +29,7 @@ LOG_PREFIX="[audio_copy]"
 
 echo "$LOG_PREFIX Starting…"
 
-shopt -s nullglob dotglob nocaseglob
+shopt -s nullglob dotglob nocaseglob nocasematch
 
 # -------- Helpers --------
 copy_one() {
@@ -77,11 +77,42 @@ copy_audio_sidecars() {
       continue
     fi
     # Don't accidentally grab other audio files
-    if [[ "$c" =~ \.(wav|mp3)$ ]]; then
+    if [[ "$c" =~ \.(3gp|aac|aiff|amr|avi|flac|m4a|m4v|mkv|mov|mp3|mp4|mpeg|mpg|oga|ogg|opus|wav|webm|wma)$ ]]; then
       continue
     fi
     copy_one "$c" "$dest_dir" || true
   done
+}
+
+
+parse_media_date() {
+  local bname="$1"
+  python3 - "$bname" <<'PY'
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+
+stem = Path(sys.argv[1]).stem
+patterns = [
+    re.compile(r"(?<!\d)(?:[A-Za-z]{1,8})?(?P<year>(?:19|20)\d{2})[_-]?(?P<month>\d{2})(?P<day>\d{2})[_-]?(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})(?!\d)"),
+    re.compile(r"(?<!\d)(?:[A-Za-z]{1,8}[_-]?)?(?P<year>(?:19|20)\d{2})[_-](?P<month>\d{2})[_-](?P<day>\d{2})[ T_-]+(?P<hour>\d{2})[:._-]?(?P<minute>\d{2})[:._-]?(?P<second>\d{2})(?!\d)"),
+    re.compile(r"(?<!\d)(?:[A-Za-z]{1,8}[_-]?)?(?P<year>(?:19|20)\d{2})[_-](?P<month>\d{2})[_-](?P<day>\d{2})(?!\d)"),
+]
+for pattern in patterns:
+    for match in pattern.finditer(stem):
+        parts = match.groupdict()
+        try:
+            dt = datetime(
+                int(parts["year"]), int(parts["month"]), int(parts["day"]),
+                int(parts.get("hour") or 0), int(parts.get("minute") or 0), int(parts.get("second") or 0),
+            )
+        except ValueError:
+            continue
+        print(dt.strftime("%Y%m%d%H%M%S %Y %m %d"))
+        sys.exit(0)
+sys.exit(1)
+PY
 }
 
 # Find & copy transcripts/diarization anywhere under SRC_BASE that match the stamp
@@ -144,20 +175,17 @@ for MOUNTPOINT in "${CANDIDATES[@]}"; do
   [[ -d "$SRC_BASE" ]] || continue
   echo "$LOG_PREFIX 📂 Found source directory: $SRC_BASE"
 
-  # Find WAV/MP3 (case-insensitive), recursively, space-safe
+  # Find recorder media (case-insensitive), recursively, space-safe
   while IFS= read -r -d '' file; do
     bname="$(basename "$file")"
 
-    # Parse 14-digit stamp from filename if present: YYYYMMDDhhmmss.ext
+    # Parse a recorder timestamp from filename when present (e.g. R2025_0911_223045.mp3,
+    # 20250911223045.WAV, REC_2025-09-11_22-30-45.m4a); otherwise use mtime.
     stamp=""
     year=""; month=""; day=""
-    if [[ "$bname" =~ ^([0-9]{14})\.(wav|mp3)$ ]]; then
-      stamp="${BASH_REMATCH[1]}"
-      year="${stamp:0:4}"
-      month="${stamp:4:2}"
-      day="${stamp:6:2}"
+    if parsed_date=$(parse_media_date "$bname" 2>/dev/null); then
+      read -r stamp year month day <<< "$parsed_date"
     else
-      # Fallback to file modified date
       mod_date="$(stat -c %y "$file" 2>/dev/null | cut -d' ' -f1 || true)"
       if [[ "$mod_date" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})$ ]]; then
         year="${BASH_REMATCH[1]}"; month="${BASH_REMATCH[2]}"; day="${BASH_REMATCH[3]}"
@@ -184,7 +212,7 @@ for MOUNTPOINT in "${CANDIDATES[@]}"; do
       copy_transcripts_by_stamp "$SRC_BASE" "$stamp" "$year" "$month" "$day" || true
     fi
 
-  done < <(find "$SRC_BASE" -type f \( -iname "*.wav" -o -iname "*.mp3" \) -print0)
+  done < <(find "$SRC_BASE" -type f \( -iname "*.3gp" -o -iname "*.aac" -o -iname "*.aiff" -o -iname "*.amr" -o -iname "*.avi" -o -iname "*.flac" -o -iname "*.m4a" -o -iname "*.m4v" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.mp3" -o -iname "*.mp4" -o -iname "*.mpeg" -o -iname "*.mpg" -o -iname "*.oga" -o -iname "*.ogg" -o -iname "*.opus" -o -iname "*.wav" -o -iname "*.webm" -o -iname "*.wma" \) -print0)
 
 done
 

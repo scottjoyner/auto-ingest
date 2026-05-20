@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Organize files named `YYYY_MMDD_HHMMSS_{tail}` into `YYYY/MM/DD/<original_name>`.
+Organize media files into `YYYY/MM/DD/<original_name>` folders.
 
-Examples:
-  python organize_by_timestamp.py -i /audio -o /archive
-  python organize_by_timestamp.py -i /audio -o /archive --dry-run --recursive
-  python organize_by_timestamp.py -i /audio -o /archive --strategy rename --max-workers 8
+The timestamp parser is intentionally permissive so files from different
+recorders/cameras can be mixed in one import pass. Supported filename examples:
 
-File name format assumed at START of basename:
-  YYYY_MMDD_HHMMSS_{tail}[.ext]
-Where:
-  - YYYY: year (4 digits)
-  - MMDD: month (01-12) + day (01-31)
-  - HHMMSS: 24h time
-  - {tail}: anything (may contain underscores, dots, etc.)
+  2025_0911_223045_F.MP4
+  20250911223045.WAV
+  R2025_0911_223045.mp3
+  REC_2025-09-11_22-30-45.m4a
 
-Non-matching or invalid-date filenames are skipped (with a warning).
+By default only common audio/video files are moved. Files with no recognizable
+filename timestamp can optionally be placed by filesystem modified time.
 """
 # python move_files.py -i /mnt/8TB_2025/fileserver/audio -o /mnt/8TB_2025/fileserver/audio --dry-run --recursive
 from __future__ import annotations
@@ -32,14 +28,45 @@ import re
 import shutil
 import sys
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Iterable, Optional
 
 
-NAME_PATTERN = re.compile(
-    r'^(?P<ts>(?:\d{4}_\d{4}_\d{6}|\d{14}))(?:[_.].*)?$'
+DEFAULT_MEDIA_EXTENSIONS = {
+    ".3gp", ".aac", ".aiff", ".amr", ".avi", ".flac", ".m4a", ".m4v",
+    ".mkv", ".mov", ".mp3", ".mp4", ".mpeg", ".mpg", ".oga", ".ogg",
+    ".opus", ".wav", ".webm", ".wma",
+}
+
+# Look for timestamps anywhere in the filename stem. Several voice recorders
+# prefix the timestamp with a channel/source letter (for example R2025_...).
+TIMESTAMP_PATTERNS = (
+    # YYYY_MMDD_HHMMSS, RYYYY_MMDD_HHMMSS, YYYYMMDDHHMMSS
+    re.compile(
+        r"(?<!\d)(?:[A-Za-z]{1,8})?"
+        r"(?P<year>(?:19|20)\d{2})[_-]?"
+        r"(?P<month>\d{2})(?P<day>\d{2})[_-]?"
+        r"(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})(?!\d)"
+    ),
+    # YYYY-MM-DD_HH-MM-SS, YYYY_MM_DD HH.MM.SS, etc.
+    re.compile(
+        r"(?<!\d)(?:[A-Za-z]{1,8}[_-]?)?"
+        r"(?P<year>(?:19|20)\d{2})[_-]"
+        r"(?P<month>\d{2})[_-]"
+        r"(?P<day>\d{2})[ T_-]+"
+        r"(?P<hour>\d{2})[:._-]?"
+        r"(?P<minute>\d{2})[:._-]?"
+        r"(?P<second>\d{2})(?!\d)"
+    ),
+    # YYYY-MM-DD or YYYY_MM_DD when the recorder omits time from the name.
+    re.compile(
+        r"(?<!\d)(?:[A-Za-z]{1,8}[_-]?)?"
+        r"(?P<year>(?:19|20)\d{2})[_-]"
+        r"(?P<month>\d{2})[_-]"
+        r"(?P<day>\d{2})(?!\d)"
+    ),
 )
 
-@dataclass
+@dataclass(frozen=True)
 class ParsedName:
     year: int
     month: int
@@ -49,39 +76,76 @@ class ParsedName:
     second: int
     ts_compact: str        # e.g. 20250911223045
     ts_underscored: str    # e.g. 2025_0911_223045
+    source: str            # filename or mtime
 
-def parse_name(basename: str) -> Optional[ParsedName]:
-    m = NAME_PATTERN.match(basename)
-    if not m:
+
+def _parsed_from_parts(parts: dict[str, str], source: str) -> Optional[ParsedName]:
+    year = int(parts["year"])
+    month = int(parts["month"])
+    day = int(parts["day"])
+    hour = int(parts.get("hour") or 0)
+    minute = int(parts.get("minute") or 0)
+    second = int(parts.get("second") or 0)
+
+    try:
+        dt = datetime(year, month, day, hour, minute, second)
+    except ValueError:
         return None
 
-    ts = m.group('ts')
-    if '_' in ts:
-        # YYYY_MMDD_HHMMSS
-        year  = ts[0:4]
-        month = ts[5:7]
-        day   = ts[7:9]
-        hour  = ts[10:12]
-        minute= ts[12:14]
-        second= ts[14:16]
-    else:
-        # YYYYMMDDHHMMSS
-        year  = ts[0:4]
-        month = ts[4:6]
-        day   = ts[6:8]
-        hour  = ts[8:10]
-        minute= ts[10:12]
-        second= ts[12:14]
-
-    # Build normalized forms
-    ts_compact = f"{year}{month}{day}{hour}{minute}{second}"
-    ts_underscored = f"{year}_{month}{day}_{hour}{minute}{second}"
-
+    ts_compact = dt.strftime("%Y%m%d%H%M%S")
+    ts_underscored = dt.strftime("%Y_%m%d_%H%M%S")
     return ParsedName(
-        year=int(year), month=int(month), day=int(day),
-        hour=int(hour), minute=int(minute), second=int(second),
-        ts_compact=ts_compact, ts_underscored=ts_underscored
+        year=dt.year,
+        month=dt.month,
+        day=dt.day,
+        hour=dt.hour,
+        minute=dt.minute,
+        second=dt.second,
+        ts_compact=ts_compact,
+        ts_underscored=ts_underscored,
+        source=source,
     )
+
+
+def parse_name(basename: str) -> Optional[ParsedName]:
+    """Parse a date/time from a recorder filename without assuming one layout."""
+    stem = Path(basename).stem
+    for pattern in TIMESTAMP_PATTERNS:
+        for match in pattern.finditer(stem):
+            parsed = _parsed_from_parts(match.groupdict(), source="filename")
+            if parsed:
+                return parsed
+    return None
+
+
+def parse_mtime(path: Path) -> Optional[ParsedName]:
+    try:
+        dt = datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:
+        return None
+    return ParsedName(
+        year=dt.year,
+        month=dt.month,
+        day=dt.day,
+        hour=dt.hour,
+        minute=dt.minute,
+        second=dt.second,
+        ts_compact=dt.strftime("%Y%m%d%H%M%S"),
+        ts_underscored=dt.strftime("%Y_%m%d_%H%M%S"),
+        source="mtime",
+    )
+
+
+def normalize_extensions(raw: str) -> Optional[set[str]]:
+    if raw.lower() == "all":
+        return None
+    exts: set[str] = set()
+    for item in raw.split(","):
+        item = item.strip().lower()
+        if not item:
+            continue
+        exts.add(item if item.startswith(".") else f".{item}")
+    return exts
 
 
 def compute_hash(path: Path, algo: str = "md5", chunk_size: int = 1024 * 1024) -> str:
@@ -102,11 +166,9 @@ def choose_collision_action(
     Returns the finalized destination Path, or None if we should skip.
     NOTE: dst must be a FILE path (not a directory).
     """
-    # If somehow caller passed a directory, place file inside it
     if dst.exists() and dst.is_dir():
         dst = dst / src.name
 
-    # If the exact same path, nothing to do
     try:
         if src.resolve() == dst.resolve():
             logging.info("Skip (same path): %s", src)
@@ -118,7 +180,6 @@ def choose_collision_action(
         return dst
 
     if strategy == "skip":
-        # Consider it the same if sizes match; optionally confirm by hash
         same = False
         try:
             if src.stat().st_size == dst.stat().st_size:
@@ -141,7 +202,6 @@ def choose_collision_action(
         raise FileExistsError(f"Destination exists: {dst}")
 
     if strategy == "rename":
-        # Append suffix _1, _2, ... before extension
         parent = dst.parent
         stem = dst.stem
         suffix = dst.suffix
@@ -154,16 +214,13 @@ def choose_collision_action(
 
     raise ValueError(f"Unknown strategy: {strategy}")
 
-def build_destination(root_out: Path, basename: str) -> Optional[Path]:
+def build_destination(root_out: Path, basename: str, parsed: ParsedName) -> Path:
     """
     Return the FULL destination file path:
       <root_out>/YYYY/MM/DD/<basename>
     """
-    parsed = parse_name(basename)
-    if not parsed:
-        return None
     subdir = Path(f"{parsed.year:04d}") / f"{parsed.month:02d}" / f"{parsed.day:02d}"
-    return (root_out / subdir / basename)
+    return root_out / subdir / basename
 
 def move_one(
     src: Path,
@@ -171,33 +228,44 @@ def move_one(
     dry_run: bool,
     strategy: str,
     hash_algo: Optional[str],
+    date_source: str,
 ) -> str:
     basename = src.name
-    dst = build_destination(root_out, basename)
-    if dst is None:
-        logging.warning("Name does not match pattern, skipping: %s", src)
+    parsed = parse_name(basename)
+    if parsed is None and date_source == "mtime-fallback":
+        parsed = parse_mtime(src)
+
+    if parsed is None:
+        logging.warning("No usable date in filename, skipping: %s", src)
         return "skipped"
 
-    # Ensure parent directory exists before collision decision where needed
+    dst = build_destination(root_out, basename, parsed)
+
     final_dst = choose_collision_action(src, dst, strategy=strategy, hash_algo=hash_algo)
     if final_dst is None:
         return "skipped"
 
     if dry_run:
-        logging.info("[DRY-RUN] Would move: %s -> %s", src, final_dst)
+        logging.info("[DRY-RUN] Would move (%s date): %s -> %s", parsed.source, src, final_dst)
         return "dry"
 
     final_dst.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         shutil.move(str(src), str(final_dst))
-        logging.info("Moved: %s -> %s", src, final_dst)
+        logging.info("Moved (%s date): %s -> %s", parsed.source, src, final_dst)
         return "moved"
     except Exception as e:
         logging.error("Failed moving %s -> %s: %s", src, final_dst, e)
         return "error"
 
-def iter_files(root_in: Path, recursive: bool, include_hidden: bool, follow_symlinks: bool):
+def iter_files(
+    root_in: Path,
+    recursive: bool,
+    include_hidden: bool,
+    follow_symlinks: bool,
+    allowed_extensions: Optional[set[str]],
+) -> Iterable[Path]:
     if recursive:
         it = root_in.rglob("*")
     else:
@@ -211,14 +279,15 @@ def iter_files(root_in: Path, recursive: bool, include_hidden: bool, follow_syml
                 continue
             if not include_hidden and p.name.startswith("."):
                 continue
+            if allowed_extensions is not None and p.suffix.lower() not in allowed_extensions:
+                continue
             yield p
         except OSError:
-            # Permissions races, broken symlinks, etc.
             continue
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Move files named 'YYYY_MMDD_HHMMSS_{tail}' into YYYY/MM/DD/ subfolders."
+        description="Move media files into YYYY/MM/DD/ subfolders using flexible recorder timestamps."
     )
     ap.add_argument("-i", "--input", required=True, type=Path, help="Input directory to scan")
     ap.add_argument("-o", "--output", required=True, type=Path, help="Output directory root")
@@ -226,6 +295,17 @@ def main():
     ap.add_argument("--follow-symlinks", action="store_true", help="Follow symlinked files")
     ap.add_argument("--include-hidden", action="store_true", help="Include dotfiles")
     ap.add_argument("--dry-run", "-n", action="store_true", help="Show actions without moving")
+    ap.add_argument(
+        "--extensions",
+        default=",".join(sorted(DEFAULT_MEDIA_EXTENSIONS)),
+        help="Comma-separated extensions to process, or 'all' (default: common audio/video)",
+    )
+    ap.add_argument(
+        "--date-source",
+        choices=["filename", "mtime-fallback"],
+        default="mtime-fallback",
+        help="Use only filename dates or fall back to file modified time (default: mtime-fallback)",
+    )
     ap.add_argument(
         "--strategy",
         choices=["skip", "rename", "overwrite", "fail"],
@@ -261,19 +341,19 @@ def main():
         logging.error("Input is not a directory: %s", args.input)
         sys.exit(2)
 
+    allowed_extensions = normalize_extensions(args.extensions)
     args.output.mkdir(parents=True, exist_ok=True)
 
-    files = list(iter_files(args.input, args.recursive, args.include_hidden, args.follow_symlinks))
+    files = list(iter_files(args.input, args.recursive, args.include_hidden, args.follow_symlinks, allowed_extensions))
     if not files:
-        logging.warning("No files found in input (check flags).")
+        logging.warning("No matching files found in input (check flags/extensions).")
         return
 
     logging.info("Discovered %d file(s) to consider.", len(files))
 
     counts = {"moved": 0, "skipped": 0, "dry": 0, "error": 0}
-    work = [(p, args.output, args.dry_run, args.strategy, args.hash) for p in files]
+    work = [(p, args.output, args.dry_run, args.strategy, args.hash, args.date_source) for p in files]
 
-    # Threaded I/O: safe for shutil + filesystem ops
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as ex:
         futures = [ex.submit(move_one, *w) for w in work]
         for fut in concurrent.futures.as_completed(futures):
