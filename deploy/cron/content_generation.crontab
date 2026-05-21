@@ -1,0 +1,2 @@
+# Run content workflow batch every 30 minutes
+*/30 * * * * cd /app && /usr/local/bin/content-os status >> /var/log/cron-content.log 2>&1

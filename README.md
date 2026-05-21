@@ -103,3 +103,101 @@ Supported local input families include Markdown/text notes, transcript exports (
 Dynamic source rules live in `content-os/integrations/source-adapters.json`. Add a rule there to support a new extension or JSON shape without changing Python code, then run `content-os list-adapters` to confirm the rule is active. `content-os doctor` validates the adapter registry and reports malformed JSON, invalid extensions, invalid routes, and invalid formats. Ingested sources are tracked by SHA-256 in `stores/proof/source-manifest.json` so proof can be traced back to local inputs.
 
 `RESEARCH_IDEATE` routes write candidate material into `stores/ideas/` so research scans do not become publishable drafts without a separate human-reviewed run.
+
+## Containerization and scheduled jobs
+
+This repo can run as independent microservice-style containers for ingestion and content workflow orchestration, including distributed workers sharing a NAS drop location.
+
+### Build once
+
+```bash
+docker compose build
+```
+
+### Run long-running service containers
+
+```bash
+docker compose up -d ingest-service ingest-worker content-service
+```
+
+- `ingest-service` runs `run_ingest_all.sh`. That script already has a lock (`/tmp/ingest_transcripts.lock`) and is safe to trigger repeatedly without overlapping work.
+- `ingest-worker` processes claimed job files from a NAS drop point (`/nas/drop/*.job`) so multiple machines can collaborate on heavy batch workloads.
+- `content-service` runs the Content OS CLI entrypoint (example command: `content-os status`) and can be adapted to batch workflows (`brief`, `draft`, `verify`, etc.).
+
+### Run cron/batch containers
+
+```bash
+docker compose up -d ingest-cron content-cron
+```
+
+- `ingest-cron` runs every 5 minutes and relies on the ingest lock to avoid duplicate simultaneous runs.
+- `content-cron` runs every 30 minutes for periodic content workflow jobs.
+
+### Distributed worker pattern (NAS drop)
+
+Each worker host can run `ingest-worker` against the same NAS mount. Place executable `.job` files in `${DROP_ROOT}` (default `/nas/drop`). Workers atomically claim files by renaming into `/nas/drop/claimed`, then move to `/nas/drop/done` or `/nas/drop/failed`.
+
+Example job file (`/nas/drop/2026-05-20-batch-001.job`):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+cd /app
+/usr/bin/env bash run_ingest_all.sh
+```
+
+
+### Data-endpoint strategy (S drive + NAS1 + shared NAS mount)
+
+Because your pipeline now spans mixed storage generations, configure by **data family** instead of one flat root:
+
+- **Audio-first target**: point `AUDIO_ROOT` to `/nas/S/audio` as S-drive ingestion becomes canonical.
+- **Legacy video/metadata**: keep dashcam/bodycam/transcript paths on NAS1-style directories until migrated.
+- **Shared worker drop queue**: keep `DROP_ROOT` on the shared NAS mount so every worker host can claim jobs atomically.
+- **Neo4j migration-safe**: always set `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DB` explicitly in `.env`.
+
+A starter env template is included at `deploy/path_profiles.env.example`.
+
+### Creating data-type specific distributed jobs
+
+Use the helper to enqueue work by data family:
+
+```bash
+# create audio-only job
+DROP_ROOT=/nas/drop ./deploy/create_job.sh audio
+
+# create dashcam-only job
+DROP_ROOT=/nas/drop ./deploy/create_job.sh dashcam
+
+# create bodycam-only job
+DROP_ROOT=/nas/drop ./deploy/create_job.sh bodycam
+```
+
+This lets different machines specialize throughput (for example, audio/transcription vs. video-heavy passes) while sharing the same claim/done/failed workflow.
+
+### NAS and environment configuration
+
+The compose file mounts `${NAS_ROOT}` (default `/media/scott/NAS`) into containers at `/nas` and provides `SCAN_ROOTS` / `DASHCAM_ROOT` defaults based on that mount. Override with a `.env` file for each machine.
+
+### Notes
+
+- Keep sensitive environment variables in a `.env` file and reference them from `docker-compose.yml`.
+- Update cron commands and job payload scripts to match your final ingestion/content pipeline.
+
+
+## Deployment runbook
+
+For a full file-by-file deployment and operations guide, see [`docs/deployment_runbook.md`](docs/deployment_runbook.md).
+
+
+## x1-370 and deathstar-XPS-8920 migration notes
+
+Operational model:
+- `deathstar-XPS-8920` is treated as a **legacy producer** that drops files into the shared fileserver path.
+- `x1-370` is the **active processing host** that syncs, normalizes, and ingests data into current pipelines.
+
+Current defaults assume NAS1 on x1-370:
+- `NAS_ROOT=/media/scott/NAS1` mounted to `/nas` in containers.
+- Legacy incoming drop path: `/nas/fileserver/incoming/deathstar`.
+
+Use `deploy/sync_from_legacy_drop.sh` to copy legacy drops into canonical roots, including transcripts, YOLO outputs, and metadata CSV/JSON files before ingest runs.

@@ -1,0 +1,82 @@
+services:
+  ingest-service:
+    build: .
+    image: auto-ingest:latest
+    container_name: auto-ingest-service
+    command: ["run_ingest_all.sh"]
+    restart: unless-stopped
+    environment:
+      SCAN_ROOTS: ${SCAN_ROOTS:-/nas/S/audio,/nas/fileserver/audio,/nas/fileserver/audio/transcriptions,/nas/fileserver/bodycam,/nas/fileserver/dashcam,/nas/fileserver/dashcam/transcriptions}
+      DASHCAM_ROOT: ${DASHCAM_ROOT:-/nas/fileserver/dashcam}
+    volumes:
+      - ./:/app
+      - ${NAS_ROOT:-/media/scott/NAS1}:/nas
+
+  ingest-worker:
+    build: .
+    image: auto-ingest:latest
+    container_name: auto-ingest-worker
+    command: ["deploy/worker_ingest.sh"]
+    restart: unless-stopped
+    environment:
+      DROP_ROOT: ${DROP_ROOT:-/nas/drop}
+      AUDIO_ROOT: ${AUDIO_ROOT:-/nas/S/audio}
+      DASHCAM_ROOT: ${DASHCAM_ROOT:-/nas/fileserver/dashcam}
+      BODYCAM_ROOT: ${BODYCAM_ROOT:-/nas/fileserver/bodycam}
+      TRANSCRIPT_ROOT: ${TRANSCRIPT_ROOT:-/nas/fileserver/audio/transcriptions}
+    volumes:
+      - ./:/app
+      - ${NAS_ROOT:-/media/scott/NAS1}:/nas
+
+
+  sync-service:
+    build: .
+    image: auto-ingest:latest
+    container_name: auto-sync-service
+    command: ["deploy/sync_from_legacy_drop.sh"]
+    restart: unless-stopped
+    environment:
+      LEGACY_DROP_ROOT: ${LEGACY_DROP_ROOT:-/nas/fileserver/incoming/deathstar}
+      AUDIO_ROOT: ${AUDIO_ROOT:-/nas/fileserver/audio}
+      DASHCAM_ROOT: ${DASHCAM_ROOT:-/nas/fileserver/dashcam}
+      BODYCAM_ROOT: ${BODYCAM_ROOT:-/nas/fileserver/bodycam}
+      TRANSCRIPT_ROOT: ${TRANSCRIPT_ROOT:-/nas/fileserver/audio/transcriptions}
+      YOLO_ROOT: ${YOLO_ROOT:-/nas/fileserver/dashcam/yolo}
+      META_ROOT: ${META_ROOT:-/nas/fileserver/dashcam/metadata}
+    volumes:
+      - ./:/app
+      - ${NAS_ROOT:-/media/scott/NAS1}:/nas
+
+  content-service:
+    build: .
+    image: auto-ingest:latest
+    container_name: content-generation-service
+    command: ["-m", "content_os", "status"]
+    restart: unless-stopped
+    volumes:
+      - ./:/app
+
+  ingest-cron:
+    build: .
+    image: auto-ingest:latest
+    container_name: ingest-cron
+    entrypoint: ["/app/deploy/start-cron.sh"]
+    environment:
+      CRON_FILE: /app/deploy/cron/ingest.crontab
+      SCAN_ROOTS: ${SCAN_ROOTS:-/nas/S/audio,/nas/fileserver/audio,/nas/fileserver/audio/transcriptions,/nas/fileserver/bodycam,/nas/fileserver/dashcam,/nas/fileserver/dashcam/transcriptions}
+      DASHCAM_ROOT: ${DASHCAM_ROOT:-/nas/fileserver/dashcam}
+    restart: unless-stopped
+    volumes:
+      - ./:/app
+      - ${NAS_ROOT:-/media/scott/NAS1}:/nas
+
+  content-cron:
+    build: .
+    image: auto-ingest:latest
+    container_name: content-cron
+    entrypoint: ["/app/deploy/start-cron.sh"]
+    environment:
+      CRON_FILE: /app/deploy/cron/content_generation.crontab
+    restart: unless-stopped
+    volumes:
+      - ./:/app
