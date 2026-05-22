@@ -1,0 +1,16 @@
+SCHEMA_STATEMENTS = [
+"""CREATE CONSTRAINT camera_id_unique IF NOT EXISTS FOR (c:Camera) REQUIRE c.camera_id IS UNIQUE""",
+"""CREATE CONSTRAINT event_id_unique IF NOT EXISTS FOR (e:DetectionEvent) REQUIRE e.event_id IS UNIQUE""",
+"""CREATE CONSTRAINT detection_id_unique IF NOT EXISTS FOR (d:Detection) REQUIRE d.detection_id IS UNIQUE""",
+"""CREATE CONSTRAINT clip_id_unique IF NOT EXISTS FOR (c:Clip) REQUIRE c.clip_id IS UNIQUE""",
+"""CREATE CONSTRAINT thumbnail_id_unique IF NOT EXISTS FOR (t:Thumbnail) REQUIRE t.thumbnail_id IS UNIQUE""",
+"""CREATE CONSTRAINT object_observation_id_unique IF NOT EXISTS FOR (o:ObjectObservation) REQUIRE o.object_observation_id IS UNIQUE""",
+"""CREATE CONSTRAINT model_id_unique IF NOT EXISTS FOR (m:Model) REQUIRE m.model_id IS UNIQUE""",
+"""CREATE CONSTRAINT detection_profile_id_unique IF NOT EXISTS FOR (p:DetectionProfile) REQUIRE p.profile_id IS UNIQUE""",
+"""CREATE INDEX camera_enabled_idx IF NOT EXISTS FOR (c:Camera) ON (c.enabled)""",
+"""CREATE INDEX event_camera_time_idx IF NOT EXISTS FOR (e:DetectionEvent) ON (e.camera_id, e.start_epoch_ms)""",
+"""CREATE INDEX detection_camera_time_idx IF NOT EXISTS FOR (d:Detection) ON (d.camera_id, d.epoch_ms)""",
+"""CREATE INDEX detection_class_idx IF NOT EXISTS FOR (d:Detection) ON (d.class_name)""",
+"""CREATE INDEX clip_camera_idx IF NOT EXISTS FOR (c:Clip) ON (c.camera_id)""",
+"""CREATE INDEX health_camera_time_idx IF NOT EXISTS FOR (h:CameraHealth) ON (h.camera_id, h.epoch_ms)""",
+]

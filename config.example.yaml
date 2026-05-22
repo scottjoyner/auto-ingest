@@ -1,0 +1,25 @@
+camera_id: feeder-01
+stream_url: rtsp://user:pass@camera/stream1
+storage_root: /mnt/ssd/birdcam
+model_name_or_path: yolov8n.pt
+detection_class: bird
+confidence_threshold: 0.4
+inference_interval_ms: 400
+pre_roll_seconds: 3
+post_roll_seconds: 3
+event_merge_seconds: 8
+cooldown_seconds: 10
+detection_persistence_frames: 2
+sqlite_path: /mnt/ssd/birdcam/birdcam-state.sqlite3
+retention: {max_gb: 20, max_age_days: 30}
+neo4j:
+  enabled: true
+  uri: ${NEO4J_URI}
+  username: ${NEO4J_USERNAME}
+  password: ${NEO4J_PASSWORD}
+  database: neo4j
+  create_schema: true
+  batch_size: 100
+  retry_attempts: 5
+  retry_backoff_seconds: 2
+  use_outbox_on_failure: true
