@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 """
 Global speaker linking with:
   - Segment-level diarization selection (SPOKEN_BY proportion) with auto fallback to Utterances
@@ -48,10 +49,10 @@ except Exception:
 # -----------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-AUDIO_BASE = Path(os.getenv("AUDIO_BASE", "/media/scott/NAS/fileserver/audio"))
+AUDIO_BASE = Path(os.getenv("AUDIO_BASE", get_fileserver_path("audio")))
 ALT_AUDIO_BASES = [
-    Path("/media/scott/NAS/fileserver/dashcam/audio"),
-    Path("/media/scott/NAS/fileserver/dashcam"),
+    Path(get_fileserver_path("dashcam/audio")),
+    Path(get_fileserver_path("dashcam")),
 ]
 AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".flac", ".aac", ".ogg"}
 

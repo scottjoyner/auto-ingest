@@ -1,3 +1,4 @@
+from auto_ingest_config import get_fileserver_path
 import pandas as pd
 import numpy as np
 import ast, re
@@ -8,7 +9,7 @@ from datetime import datetime
 
 def save_image(key, xyxy):
     
-    source_dir = "/media/scott/NAS/8TBHDD/fileserver/dashcam"
+    source_dir = get_fileserver_path("dashcam")
     # Split the string by underscores
     parts = key.split('_')
 
@@ -95,8 +96,8 @@ def list_directories(base_path):
         if is_valid_date_structure(temp_path):
             print(f"Valid directory structure found: {root}")
             file_path = root
-            transcriptions = "/media/scott/NAS/8TB_2025/fileserver/dashcam/transcriptions"
-            audio_dir = "/media/scott/NAS/8TB_2025/fileserver/dashcam/audio"
+            transcriptions = get_fileserver_path("dashcam/transcriptions")
+            audio_dir = get_fileserver_path("dashcam/audio")
             
             key_list = list_files(file_path)
 
@@ -138,5 +139,5 @@ def list_directories(base_path):
                         for index, row in df_unique.iterrows():
                             save_image(row['Key'], row['xyxy'])
 
-list_directories("/media/scott/NAS/8TBHDD/fileserver/dashcam/")
-list_directories("/media/scott/NAS/8TB_2025/fileserver/dashcam/")
+list_directories(get_fileserver_path("dashcam/"))
+list_directories(get_fileserver_path("dashcam/"))

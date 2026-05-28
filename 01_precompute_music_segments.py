@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 import os, json, sys, argparse, re, time, glob
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
@@ -8,9 +9,9 @@ from tqdm import tqdm
 
 # ---------------- Config ----------------
 AUDIO_ROOTS = [
-    "/media/scott/NAS/fileserver/audio",
-    "/media/scott/NAS/fileserver/dashcam/audio",
-    "/media/scott/NAS/fileserver/bodycam/audio",
+    get_fileserver_path("audio"),
+    get_fileserver_path("dashcam/audio"),
+    get_fileserver_path("bodycam/audio"),
 ]  # add/remove as needed
 
 SIDEcar_SUFFIX = ".music.json"          # where we store music segments per audio

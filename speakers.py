@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 import os, re, sys, subprocess, shutil, time, logging
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple, Dict
@@ -14,13 +15,13 @@ import torch  # noqa: F401
 from pyannote.audio import Pipeline
 
 # ========= Config =========
-DASHCAM_BASE           = Path("/media/scott/NAS/fileserver/dashcam")
-DASHCAM_AUDIO_BASE     = Path("/media/scott/NAS/fileserver/dashcam/audio")           # legacy source (read-only)
-DASHCAM_TRANS_BASE     = Path("/media/scott/NAS/fileserver/dashcam/transcriptions")  # legacy source (read-only)
+DASHCAM_BASE           = Path(get_fileserver_path("dashcam"))
+DASHCAM_AUDIO_BASE     = Path(get_fileserver_path("dashcam/audio"))           # legacy source (read-only)
+DASHCAM_TRANS_BASE     = Path(get_fileserver_path("dashcam/transcriptions"))  # legacy source (read-only)
 
-BODYCAM_BASE           = Path("/media/scott/NAS/fileserver/bodycam")                 # source (read-only)
+BODYCAM_BASE           = Path(get_fileserver_path("bodycam"))                 # source (read-only)
 
-AUDIO_BASE             = Path("/media/scott/NAS/fileserver/audio")                   # canonical sink (read+write)
+AUDIO_BASE             = Path(get_fileserver_path("audio"))                   # canonical sink (read+write)
 
 HF_TOKEN               = os.getenv("HF_TOKEN", "")
 MIN_SPEAKERS           = int(os.getenv("MIN_SPEAKERS", "1"))

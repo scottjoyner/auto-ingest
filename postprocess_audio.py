@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 """
 Batch post-processor for AUDIO_BASE.
 
@@ -43,7 +44,7 @@ except Exception:
     HAVE_REQUESTS = False
 
 # ------------- Defaults & Config -------------
-AUDIO_BASE_DEFAULT = "/media/scott/NAS/fileserver/audio"
+AUDIO_BASE_DEFAULT = get_fileserver_path("audio")
 DERIVED_DIRNAME    = "_derived"
 MANIFEST_DIRNAME   = "_manifests"
 STATE_DIRNAME      = "_state"

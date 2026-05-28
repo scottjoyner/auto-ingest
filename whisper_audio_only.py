@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 import argparse
 import csv
 import json
@@ -105,7 +106,7 @@ def main():
     parser.add_argument(
         "--audio-root",
         type=Path,
-        default=Path("/media/scott/NAS/fileserver/audio"),
+        default=Path(get_fileserver_path("audio")),
         help="Root directory to scan for .wav/.mp3 files.",
     )
     parser.add_argument(

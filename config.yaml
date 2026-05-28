@@ -1,0 +1,39 @@
+# auto-ingest configuration
+# This file defines the fileserver root path for each machine.
+# Each script should load this config and use the appropriate path.
+
+machine_paths:
+  # x1-370 (home Tailscale node)
+  x1-370:
+    fileserver_root: /media/scott/NAS2/fileserver
+    neo4j_uri: bolt://100.64.43.123:7687
+    neo4j_user: neo4j
+    neo4j_password: knowledge_graph_2026
+    hostname_pattern: x1-370
+  
+  # deathstar-XPS-8920
+  deathstar:
+    fileserver_root: /mnt/8TB_2025/fileserver
+    neo4j_uri: bolt://100.64.43.123:7687
+    neo4j_user: neo4j
+    neo4j_password: knowledge_graph_2026
+    hostname_pattern: deathstar
+
+# Auto-detection: the script will check the hostname and pick the matching config.
+# If no match, it falls back to the first entry in machine_paths.
+
+# Usage in Python scripts:
+#   import yaml
+#   with open('config.yaml') as f:
+#       cfg = yaml.safe_load(f)
+#   # Auto-detect machine
+#   import socket
+#   hostname = socket.gethostname()
+#   machine = None
+#   for key, vals in cfg['machine_paths'].items():
+#       if vals['hostname_pattern'] in hostname:
+#           machine = vals
+#           break
+#   if not machine:
+#       machine = list(cfg['machine_paths'].values())[0]
+#   fileserver_root = machine['fileserver_root']

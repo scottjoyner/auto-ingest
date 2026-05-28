@@ -1,3 +1,4 @@
+from auto_ingest_config import get_fileserver_path
 import os, re
 from datetime import datetime
 import pandas as pd
@@ -197,5 +198,5 @@ def list_directories(base_path):
             # for file in files:
             #     print(f"  - {file}")
 # Example usage
-base_directory = "/media/scott/NAS/8TBHDD/fileserver/dashcam/"  # Adjust this path to your base directory
+base_directory = get_fileserver_path("dashcam/")  # Adjust this path to your base directory
 list_directories(base_directory)

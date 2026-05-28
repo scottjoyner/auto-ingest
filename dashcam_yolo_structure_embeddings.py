@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 import os, re, ast, json, math, logging, argparse
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Iterable
@@ -686,8 +687,8 @@ def process_directory(
 def main():
     parser = argparse.ArgumentParser(description="Build structure-preserving YOLO embeddings (per-second & per-minute) and ingest into Neo4j.")
     parser.add_argument("--bases", nargs="+", default=[
-        "/media/scott/NAS/fileserver/dashcam/",
-        "/media/scott/NAS/fileserver/dashcam/"
+        get_fileserver_path("dashcam"),
+        get_fileserver_path("dashcam")
     ], help="One or more base directories to walk (expects YYYY/MM/DD subdirs)")
     parser.add_argument("--grid", default="16x9", help="Primary grid WxH (e.g., 16x9)")
     parser.add_argument("--pyramid", action="store_true", help="Use spatial pyramid (adds 8x4 and 32x18 to the base grid)")

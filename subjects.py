@@ -1,3 +1,4 @@
+from auto_ingest_config import get_fileserver_path
 
 import os, re, uuid, csv, json, time
 from datetime import datetime
@@ -22,7 +23,7 @@ def list_files(directory):
             file_keys.add(filename.rsplit('_medium_transcription.txt', 1)[0])
     file_keys_copy = file_keys.copy()
     for filename in file_keys_copy:
-        if os.path.exists(f"/media/scott/NAS/8TB_2025/fileserver/dashcam/transcriptions/{filename}_medium_transcription_entities.csv"):
+        if os.path.exists(fget_fileserver_path("dashcam/transcriptions/{filename}_medium_transcription_entities.csv")):
             file_keys.remove(filename)
     return sorted(list(file_keys))
 
@@ -35,7 +36,7 @@ def is_valid_date_structure(dir_name):
 
 def list_directories(base_path):
 
-    transcriptions = "/media/scott/NAS/8TB_2025/fileserver/dashcam/transcriptions"
+    transcriptions = get_fileserver_path("dashcam/transcriptions")
     
     key_list = list_files(transcriptions)
 
@@ -68,5 +69,5 @@ def list_directories(base_path):
 
 
 
-# list_directories("/media/scott/NAS/8TBHDD/fileserver/dashcam/")
-list_directories("/media/scott/NAS/fileserver/dashcam/")
+# list_directories(get_fileserver_path("dashcam/"))
+list_directories(get_fileserver_path("dashcam/"))

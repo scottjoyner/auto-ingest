@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 import os, re, json, math, argparse
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple
@@ -29,9 +30,9 @@ THR_SPEECH = 0.35     # be generous labeling speech
 SEGMENTS_SOURCE = os.getenv("SEGMENTS_SOURCE", "neo4j")  # "neo4j" or "sidecar"
 SIDECAR_SUFFIX  = ".music.json"
 AUDIO_ROOTS     = [
-    "/media/scott/NAS/fileserver/audio",
-    "/media/scott/NAS/fileserver/dashcam/audio",
-    "/media/scott/NAS/fileserver/bodycam/audio",
+    get_fileserver_path("audio"),
+    get_fileserver_path("dashcam/audio"),
+    get_fileserver_path("bodycam/audio"),
 ]
 
 # --------------- Helpers ---------------

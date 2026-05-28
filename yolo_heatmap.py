@@ -1,3 +1,4 @@
+from auto_ingest_config import get_fileserver_path
 import pandas as pd
 import ast, re
 from moviepy.editor import *
@@ -123,5 +124,5 @@ def list_directories(base_path):
                     print(current, total, current/total)
 
 
-base_directory = "/media/scott/NAS/8TBHDD/fileserver/dashcam/"  # Adjust this path to your base directory
+base_directory = get_fileserver_path("dashcam")  # Adjust this path to your base directory
 list_directories(base_directory)

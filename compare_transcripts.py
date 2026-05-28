@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 # -*- coding: utf-8 -*-
 import os, io, json, mimetypes, re
 from typing import List, Dict, Any, Optional, Tuple
@@ -21,7 +22,7 @@ EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))
 EMBED_BATCH = int(os.getenv("EMBED_BATCH", "32"))
 
 # IMPORTANT: only serve media from within this base dir
-MEDIA_BASE = os.getenv("MEDIA_BASE", "/media/scott/NAS/fileserver/audio")
+MEDIA_BASE = os.getenv("MEDIA_BASE", get_fileserver_path("audio"))
 
 # ANN index names (must exist)
 IDX_TRANS_V1 = os.getenv("IDX_TRANS_V1", "transcription_embedding_index")

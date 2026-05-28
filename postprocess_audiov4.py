@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 # -*- coding: utf-8 -*-
 """
 Ingest transcripts (dashcam/bodycam/audio) into Neo4j with:
@@ -16,7 +17,7 @@ Usage
 # Ingest everything with info logs, read taxonomy, write confmats & sidecars:
 ./.venv/bin/python3 ingest_transcripts.py \
   --taxonomy /path/to/taxonomy.yml \
-  --confmat-out /media/scott/NAS/fileserver/audio/_reports \
+  --confmat-out get_fileserver_path("audio/_reports") \
   --sidecar-pretty --narrative --log-level INFO
 
 # Dry run (no writes), show decisions
@@ -64,11 +65,11 @@ EMA_ALPHA = float(os.getenv("EMA_ALPHA", "0.2"))
 
 # Default scan roots (env override: SCAN_ROOTS="a,b,c")
 DEFAULT_SCAN_ROOTS = [
-    "/media/scott/NAS/fileserver/dashcam/audio",
-    "/media/scott/NAS/fileserver/dashcam/transcriptions",
-    "/media/scott/NAS/fileserver/audio",
-    "/media/scott/NAS/fileserver/audio/transcriptions",
-    "/media/scott/NAS/fileserver/bodycam",
+    get_fileserver_path("dashcam/audio"),
+    get_fileserver_path("dashcam/transcriptions"),
+    get_fileserver_path("audio"),
+    get_fileserver_path("audio/transcriptions"),
+    get_fileserver_path("bodycam"),
 ]
 SCAN_ROOTS = [p.strip() for p in os.getenv("SCAN_ROOTS", ",".join(DEFAULT_SCAN_ROOTS)).split(",") if p.strip()]
 
@@ -90,7 +91,7 @@ NEO4J_ENABLED = bool(NEO4J_URI and NEO4J_USER and NEO4J_PASSWORD)
 DEFAULT_BATCH_SIZE = int(os.getenv("EMBED_BATCH", "32"))
 
 # Filenames and patterns (JSON lives in <model>_transcription.txt per new pipeline)
-AUDIO_BASE = Path("/media/scott/NAS/fileserver/audio")
+AUDIO_BASE = Path(get_fileserver_path("audio"))
 PAT_TRANS_JSON_TXT   = re.compile(r"_([A-Za-z0-9\-\._]+)_transcription\.txt$", re.IGNORECASE)
 PAT_TRANS_CSV        = re.compile(r"_transcription\.csv$", re.IGNORECASE)
 PAT_ENTITIES         = re.compile(r"_transcription_(entites|entities)\.csv$", re.IGNORECASE)

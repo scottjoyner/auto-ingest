@@ -1,3 +1,4 @@
+from auto_ingest_config import get_fileserver_path
 import os, re, uuid, csv, json, time
 from datetime import datetime
 import whisper
@@ -363,7 +364,7 @@ def list_directories(base_path, whisper_model):
         if is_valid_date_structure(temp_path):
             print(f"Valid directory structure found: {root}")
             file_path = root
-            transcriptions = "/media/scott/NAS/8TB_2025/fileserver/dashcam/transcriptions"
+            transcriptions = get_fileserver_path("dashcam/transcriptions")
             key_list = list_files(file_path, transcriptions, whisper_model)
 
             total = len(key_list)
@@ -398,7 +399,7 @@ def list_directories(base_path, whisper_model):
             #     finally:
             #         print("Finally:", print(datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')))
 if __name__ == "__main__":
-    base_directory = "/media/scott/NAS/8TBHDD/fileserver/dashcam/"  # Adjust this path to your base directory
+    base_directory = get_fileserver_path("dashcam/")  # Adjust this path to your base directory
     list_directories(base_directory, whisper_model="medium")
-    base_directory = "/media/scott/NAS/8TB_2025/fileserver/dashcam/"
+    base_directory = get_fileserver_path("dashcam/")
     list_directories(base_directory, whisper_model="medium")

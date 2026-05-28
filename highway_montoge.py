@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 # -*- coding: utf-8 -*-
 """
 highway_montage.py
@@ -30,7 +31,7 @@ Key capabilities
 Assumptions
 -----------
 - Neo4j nodes :Frame have fields like (key, frame, millis, mph, lat, long, veh_count?) but we auto-fallback.
-- Matching *_FR.MP4 files live under bases like /media/scott/NAS/fileserver/dashcam/YYYY/MM/DD/<KEY>_FR.MP4
+- Matching *_FR.MP4 files live under bases like get_fileserver_path("dashcam/YYYY/MM/DD/<KEY>_FR.MP4")
 - Adjacent Whisper JSON (optional captions): <KEY>_whisper.json or <KEY>_*_whisper.json
 
 CLI quickstart
@@ -595,7 +596,7 @@ def cmd_render(args) -> None:
 # --------- CLI ----------
 def build_cli() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Plan & render highway speed montages with traffic heatmaps.")
-    p.add_argument("--bases", action="append", default=["/media/scott/NAS/fileserver/dashcam"], help="Dashcam bases (repeatable).")
+    p.add_argument("--bases", action="append", default=[get_fileserver_path("dashcam")], help="Dashcam bases (repeatable).")
     p.add_argument("--fps-fallback", type=float, default=30.0)
     p.add_argument("--log-level", default="INFO")
 
@@ -668,7 +669,7 @@ if __name__ == "__main__":
 # 1) Highway traffic plan (favor heavy traffic), write heatmaps:
 python highway_montage.py \
   plan-highway \
-  --bases /media/scott/NAS/fileserver/dashcam \
+  --bases get_fileserver_path("dashcam") \
   --min-mph 55 --max-mph 120 \
   --limit 500 \
   --pre 1.0 --post 2.0 --min-gap 3.5 \

@@ -17,10 +17,12 @@ except Exception:
 # =========================
 # Config
 # =========================
+from auto_ingest_config import get_fileserver_path, get_neo4j_config
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-AUDIO_RTTM_DIR = "/media/scott/NAS/fileserver/dashcam/audio"
-TRANSCRIPTION_DIR = "/media/scott/NAS/fileserver/dashcam/transcriptions"
+AUDIO_RTTM_DIR = get_fileserver_path("dashcam", "audio")
+TRANSCRIPTION_DIR = get_fileserver_path("dashcam", "transcriptions")
 
 # Filenames we consider as sources
 PAT_TRANS_JSON = re.compile(r"_medium_transcription\.(json|txt)$", re.IGNORECASE)

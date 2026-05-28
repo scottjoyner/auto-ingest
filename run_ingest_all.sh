@@ -30,10 +30,10 @@ NICE="${NICE:-nice -n 10}"           # lower CPU priority
 
 # ========== Environment (override with env vars if you want) ==========
 # Where to scan for transcripts & media
-export SCAN_ROOTS="${SCAN_ROOTS:-/media/scott/NAS/fileserver/dashcam/audio,/media/scott/NAS/fileserver/dashcam/transcriptions,/media/scott/NAS/fileserver/audio,/media/scott/NAS/fileserver/audio/transcriptions,/media/scott/NAS/fileserver/bodycam,/media/scott/NAS/fileserver/dashcam}"
+export SCAN_ROOTS="${SCAN_ROOTS:-FILESERVER_ROOT/dashcam/audio,FILESERVER_ROOT/dashcam/transcriptions,FILESERVER_ROOT/audio,FILESERVER_ROOT/audio/transcriptions,FILESERVER_ROOT/bodycam,FILESERVER_ROOT/dashcam}"
 
 # Where to aggressively look for *_metadata.csv
-export DASHCAM_ROOT="${DASHCAM_ROOT:-/media/scott/NAS/fileserver/dashcam}"
+export DASHCAM_ROOT="${DASHCAM_ROOT:-FILESERVER_ROOT/dashcam}"
 
 # Timezone for key→absolute timestamps
 export LOCAL_TZ="${LOCAL_TZ:-America/New_York}"

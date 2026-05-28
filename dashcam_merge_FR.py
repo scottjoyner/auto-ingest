@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 from __future__ import annotations
 
 import os
@@ -300,7 +301,7 @@ def main(argv: List[str]) -> int:
             return 2
     if not bases and not args.single_dirs:
         # default to your common base if nothing was supplied
-        bases = ["/media/scott/NAS/fileserver/dashcam/"]
+        bases = [get_fileserver_path("dashcam")]
 
     base_paths = [Path(b).resolve() for b in bases]
     single_dirs = [Path(s).resolve() for s in args.single_dirs]

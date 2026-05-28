@@ -1,3 +1,4 @@
+from auto_ingest_config import get_fileserver_path
 import ultralytics
 ultralytics.checks()
 from collections import defaultdict
@@ -205,7 +206,7 @@ def list_directories(base_path):
                     target_height=1920
                 )
 if __name__ == "__main__":
-    base_directory = "/media/scott/NAS/8TBHDD/fileserver/dashcam/"  # Adjust this path to your base directory
+    base_directory = get_fileserver_path("dashcam/")  # Adjust this path to your base directory
     list_directories(base_directory)
-    base_directory = "/media/scott/NAS/8TB_2025/fileserver/dashcam/"
+    base_directory = get_fileserver_path("dashcam/")
     list_directories(base_directory)

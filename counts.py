@@ -1,3 +1,4 @@
+from auto_ingest_config import get_fileserver_path
 import os, re, uuid, csv, json
 import whisper
 import numpy as np
@@ -361,15 +362,15 @@ def list_directories(base_path, whisper_model, total, todo):
         temp_path = root[len(base_path):]        
         if is_valid_date_structure(temp_path):
             file_path = root
-            transcriptions = "/media/scott/NAS/8TB_2025/fileserver/dashcam/transcriptions"
+            transcriptions = get_fileserver_path("dashcam/transcriptions")
             total_list, key_list = list_files(file_path, transcriptions, whisper_model)
             total += len(total_list)
             todo += len(key_list)
     return total, todo
 
 if __name__ == "__main__":
-    base_directory = "/media/scott/NAS/8TBHDD/fileserver/dashcam/"  # Adjust this path to your base directory
+    base_directory = get_fileserver_path("dashcam")  # Adjust this path to your base directory
     total, todo = list_directories(base_directory, "medium", 0,0)
-    base_directory = "/media/scott/NAS/8TB_2025/fileserver/dashcam/"
+    base_directory = get_fileserver_path("dashcam")
     total, todo = list_directories(base_directory, "medium", total, todo)
     print(todo, total, todo/total)

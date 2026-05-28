@@ -1,3 +1,4 @@
+from auto_ingest_config import get_fileserver_path
 
 import os, re, uuid, csv, json, time
 from datetime import datetime
@@ -43,7 +44,7 @@ def list_directories(base_path):
         if is_valid_date_structure(temp_path):
             print(f"Valid directory structure found: {root}")
             file_path = root
-            transcriptions = "/media/scott/NAS/fileserver/dashcam/transcriptions"
+            transcriptions = get_fileserver_path("dashcam/transcriptions")
             key_list = list_files(file_path)
 
             total = len(key_list)
@@ -66,5 +67,5 @@ def list_directories(base_path):
                         for segment in data["segments"]:
                             print(segment['text'], segment['tokens'])
 
-list_directories("/media/scott/NAS/fileserver/dashcam/")
-list_directories("/media/scott/NAS/fileserver/dashcam/")
+list_directories(get_fileserver_path("dashcam"))
+list_directories(get_fileserver_path("dashcam"))

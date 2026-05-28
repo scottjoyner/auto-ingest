@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 """
 Dashcam HUD → OCR → CSV (+ optional Neo4j upsert)
 
@@ -17,7 +18,7 @@ Neo4j (optional):
 
 Example:
     python dashcam_hud_iterate.py \
-      --base /media/scott/NAS/fileserver/dashcam \
+      --base get_fileserver_path("dashcam") \
       --neo4j-uri bolt://localhost:7687 --neo4j-user neo4j --neo4j-pass password
 """
 

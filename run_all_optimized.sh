@@ -15,7 +15,7 @@ echo "▶️ Copy: audio / dashcam / bodycam"
 
 echo "▶️ Whisper (chunked, merged, large-v3) over AUDIO tree"
 # ./.venv/bin/python3 whisper_audio_chunked.py \
-#   --audio-root /media/scott/NAS/fileserver/audio \
+#   --audio-root FILESERVER_ROOT/audio \
 #   --fast-copy \
 #   --merge \
 #   --model large-v3 || echo "❌ Failed: whisper_audio_chunked.py"
@@ -23,14 +23,14 @@ echo "▶️ Whisper (chunked, merged, large-v3) over AUDIO tree"
 # ./.venv/bin/python3 whisper_audio_chunkedv1.py \ [OLD VERSION]
 #   --model medium \
 #   --merge \
-#   --audio-root /media/scott/NAS/fileserver/audio \
-#   --transcriptions-root /media/scott/NAS/fileserver/audio/transcriptions
+#   --audio-root FILESERVER_ROOT/audio \
+#   --transcriptions-root FILESERVER_ROOT/audio/transcriptions
 
 # ./.venv/bin/python3 whisper_audio_chunked.py \
 #   --model medium \
 #   --merge \
-#   --audio-root /media/scott/NAS/fileserver/audio \
-#   --transcriptions-root /media/scott/NAS/fileserver/audio \
+#   --audio-root FILESERVER_ROOT/audio \
+#   --transcriptions-root FILESERVER_ROOT/audio \
 #   --chunks-root /tmp/chunks \
 #   --pcm-wav \
 #   --chunk-len 90 --stride 85 \
@@ -69,8 +69,8 @@ echo "▶️ YOLO vehicle detection"
 
 echo "▶️ Dashcam HUD metadata"
 ./.venv/bin/python3 metadata_scraper_iterator.py || echo "❌ Failed: metadata_scraper_iterator.py"
-# ./.venv/bin/python3 dashcam_hud_iterate.py --base /media/scott/NAS/fileserver/dashcam || echo "❌ Failed: dashcam_hud_iterator.py"
-# ./.venv/bin/python3 dashcam_hud_iterate.py --base /media/scott/NAS/fileserver/dashcam || echo "❌ Failed: dashcam_hud_iterator.py"
+# ./.venv/bin/python3 dashcam_hud_iterate.py --base FILESERVER_ROOT/dashcam || echo "❌ Failed: dashcam_hud_iterator.py"
+# ./.venv/bin/python3 dashcam_hud_iterate.py --base FILESERVER_ROOT/dashcam || echo "❌ Failed: dashcam_hud_iterator.py"
 
 echo "▶️ Music precompute + lyrics classifier (optional)"
 ./.venv/bin/python3 01_precompute_music_segments.py --push-neo4j || echo "❌ Failed: 01_precompute_music_segments.py"
@@ -176,29 +176,29 @@ echo "▶️ Patch Missing Locations in YOLO Embeddings"
 
 # echo "▶️ Dashcam Merger" (Not working yet)
 # ./.venv/bin/python3 dashcam_merge_FR.py \
-#   --base /media/scott/NAS/fileserver/dashcam \
-#   --base /media/scott/NAS/fileserver/dashcam  || echo "❌ Failed: dashcam_merge_FR.py"
+#   --base FILESERVER_ROOT/dashcam \
+#   --base FILESERVER_ROOT/dashcam  || echo "❌ Failed: dashcam_merge_FR.py"
 
 echo "▶️ Iterator" # (OLD)
 ./.venv/bin/python3 iterator.py || echo "❌ Failed: iterator.py"
 
 echo "▶️ ingest_sidecar_summaries.py"
 ./.venv/bin/python3 ingest_sidecar_summaries.py \
-  --roots /media/scott/NAS/fileserver/audio \
+  --roots FILESERVER_ROOT/audio \
   --ensure-schema \
   --create-missing-transcriptions
 
 OLLAMA_MODEL=gemma2:2b OLLAMA_USE_CLI=1 OLLAMA_TIMEOUT=900 python summarize_from_segments_v2.py --all-missing --write-notes --include-utterances
 
 echo "▶️ timelapse_from_fr"
-./.venv/bin/python3 timelapse_from_fr.py /media/scott/NAS/fileserver/dashcam --recursive || echo "❌ Failed: timelapse_from_fr.py"
+./.venv/bin/python3 timelapse_from_fr.py FILESERVER_ROOT/dashcam --recursive || echo "❌ Failed: timelapse_from_fr.py"
 
 echo "▶️ timelapse_from_fr"
-./.venv/bin/python3 shorts_builder.py --base /media/scott/NAS/fileserver/dashcam --profiles clean karaoke wordgrid || echo "❌ Failed: shorts_builder.py"
+./.venv/bin/python3 shorts_builder.py --base FILESERVER_ROOT/dashcam --profiles clean karaoke wordgrid || echo "❌ Failed: shorts_builder.py"
 
 # echo "▶️ timelapse_from_fr"
 # ./.venv/bin/python3 shorts_builder.py \
-#   --base /media/scott/NAS/fileserver/dashcam \
+#   --base FILESERVER_ROOT/dashcam \
 #   --profiles-file profiles.json \
 #   --profiles clean karaoke pop_neon cinematic minimal_lower_third meme_bold highlighter tech_hud wordgrid emoji_style || echo "❌ Failed: shorts_builder.py"
 

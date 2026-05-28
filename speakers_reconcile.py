@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 """
 Backfill Segment.speaker_* and SPOKEN_BY edges from diarization RTTM.
 
@@ -298,9 +299,9 @@ def main():
     idx = None
     if args.allow_discovery:
         search_dirs = args.rttm_dir or [
-            "/media/scott/NAS/fileserver/dashcam/audio",
-            "/media/scott/NAS/fileserver/audio",
-            "/media/scott/NAS/fileserver/dashcam",
+            get_fileserver_path("dashcam/audio"),
+            get_fileserver_path("audio"),
+            get_fileserver_path("dashcam"),
         ]
         idx = index_rttm_dirs(search_dirs)
 

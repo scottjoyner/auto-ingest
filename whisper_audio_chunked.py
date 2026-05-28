@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 """
 Robust, chunk-aware Whisper transcriber.
 
@@ -344,7 +345,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Transcribe audio; avoid chunking when possible; robust chunking for long files with safe formats."
     )
-    p.add_argument("--audio-root", type=Path, default=Path("/media/scott/NAS/fileserver/audio"),
+    p.add_argument("--audio-root", type=Path, default=Path(get_fileserver_path("audio")),
                    help="Root directory containing source audio files (wav/mp3/m4a/flac/ogg/aac).")
     p.add_argument("--transcriptions-root", type=Path, default=None,
                    help="Where to write transcription outputs. Default: <audio-root>/transcriptions")

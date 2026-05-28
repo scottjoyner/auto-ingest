@@ -5,7 +5,7 @@ IFS=$'\n\t'
 # =========================
 # Config
 # =========================
-DEST_ROOT="/media/scott/NAS/fileserver/dashcam"
+DEST_ROOT=get_fileserver_path("dashcam")
 SRC_FOLDERS=("DCIM/Movie" "DCIM/Movie/RO")
 
 # Sidecar/associated file extensions to bring along (case-insensitive)

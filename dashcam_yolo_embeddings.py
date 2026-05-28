@@ -9,6 +9,11 @@ from moviepy.editor import VideoFileClip
 from neo4j import GraphDatabase
 from neo4j.exceptions import Neo4jError
 
+# =========================
+# Config
+# =========================
+from auto_ingest_config import get_fileserver_path, get_neo4j_config
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 # =========================
@@ -1570,8 +1575,8 @@ def process_directory(
 def main():
     parser = argparse.ArgumentParser(description="YOLO structure embeddings with location augmentation → Neo4j")
     parser.add_argument("--bases", nargs="+", default=[
-        "/media/scott/NAS/fileserver/dashcam/",
-        "/media/scott/NAS/fileserver/dashcam/"
+        get_fileserver_path("dashcam"),
+        get_fileserver_path("dashcam")
     ])
     parser.add_argument("--grid", default="16x9")
     parser.add_argument("--pyramid", action="store_true")
@@ -1580,9 +1585,10 @@ def main():
     parser.add_argument("--no-second", action="store_true")
     parser.add_argument("--no-minute", action="store_true")
     parser.add_argument("--heatmap", action="store_true")
-    parser.add_argument("--neo4j-uri", default="bolt://localhost:7687")
-    parser.add_argument("--neo4j-user", default="neo4j")
-    parser.add_argument("--neo4j-pass", default="password")
+    neo4j_cfg = get_neo4j_config()
+    parser.add_argument("--neo4j-uri", default=neo4j_cfg['uri'])
+    parser.add_argument("--neo4j-user", default=neo4j_cfg['user'])
+    parser.add_argument("--neo4j-pass", default=neo4j_cfg['password'])
     parser.add_argument("--classes", nargs="*", default=list(DEFAULT_VEHICLE_CLASSES))
     parser.add_argument("--no-append-location", action="store_true", help="Do not append loc_vec to scene vector")
     parser.add_argument("--no-time-features", action="store_true", help="Do not add time-of-day sin/cos to loc_vec")

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 import os, re, ast, json, math, logging, argparse, datetime, subprocess, shlex
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Iterable
@@ -2233,8 +2234,8 @@ def walk_date_dirs(base: str) -> List[str]:
 def main():
     parser = argparse.ArgumentParser(description="YOLO structure embeddings with location augmentation → Neo4j")
     parser.add_argument("--bases", nargs="+", default=[
-        "/media/scott/NAS/fileserver/dashcam/",
-        "/media/scott/NAS/fileserver/dashcam/"
+        get_fileserver_path("dashcam"),
+        get_fileserver_path("dashcam")
     ])
     parser.add_argument("--grid", default="16x9")
     parser.add_argument("--pyramid", action="store_true")

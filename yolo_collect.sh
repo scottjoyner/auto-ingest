@@ -5,7 +5,7 @@
 # and concatenates them into one output file.
 
 # -- Configuration --
-ROOT_DIR="/media/scott/NAS/8TBHDD/fileserver/dashcam"   # Update this path
+ROOT_DIR=get_fileserver_path("dashcam")   # Update this path
 OUTPUT_FILE="merged_yolo.csv"        # Name of your concatenated file
 
 # --- Script Start ---

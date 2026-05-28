@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 import argparse, subprocess, sys, os, re, shlex, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -377,6 +378,6 @@ if __name__ == "__main__":
     main()
 
 # python3 compress_dashcam2.py \
-#   --input-root /media/scott/NAS/fileserver/dashcam \
+#   --input-root get_fileserver_path("dashcam") \
 #   --output-root /media/scott/NAS/3863-3833/dashcam \
 #   --order newest --limit 50000 --workers 1 --verify-threshold 0.95

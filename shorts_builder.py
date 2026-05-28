@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from auto_ingest_config import get_fileserver_path
 # -*- coding: utf-8 -*-
 """
 Build vertical 9:16 'shorts' with dynamic, speaker-aware captions from *_FR.MP4.
@@ -1170,7 +1171,7 @@ def main() -> int:
         total_done += d
         total_planned += p
     else:
-        bases = [Path(b).resolve() for b in (args.bases or ["/media/scott/NAS/fileserver/dashcam/"])]
+        bases = [Path(b).resolve() for b in (args.bases or [get_fileserver_path("dashcam/")])]
         for base in bases:
             if not base.is_dir():
                 logging.warning(f"--base not found/dir: {base}")
