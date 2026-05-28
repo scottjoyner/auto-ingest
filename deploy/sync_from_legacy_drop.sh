@@ -5,6 +5,12 @@ set -euo pipefail
 # Safe for repeated runs; uses rsync --ignore-existing by default.
 
 LEGACY_DROP_ROOT="${LEGACY_DROP_ROOT:-/nas/fileserver/incoming/deathstar}"
+
+# Exit gracefully if legacy drop root doesn't exist
+if [[ ! -d "$LEGACY_DROP_ROOT" ]]; then
+    echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') Legacy drop root not found: $LEGACY_DROP_ROOT — skipping sync"
+    exit 0
+fi
 AUDIO_ROOT="${AUDIO_ROOT:-/nas/fileserver/audio}"
 DASHCAM_ROOT="${DASHCAM_ROOT:-/nas/fileserver/dashcam}"
 BODYCAM_ROOT="${BODYCAM_ROOT:-/nas/fileserver/bodycam}"

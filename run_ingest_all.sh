@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# === Edit these paths if needed ===
+# Where to find Python (prefer venv, fall back to system python)
 VENV="${VENV:-./.venv}"
-PY="${PY:-$VENV/bin/python3}"
+if [[ -x "$VENV/bin/python3" ]]; then
+  PY="$VENV/bin/python3"
+else
+  PY="python3"
+fi
 SCRIPT="${SCRIPT:-./ingest_transcriptsv5_3.py}"
 
 # Where logs go
@@ -42,7 +46,7 @@ export EMBED_BATCH="${EMBED_BATCH:-32}"  # tokenizer batch size for GPU/CPU
 # Neo4j connection (edit if your credentials differ)
 export NEO4J_URI="${NEO4J_URI:-bolt://localhost:7687}"
 export NEO4J_USER="${NEO4J_USER:-neo4j}"
-export NEO4J_PASSWORD="${NEO4J_PASSWORD:-livelongandprosper}"
+export NEO4J_PASSWORD="${NEO4J_PASSWORD:-knowledge_graph_2026}"
 export NEO4J_DB="${NEO4J_DB:-neo4j}"
 
 # Model preference ordering (optional override)
@@ -110,7 +114,7 @@ if [[ "$FORCE" == "1" ]]; then
 fi
 
 # Make sure the venv + script exist
-if [[ ! -x "$PY" ]]; then
+if ! command -v "$PY" &>/dev/null; then
   echo "Python not found at $PY. Set VENV or PY env var correctly." >&2
   exit 2
 fi

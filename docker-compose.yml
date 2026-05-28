@@ -1,82 +1,166 @@
+# Auto-Ingest Docker Compose
+# Services: ingest, worker, sync, content, cron jobs
+# All paths mounted from host via NAS_ROOT (.env)
+
 services:
+  # === Ingest Service ===
+  # Runs run_ingest_all.sh continuously. Has flock-based concurrency guard.
   ingest-service:
     build: .
     image: auto-ingest:latest
     container_name: auto-ingest-service
-    command: ["run_ingest_all.sh"]
+    command: ["bash", "-c", "while true; do /app/run_ingest_all.sh; sleep 300; done"]
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      SCAN_ROOTS: ${SCAN_ROOTS:-/nas/S/audio,/nas/fileserver/audio,/nas/fileserver/audio/transcriptions,/nas/fileserver/bodycam,/nas/fileserver/dashcam,/nas/fileserver/dashcam/transcriptions}
-      DASHCAM_ROOT: ${DASHCAM_ROOT:-/nas/fileserver/dashcam}
+      SCAN_ROOTS: ${SCAN_ROOTS}
+      DASHCAM_ROOT: ${DASHCAM_ROOT}
+      NEO4J_URI: ${NEO4J_URI}
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      NEO4J_DB: ${NEO4J_DB}
+      LOCAL_TZ: America/New_York
+      EMBED_MODEL_NAME: sentence-transformers/all-MiniLM-L6-v2
+      MODEL_PREF: large-v3,faster-whisper:large-v3
+      LOG_LEVEL: INFO
     volumes:
       - ./:/app
-      - ${NAS_ROOT:-/media/scott/NAS1}:/nas
+      - ${NAS_ROOT}:/nas
+    networks:
+      - auto-ingest-net
 
+  # === Ingest Worker (distributed) ===
+  # Claims .job files from NAS drop queue and executes them
   ingest-worker:
     build: .
     image: auto-ingest:latest
     container_name: auto-ingest-worker
-    command: ["deploy/worker_ingest.sh"]
+    command: ["bash", "-c", "while true; do /app/deploy/worker_ingest.sh; sleep 30; done"]
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      DROP_ROOT: ${DROP_ROOT:-/nas/drop}
-      AUDIO_ROOT: ${AUDIO_ROOT:-/nas/S/audio}
-      DASHCAM_ROOT: ${DASHCAM_ROOT:-/nas/fileserver/dashcam}
-      BODYCAM_ROOT: ${BODYCAM_ROOT:-/nas/fileserver/bodycam}
-      TRANSCRIPT_ROOT: ${TRANSCRIPT_ROOT:-/nas/fileserver/audio/transcriptions}
+      DROP_ROOT: ${DROP_ROOT}
+      AUDIO_ROOT: ${AUDIO_ROOT}
+      DASHCAM_ROOT: ${DASHCAM_ROOT}
+      BODYCAM_ROOT: ${BODYCAM_ROOT}
+      TRANSCRIPT_ROOT: ${TRANSCRIPT_ROOT}
+      NEO4J_URI: ${NEO4J_URI}
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      NEO4J_DB: ${NEO4J_DB}
     volumes:
       - ./:/app
-      - ${NAS_ROOT:-/media/scott/NAS1}:/nas
+      - ${NAS_ROOT}:/nas
+    networks:
+      - auto-ingest-net
 
-
+  # === Sync Service ===
+  # Continuously syncs legacy drop from deathstar into canonical roots
   sync-service:
     build: .
     image: auto-ingest:latest
     container_name: auto-sync-service
-    command: ["deploy/sync_from_legacy_drop.sh"]
+    command: ["bash", "-c", "while true; do /app/deploy/sync_from_legacy_drop.sh >> /var/log/sync.log 2>&1; sleep 600; done"]
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      LEGACY_DROP_ROOT: ${LEGACY_DROP_ROOT:-/nas/fileserver/incoming/deathstar}
-      AUDIO_ROOT: ${AUDIO_ROOT:-/nas/fileserver/audio}
-      DASHCAM_ROOT: ${DASHCAM_ROOT:-/nas/fileserver/dashcam}
-      BODYCAM_ROOT: ${BODYCAM_ROOT:-/nas/fileserver/bodycam}
-      TRANSCRIPT_ROOT: ${TRANSCRIPT_ROOT:-/nas/fileserver/audio/transcriptions}
-      YOLO_ROOT: ${YOLO_ROOT:-/nas/fileserver/dashcam/yolo}
-      META_ROOT: ${META_ROOT:-/nas/fileserver/dashcam/metadata}
+      LEGACY_DROP_ROOT: ${LEGACY_DROP_ROOT}
+      AUDIO_ROOT: ${AUDIO_ROOT}
+      DASHCAM_ROOT: ${DASHCAM_ROOT}
+      BODYCAM_ROOT: ${BODYCAM_ROOT}
+      TRANSCRIPT_ROOT: ${TRANSCRIPT_ROOT}
+      YOLO_ROOT: ${YOLO_ROOT}
+      META_ROOT: ${META_ROOT}
     volumes:
       - ./:/app
-      - ${NAS_ROOT:-/media/scott/NAS1}:/nas
+      - ${NAS_ROOT}:/nas
+    networks:
+      - auto-ingest-net
 
+  # === Content OS Service ===
+  # Runs content-os status loop for content workflow monitoring
   content-service:
     build: .
     image: auto-ingest:latest
     container_name: content-generation-service
-    command: ["-m", "content_os", "status"]
+    command: ["bash", "-c", "while true; do /usr/local/bin/content-os status; sleep 1800; done"]
     restart: unless-stopped
+    environment:
+      CONTENT_OS_LLM_BASE_URL: ${CONTENT_OS_LLM_BASE_URL}
+      CONTENT_OS_LLM_API_KEY: ${CONTENT_OS_LLM_API_KEY}
+      CONTENT_OS_LLM_MODEL: ${CONTENT_OS_LLM_MODEL}
+      CONTENT_OS_LLM_TEMPERATURE: ${CONTENT_OS_LLM_TEMPERATURE}
+      CONTENT_OS_LLM_MAX_TOKENS: ${CONTENT_OS_LLM_MAX_TOKENS}
     volumes:
       - ./:/app
+    networks:
+      - auto-ingest-net
 
+  # === Ingest Cron ===
+  # Runs sync + ingest on a schedule (every 5 min)
   ingest-cron:
     build: .
     image: auto-ingest:latest
-    container_name: ingest-cron
     entrypoint: ["/app/deploy/start-cron.sh"]
     environment:
       CRON_FILE: /app/deploy/cron/ingest.crontab
-      SCAN_ROOTS: ${SCAN_ROOTS:-/nas/S/audio,/nas/fileserver/audio,/nas/fileserver/audio/transcriptions,/nas/fileserver/bodycam,/nas/fileserver/dashcam,/nas/fileserver/dashcam/transcriptions}
-      DASHCAM_ROOT: ${DASHCAM_ROOT:-/nas/fileserver/dashcam}
-    restart: unless-stopped
+      SCAN_ROOTS: ${SCAN_ROOTS}
+      DASHCAM_ROOT: ${DASHCAM_ROOT}
+      NEO4J_URI: ${NEO4J_URI}
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      NEO4J_DB: ${NEO4J_DB}
     volumes:
       - ./:/app
-      - ${NAS_ROOT:-/media/scott/NAS1}:/nas
+      - ${NAS_ROOT}:/nas
+    networks:
+      - auto-ingest-net
 
+  # === Content Cron ===
+  # Runs content workflow batch every 30 min
   content-cron:
     build: .
     image: auto-ingest:latest
-    container_name: content-cron
     entrypoint: ["/app/deploy/start-cron.sh"]
     environment:
       CRON_FILE: /app/deploy/cron/content_generation.crontab
-    restart: unless-stopped
+      CONTENT_OS_LLM_BASE_URL: ${CONTENT_OS_LLM_BASE_URL}
+      CONTENT_OS_LLM_API_KEY: ${CONTENT_OS_LLM_API_KEY}
+      CONTENT_OS_LLM_MODEL: ${CONTENT_OS_LLM_MODEL}
     volumes:
       - ./:/app
+    networks:
+      - auto-ingest-net
+
+  # === Job API (lightweight trigger) ===
+  # Exposes HTTP endpoints to enqueue jobs and trigger runs
+  job-api:
+    build: .
+    image: auto-ingest:latest
+    container_name: auto-ingest-job-api
+    command: ["python", "/app/deploy/job_trigger_api.py"]
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8766:8765"
+    volumes:
+      - ./:/app
+      - ${NAS_ROOT}:/nas
+    environment:
+      DROP_ROOT: ${DROP_ROOT}
+      NAS_ROOT: ${NAS_ROOT}
+      SCAN_ROOTS: ${SCAN_ROOTS}
+      AUDIO_ROOT: ${AUDIO_ROOT}
+      DASHCAM_ROOT: ${DASHCAM_ROOT}
+      BODYCAM_ROOT: ${BODYCAM_ROOT}
+      JOB_API_PORT: "8765"
+    networks:
+      - auto-ingest-net
+
+networks:
+  auto-ingest-net:
+    driver: bridge
