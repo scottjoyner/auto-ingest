@@ -27,6 +27,8 @@ services:
     volumes:
       - ./:/app
       - ${NAS_ROOT}:/nas
+      - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
+      - ${NAS2_ROOT:-/media/scott/NAS3/fileserver}:/nas2
     networks:
       - auto-ingest-net
 
@@ -53,6 +55,8 @@ services:
     volumes:
       - ./:/app
       - ${NAS_ROOT}:/nas
+      - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
+      - ${NAS2_ROOT:-/media/scott/NAS3/fileserver}:/nas2
     networks:
       - auto-ingest-net
 
@@ -77,6 +81,8 @@ services:
     volumes:
       - ./:/app
       - ${NAS_ROOT}:/nas
+      - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
+      - ${NAS2_ROOT:-/media/scott/NAS3/fileserver}:/nas2
     networks:
       - auto-ingest-net
 
@@ -116,6 +122,8 @@ services:
     volumes:
       - ./:/app
       - ${NAS_ROOT}:/nas
+      - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
+      - ${NAS2_ROOT:-/media/scott/NAS3/fileserver}:/nas2
     networks:
       - auto-ingest-net
 
@@ -150,6 +158,8 @@ services:
     volumes:
       - ./:/app
       - ${NAS_ROOT}:/nas
+      - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
+      - ${NAS2_ROOT:-/media/scott/NAS3/fileserver}:/nas2
     environment:
       DROP_ROOT: ${DROP_ROOT}
       NAS_ROOT: ${NAS_ROOT}
