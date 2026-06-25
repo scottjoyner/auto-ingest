@@ -3,7 +3,11 @@
 # combine_metadata_with_header.sh
 # Recursively finds "*_metadata.csv" and concatenates into a single CSV, with headers only once.
 
-ROOT_DIR=get_fileserver_path("dashcam/")  
+ROOT_DIR="${DASHCAM_ROOT:-$(python3 - <<'PY'
+from auto_ingest_config import get_dashcam_root
+print(get_dashcam_root())
+PY
+)}"  
 OUTPUT_FILE="part_2_merged_metadata.csv"
 
 # 1. Change to the root directory

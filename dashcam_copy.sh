@@ -5,7 +5,11 @@ IFS=$'\n\t'
 # =========================
 # Config
 # =========================
-DEST_ROOT=get_fileserver_path("dashcam")
+DEST_ROOT="${DASHCAM_ROOT:-$(python3 - <<'PY'
+from auto_ingest_config import get_dashcam_root
+print(get_dashcam_root())
+PY
+)}"
 SRC_FOLDERS=("DCIM/Movie" "DCIM/Movie/RO")
 
 # Sidecar/associated file extensions to bring along (case-insensitive)

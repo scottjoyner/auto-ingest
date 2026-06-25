@@ -17,8 +17,16 @@ echo "▶️ Whisper (chunked, merged, large-v3) over AUDIO tree"
 ./.venv/bin/python3 whisper_audio_chunked.py \
   --model medium \
   --merge \
-  --audio-root FILESERVER_ROOT/audio \
-  --transcriptions-root FILESERVER_ROOT/audio/transcriptions
+  --audio-root "${AUDIO_ROOT:-$(python3 - <<'PY'
+from auto_ingest_config import get_audio_root
+print(get_audio_root())
+PY
+)}/audio" \
+  --transcriptions-root "${AUDIO_ROOT:-$(python3 - <<'PY'
+from auto_ingest_config import get_audio_root
+print(get_audio_root())
+PY
+)}/audio/transcriptions"
 
 echo "▶️ Speaker diarization (dashcam videos + standalone audio)"
 ./.venv/bin/python3 speakers.py || echo "❌ Failed: speakers.py"
@@ -41,8 +49,16 @@ echo "▶️ YOLO vehicle detection"
 
 echo "▶️ Dashcam HUD metadata"
 ./.venv/bin/python3 metadata_scraper_iterator.py || echo "❌ Failed: metadata_scraper_iterator.py"
-# ./.venv/bin/python3 dashcam_hud_iterate.py --base FILESERVER_ROOT/dashcam || echo "❌ Failed: dashcam_hud_iterator.py"
-# ./.venv/bin/python3 dashcam_hud_iterate.py --base FILESERVER_ROOT/dashcam || echo "❌ Failed: dashcam_hud_iterator.py"
+# ./.venv/bin/python3 dashcam_hud_iterate.py --base "${DASHCAM_ROOT:-$(python3 - <<'PY'
+from auto_ingest_config import get_dashcam_root
+print(get_dashcam_root())
+PY
+)}" || echo "❌ Failed: dashcam_hud_iterator.py"
+# ./.venv/bin/python3 dashcam_hud_iterate.py --base "${DASHCAM_ROOT:-$(python3 - <<'PY'
+from auto_ingest_config import get_dashcam_root
+print(get_dashcam_root())
+PY
+)}" || echo "❌ Failed: dashcam_hud_iterator.py"
 
 echo "▶️ Music precompute + lyrics classifier (optional)"
 ./.venv/bin/python3 01_precompute_music_segments.py --push-neo4j || echo "❌ Failed: 01_precompute_music_segments.py"
@@ -108,17 +124,33 @@ echo "▶️ Patch Missing Locations in YOLO Embeddings"
   --validate-m 50
 echo "▶️ Dashcam Merger"
 ./.venv/bin/python3 dashcam_merge_FR.py \
-  --base FILESERVER_ROOT/dashcam \
-  --base FILESERVER_ROOT/dashcam  || echo "❌ Failed: dashcam_merge_FR.py"
+  --base "${DASHCAM_ROOT:-$(python3 - <<'PY'
+from auto_ingest_config import get_dashcam_root
+print(get_dashcam_root())
+PY
+)}" \
+  --base "${DASHCAM_ROOT:-$(python3 - <<'PY'
+from auto_ingest_config import get_dashcam_root
+print(get_dashcam_root())
+PY
+)}"  || echo "❌ Failed: dashcam_merge_FR.py"
 
 # echo "▶️ Iterator" (OLD)
 # ./.venv/bin/python3 iterator.py || echo "❌ Failed: iterator.py"
 
 echo "▶️ timelapse_from_fr"
-./.venv/bin/python3 timelapse_from_fr.py FILESERVER_ROOT/dashcam --recursive || echo "❌ Failed: timelapse_from_fr.py"
+./.venv/bin/python3 timelapse_from_fr.py "${DASHCAM_ROOT:-$(python3 - <<'PY'
+from auto_ingest_config import get_dashcam_root
+print(get_dashcam_root())
+PY
+)}" --recursive || echo "❌ Failed: timelapse_from_fr.py"
 
 echo "▶️ timelapse_from_fr"
-./.venv/bin/python3 shorts_builder.py --base FILESERVER_ROOT/dashcam --profiles clean karaoke wordgrid || echo "❌ Failed: shorts_builder.py"
+./.venv/bin/python3 shorts_builder.py --base "${DASHCAM_ROOT:-$(python3 - <<'PY'
+from auto_ingest_config import get_dashcam_root
+print(get_dashcam_root())
+PY
+)}" --profiles clean karaoke wordgrid || echo "❌ Failed: shorts_builder.py"
 
 # echo "▶️ timelapse_from_fr"
 # ./.venv/bin/python3 shorts_builder.py \

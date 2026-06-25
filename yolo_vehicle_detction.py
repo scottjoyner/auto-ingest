@@ -14,9 +14,9 @@ import uuid
 def list_files(directory):
     file_keys = set([])
     for filename in os.listdir(directory):
-        if re.search("_R.MP4", filename):
+        if re.search(r"_\d+F\.mp4$", filename, re.IGNORECASE) or re.search(r"_\d+R\.mp4$", filename, re.IGNORECASE) or re.search(r"_\d+[FR]\.mp4$", filename, re.IGNORECASE):
             file_keys.add(filename.rsplit('.', 1)[0])
-        if re.search("_F.MP4", filename):
+        if re.search(r"_F.MP4", filename):
             file_keys.add(filename.rsplit('.', 1)[0])
     file_keys_copy = file_keys.copy()
     for filename in file_keys_copy:

@@ -2,7 +2,11 @@
 set -euo pipefail
 
 # ======= CONFIG =======
-DEST_ROOT=get_fileserver_path("audio")   # where to store organized audio
+DEST_ROOT="${AUDIO_ROOT:-$(python3 - <<'PY'
+from auto_ingest_config import get_audio_root
+print(get_audio_root())
+PY
+)}"   # where to store organized audio
 TRANS_SUBDIR="transcriptions"                # subfolder under DEST_ROOT for transcripts/diarization
 SRC_FOLDER_NAME="RECORD"                     # folder on the removable drive(s)
 DELETE_AFTER_COPY=false                      # true to move (delete source after copy)

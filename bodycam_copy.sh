@@ -2,8 +2,16 @@
 set -euo pipefail
 
 # ======= CONFIG =======
-DEST_BODYCAM_ROOT=get_fileserver_path("bodycam")   # where video/photo go (dated)
-DEST_AUDIO_ROOT=get_fileserver_path("audio")       # where audio (and extracted audio) go (dated)
+DEST_BODYCAM_ROOT="${BODYCAM_ROOT:-$(python3 - <<'PY'
+from auto_ingest_config import get_bodycam_root
+print(get_bodycam_root())
+PY
+)}"   # where video/photo go (dated)
+DEST_AUDIO_ROOT="${AUDIO_ROOT:-$(python3 - <<'PY'
+from auto_ingest_config import get_audio_root
+print(get_audio_root())
+PY
+)}"       # where audio (and extracted audio) go (dated)
 TRANS_SUBDIR="transcriptions"                          # under DEST_AUDIO_ROOT for transcripts/diarization
 
 # Source folder names (case-insensitive) expected at device root
