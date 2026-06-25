@@ -11,17 +11,14 @@ REPO = Path('/home/scott/git/auto-ingest')
 # Define the replacements for Python files
 PYTHON_PATH_PATTERNS = [
     r'/media/scott/NAS/fileserver/',
-    r'/media/scott/NAS2/fileserver/',
-    r'/media/scott/NAS/8TB_2025/fileserver/',
-    r'/media/scott/NAS/8TBHDD/fileserver/',
+    r'/media/scott/SSD_4TB/fileserver',
 ]
 
 # Shell script path replacements
 SHELL_PATH_PATTERNS = [
     r'/media/scott/NAS/fileserver/',
-    r'/media/scott/NAS2/fileserver/',
-    r'/media/scott/NAS/8TB_2025/fileserver/',
-    r'/media/scott/NAS/8TBHDD/fileserver/',
+    r'/media/scott/SSD_4TB/fileserver',
+    r'/media/scott/8TB_2025/fileserver/',
 ]
 
 

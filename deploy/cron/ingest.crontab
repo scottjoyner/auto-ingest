@@ -1,2 +1,11 @@
-# Sync legacy drop from deathstar, then run ingest every 5 minutes
-*/5 * * * * cd /app && /usr/bin/env bash deploy/sync_from_legacy_drop.sh >> /var/log/cron-sync.log 2>&1 && /usr/bin/env bash run_ingest_all.sh >> /var/log/cron-ingest.log 2>&1
+# Auto-Ingest Cron Configuration
+# Daily batch jobs for dashcam and transcription ingestion
+
+# Sync legacy drop every 5 minutes (lightweight)
+*/5 * * * * cd /app && /usr/bin/env bash deploy/sync_from_legacy_drop.sh >> /var/log/cron-sync.log 2>&1
+
+# Run main ingest pipeline every 30 minutes
+*/30 * * * * cd /app && /usr/bin/env bash run_ingest_all.sh >> /var/log/cron-ingest.log 2>&1
+
+# Daily dashcam embeddings batch at 2 AM (catches any missed data)
+0 2 * * * cd /app && /usr/bin/env python3 bulk_ingest_dashcam.py --years 2026 >> /var/log/cron-dashcam-daily.log 2>&1

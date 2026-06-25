@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from auto_ingest_config import get_fileserver_path
-import os, re, ast, json, math, logging, argparse
+import os, re, ast, json, math, logging, argparse, datetime
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Iterable
 
@@ -326,13 +326,16 @@ def aggregate_seconds_to_minute(second_vecs: List[np.ndarray]) -> np.ndarray:
 # =========================
 # Neo4j I/O
 # =========================
-NQ_CREATE_CONSTRAINTS = """
-CREATE CONSTRAINT dashcam_clip_key IF NOT EXISTS
-FOR (c:DashcamClip) REQUIRE c.key IS UNIQUE;
-
-CREATE CONSTRAINT dashcam_embedding_id IF NOT EXISTS
-FOR (e:DashcamEmbedding) REQUIRE e.id IS UNIQUE;
-"""
+NQ_CREATE_CONSTRAINTS = [
+    """
+    CREATE CONSTRAINT dashcam_clip_key IF NOT EXISTS
+    FOR (c:DashcamClip) REQUIRE c.key IS UNIQUE
+    """,
+    """
+    CREATE CONSTRAINT dashcam_embedding_id IF NOT EXISTS
+    FOR (e:DashcamEmbedding) REQUIRE e.id IS UNIQUE
+    """,
+]
 
 NQ_UPSERT_CLIP = """
 MERGE (c:DashcamClip {key: $key})
@@ -398,7 +401,8 @@ def neo4j_session(uri: str, user: str, pwd: str):
     return driver
 
 def neo4j_create_constraints(sess):
-    sess.run(NQ_CREATE_CONSTRAINTS)
+    for stmt in NQ_CREATE_CONSTRAINTS:
+        sess.run(stmt)
 
 def neo4j_upsert_clip(sess, key: str, path: str, view: str, width: int, height: int, fps: float, dur: float):
     return sess.run(NQ_UPSERT_CLIP, key=key, path=path, view=view, width=width,
@@ -743,7 +747,7 @@ def main():
         process_directory(
             dd, spec, grids, keep_names, id_map,
             include_heatmap_png=bool(args.heatmap),
-            neo4j_uri=args.neo4j-uri,  # noqa
+            neo4j_uri=args.neo4j_uri,
             neo4j_user=args.neo4j_user,
             neo4j_pwd=args.neo4j_pass,
             concat_views=True

@@ -52,6 +52,9 @@ ARTIFACTS_DIR = os.getenv("ARTIFACTS_DIR", "./artifacts")
 OLLAMA_ENDPOINT = os.getenv("OLLAMA_ENDPOINT", "auto")  # auto | chat | generate
 OLLAMA_USE_CLI  = os.getenv("OLLAMA_USE_CLI", "0").lower() in ("1","true","yes","on")
 # ---- env ----
+LLM_ENDPOINT = os.getenv("LLM_ENDPOINT", "http://localhost:1234/v1")
+LLM_MODEL      = os.getenv("LLM_MODEL", "qwen3.6-35b-a3b-claude-4.7-opus-reasoning-distilled-apex")
+# ---- env ----
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "900"))  # seconds; was 180
 OLLAMA_USE_CLI  = os.getenv("OLLAMA_USE_CLI", "0").lower() in ("1","true","yes","on")
 SUMMARY_FAILOPEN = os.getenv("SUMMARY_FAILOPEN", "copy")  # copy | skip
@@ -187,9 +190,9 @@ def build_transcript(segments: List[Dict[str,Any]], utterances: List[Dict[str,An
             lines.append(txt)
     return "\n".join(lines)
 
-# ==========================
-# Ollama chat (robust JSON)
-# ==========================
+# =========================
+# Ollama chat (robust JSON) + LM Studio OpenAI-compatible primary path
+# =========================
 def _build_prompt(system: str, user: str) -> str:
     """
     Build a single-prompt string for /api/generate when /api/chat is unavailable.
@@ -253,7 +256,8 @@ def _ollama_generate_json(system: str, user: str, temperature: float) -> Dict[st
     # Last resort: scrape outer { ... }
     return _coerce_json_dict(text)
 
-def _build_prompt(system: str, user: str) -> str:
+
+def build_prompt(system: str, user: str) -> str:
     sys = (system or "").strip()
     usr = (user or "").strip()
     return f"<<SYS>>\n{sys}\n<</SYS>>\n\n{usr}" if sys else usr
@@ -265,7 +269,7 @@ def _ollama_cli_generate_json(system: str, user: str) -> Dict[str, Any]:
     """
     if not shutil.which("ollama"):
         return {}
-    prompt = _build_prompt(system, user)
+    prompt = build_prompt(system, user)
     try:
         # --json streams objects like {"response":"...","done":false} ... {"done":true}
         proc = subprocess.Popen(
@@ -292,9 +296,17 @@ def _ollama_cli_generate_json(system: str, user: str) -> Dict[str, Any]:
         return {}
 
 
-
 def ollama_chat_json(system: str, user: str, temperature: float = 0.2) -> Dict[str, Any]:
+    def _try_lmstudio() -> Optional[Dict[str, Any]]:
+        """Try LM Studio / OpenAI-compatible endpoint first."""
+        return _lmstudio_chat_json(system, user, temperature)
+
     def _try_chat() -> Dict[str, Any]:
+        # Try LM Studio (OpenAI-compatible) as primary path.
+        result = _try_lmstudio()
+        if result:
+            return result
+        # Fall back to Ollama /api/chat (native)
         payload = {
             "model": OLLAMA_MODEL,
             "messages": [
@@ -416,6 +428,37 @@ def ollama_chat_json(system: str, user: str, temperature: float = 0.2) -> Dict[s
     if OLLAMA_USE_CLI:
         return _ollama_cli_generate_json(system, user)
     return {}
+
+# =============================
+# LM Studio / OpenAI-compatible
+# =============================
+def _lmstudio_chat_json(system: str, user: str, temperature: float = 0.2) -> Optional[Dict[str, Any]]:
+    """Call an OpenAI-compatible endpoint (e.g. LM Studio at :1234/v1)."""
+    url = f"{LLM_ENDPOINT}/chat/completions"
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user},
+        ],
+        "temperature": temperature,
+        # Omit response_format — many LM Studio builds reject "json_object".
+        # _coerce_json_dict will strip code fences / scrape JSON from text.
+        "stream": False,
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=180)
+        if r.status_code == 404:
+            raise RuntimeError(f"LM Studio endpoint returned 404 at {url}")
+        r.raise_for_status()
+        body = r.json()
+        # OpenAI shape: choices[0].message.content
+        content = (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        obj = _coerce_json_dict(content)
+        if obj:
+            return obj
+    except Exception as e:
+        pass  # fall through to Ollama paths
 
 def _failopen_summary_from_text(full_text: str, max_chars: int = 2000) -> Dict[str, Any]:
     """
@@ -555,75 +598,108 @@ def extract_tasks_json(summary_obj: Dict[str, Any]) -> Dict[str, Any]:
 # Write-back
 # ===============
 def write_back(session, trans_id: str, final_obj: Dict[str, Any], write_notes: bool=False) -> str:
-    q = """
-    MATCH (t:Transcription {id:$tid})
-    CREATE (s:Summary {id: randomUUID(), text:$text, bullets:$bullets, created_at: datetime()})
-    MERGE (t)-[:HAS_SUMMARY]->(s)
-    FOREACH (_ IN (CASE WHEN $write_notes THEN [1] ELSE [] END) |
-        SET t.notes = $text, t.updated_at = datetime()
-    )
-    FOREACH (tsk IN $tasks |
-        CREATE (tk:Task {
-          id: randomUUID(),
-          title: coalesce(tsk.title,"Untitled Task"),
-          description: coalesce(tsk.description,""),
-          priority: coalesce(tsk.priority,"MEDIUM"),
-          due: tsk.due,
-          status: "REVIEW",
-          confidence: coalesce(tsk.confidence,0.5),
-          acceptance_json: coalesce(tsk.acceptance_json, "[]")
-        })
-        MERGE (s)-[:GENERATED_TASK]->(tk)
-    )
-    RETURN s.id AS sid
-    """
+    """Create Summary (and optional Tasks) for a transcription. Returns summary id or '' on failure."""
+    
+    # Step 1 – verify the transcription exists  
+    ver = session.run(
+        "MATCH (t:Transcription {id:$tid}) RETURN t.id", tid=trans_id
+    ).single()
+    if not ver:
+        return ""
+
+    # Step 2 – create Summary standalone (no MATCH on a node we then CREATE/MERGE with)
+    summary_uuid = uuid.uuid4().hex
     bullets = [str(b).strip() for b in (final_obj.get("bullets") or []) if str(b).strip()]
-    tasks_serialized = _serialize_tasks_for_db(final_obj.get("tasks") or [])
-    res = session.run(
-        q,
-        tid=trans_id,
-        text=final_obj.get("summary",""),
-        bullets=bullets,
-        tasks=tasks_serialized,
-        write_notes=bool(write_notes),
+    
+    session.run(
+        "CREATE (s:Summary {id:$sid, text:$text, bullets:$blts, created_at: datetime()})",
+        sid=summary_uuid,
+        text=final_obj.get("summary", ""),
+        blts=bullets,
     )
-    row = res.single()
-    return row["sid"] if row and "sid" in row else ""
+
+    # Step 3 – link Summary to Transcription (MERGE on known UUIDs is safe)
+    session.run(
+        "MATCH (t:Transcription {id:$tid}) MATCH (s:Summary {id:$sid}) MERGE (t)-[:HAS_SUMMARY]->(s)",
+        tid=trans_id, sid=summary_uuid,
+    )
+
+    # Step 4 – optional: write summary text into t.notes  
+    if write_notes:
+        session.run(
+            "MATCH (t:Transcription {id:$tid}) SET t.notes = $text, t.updated_at = datetime()",
+            tid=trans_id, text=final_obj.get("summary", ""),
+        )
+
+    # Step 5 – create any Tasks  
+    tasks_serialized = _serialize_tasks_for_db(final_obj.get("tasks") or [])
+    for task in tasks_serialized:
+        tsk_uuid = uuid.uuid4().hex
+        session.run(
+            """CREATE (tk:Task {
+                  id: $tid,
+                  title: coalesce($title,"Untitled Task"),
+                  description: coalesce($description,""),
+                  priority: coalesce($priority,"MEDIUM"),
+                  due: $due,
+                  status: "REVIEW",
+                  confidence: coalesce($confidence,0.5),
+                  acceptance_json: coalesce($acceptance_json, "[]")
+                })""",
+            tid=tsk_uuid,
+            title=task.get("title"),
+            description=task.get("description"),
+            priority=task.get("priority"),
+            due=task.get("due"),
+            confidence=task.get("confidence"),
+            acceptance_json=task.get("acceptance_json"),
+        )
+        # Link Task to Summary  
+        session.run(
+            "MATCH (s:Summary {id:$sid}) MATCH (tk:Task {id:$tid}) MERGE (s)-[:GENERATED_TASK]->(tk)",
+            sid=summary_uuid, tid=tsk_uuid,
+        )
+
+    return summary_uuid
 
 
 def process_one(session, tnode: Dict[str,Any], include_utterances: bool, dry_run: bool, write_notes: bool) -> Optional[str]:
+    """Process a single transcription — uses fresh Neo4j driver for write-back (LM Studio calls may close the session)."""
     row = fetch_one(session, tnode.get("id"), latest=False)
     if not row:
         print(f"[{tnode.get('key') or tnode.get('id')}] not found or empty.")
         return None
-    t = row["t"]; segments, utterances = row["segments"], row["utterances"]
-    key = t.get("key") or t.get("id")
-    if not segments and not utterances:
-        print(f"[{key}] No text found in Segments/Utterances.")
-        return None
 
-    text = build_transcript(segments, utterances, include_utterances=include_utterances)
-    print(f"[{key}] Items: {len(segments)} segments + {len(utterances)} utterances (included={include_utterances})")
+    # Use a fresh driver for write-back since LM Studio calls may exhaust/close the session pool
+    with neo_driver().session() as sess2:
+        t = row["t"]; segments, utterances = row["segments"], row["utterances"]
+        key = t.get("key") or t.get("id")
+        if not segments and not utterances:
+            print(f"[{key}] No text found in Segments/Utterances.")
+            return None
 
-    summary_obj = summarize_as_json(text)
+        text = build_transcript(segments, utterances, include_utterances=include_utterances)
+        print(f"[{key}] Items: {len(segments)} segments + {len(utterances)} utterances (included={include_utterances})")
 
-    if not summary_obj.get("summary","").strip():
-        print(f"[{key}] ⚠️  Summarizer returned empty; skipping write (set SUMMARY_FAILOPEN=copy to auto-fill).")
-        return None
+        summary_obj = summarize_as_json(text)
 
-    final_obj = extract_tasks_json(summary_obj)
-    print(f"[{key}] Will write {len(final_obj.get('tasks', []))} task(s).")
+        if not summary_obj.get("summary","").strip():
+            print(f"[{key}] ⚠️  Summarizer returned empty; skipping write (set SUMMARY_FAILOPEN=copy to auto-fill).")
+            return None
 
-    if dry_run:
-        print(json.dumps({"transcription": key, **final_obj}, indent=2))
-        return None
+        final_obj = extract_tasks_json(summary_obj)
+        print(f"[{key}] Will write {len(final_obj.get('tasks', []))} task(s).")
 
-    sid = write_back(session, t.get("id"), final_obj, write_notes=write_notes)
-    if not sid:
-        print(f"[{key}] ⚠️  Write-back returned no Summary id.")
-    else:
-        print(f"[{key}] Wrote Summary {sid} and {len(final_obj.get('tasks',[]))} Task(s).")
-    return sid
+        if dry_run:
+            print(json.dumps({"transcription": key, **final_obj}, indent=2))
+            return None
+
+        sid = write_back(sess2, t.get("id"), final_obj, write_notes=write_notes)
+        if not sid:
+            print(f"[{key}] ⚠️  Write-back returned no Summary id.")
+        else:
+            print(f"[{key}] Wrote Summary {sid} and {len(final_obj.get('tasks',[]))} Task(s).")
+        return sid
 
 # ====================================
 # Approve & Execute (integrated flags)

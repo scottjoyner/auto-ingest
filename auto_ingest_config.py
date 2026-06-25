@@ -69,19 +69,14 @@ def get_storage_layout():
         'hot_root': os.environ.get('HOT_STORAGE_ROOT')
         or knowledge_map.get('hot_layer_path')
         or (matched_machine or {}).get('hot_ssd_root')
-        or '/media/scott/S',
+        or '/media/scott/SSD_4TB/audio',
         'cold_root': os.environ.get('COLD_STORAGE_ROOT')
         or knowledge_map.get('mirror_vault_path')
         or (matched_machine or {}).get('nas_mirror_root')
-        or '/media/scott/NAS2/fileserver',
+        or '/media/scott/SSD_4TB/fileserver',
         'fileserver_root': os.environ.get('FILESERVER_ROOT')
         or (matched_machine or {}).get('fileserver_root')
-        or '/media/scott/NAS2/fileserver',
-        'vault_path': os.environ.get('VAULT_PATH')
-        or knowledge_map.get('central_vault_path')
-        or os.path.expanduser(knowledge_map.get('local_vault_path', '~/knowledge')),
-        'mirror_vault_path': knowledge_map.get('mirror_vault_path')
-        or '/media/scott/NAS2/fileserver/shared-knowledge',
+        or '/media/scott/SSD_4TB/fileserver',
     }
 
 

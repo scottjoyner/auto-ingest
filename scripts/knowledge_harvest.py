@@ -68,7 +68,7 @@ import json
 
 uri = 'bolt://localhost:7687'
 user = 'neo4j'
-passwd = '${NEO4J_PASSWORD}'
+passwd = 'knowledge_graph_2026'  # From config.yaml
 
 driver = GraphDatabase.driver(uri, auth=(user, passwd))
 with driver.session() as session:

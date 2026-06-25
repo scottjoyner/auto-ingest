@@ -1,105 +1,176 @@
-from auto_ingest_config import get_fileserver_path
+#!/usr/bin/env python3
+"""Speaker voice clustering on SSD_4TB audio using WAVLM embeddings."""
+
 import os
+import logging
+from pathlib import Path
+
 import numpy as np
-from pyannote.audio import Audio, Model
-from pyannote.core import Annotation, Segment
-from sklearn.cluster import AgglomerativeClustering
-from collections import defaultdict
-from pydub import AudioSegment
-from sklearn.cluster import DBSCAN
-from sklearn.metrics.pairwise import cosine_distances
-# Path settings
-audio_dir = get_fileserver_path("dashcam/audio")
-rttm_suffix = "_speakers.rttm"
+import torch
+import torchaudio.pipelines as ta_bundles
+import librosa
+import neo4j
+import sklearn.cluster
+from sklearn.metrics import silhouette_score
 
-# Load embedding model
-model = Model.from_pretrained("pyannote/embedding", use_auth_token="<HF_TOKEN>")
-audio_processor = Audio(sample_rate=16000)
 
-# Store segment info
-embeddings = []
-segment_metadata = []
-LIMIT = 100
-count = 0
-for file in os.listdir(audio_dir):
-    if file.endswith(".mp3"):
-        file_key = file.replace(".mp3", "")
-        rttm_path = os.path.join(audio_dir, file_key + rttm_suffix)
-        if not os.path.exists(rttm_path):
+AUDIO_ROOT = "/media/scott/SSD_4TB/audio"
+NEO_URI    = "bolt://localhost:7687"
+NEO_AUTH=("neo4j", "knowledge_graph_2026")
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def parse_rttm(path: Path):
+    """Parse RTTM into list of (speaker, start_sec, duration_sec)."""
+    entries = []
+    with open(path) as fh:
+        for line in fh:
+            parts = line.split()
+            if len(parts) < 10:
+                continue
+            speaker = parts[7]
+            start   = float(parts[9])
+            dur     = float(parts[10])
+            entries.append((speaker, start, dur))
+    return entries
+
+
+# ---------------------------------------------------------------------------
+# Model setup
+# ---------------------------------------------------------------------------
+
+logging.info("Loading WavLM via torchaudio...")
+bundle = ta_bundles.WAVLM_BASE_PLUS.get_model()
+del ta_bundles                             # free the bundle ref
+# no CUDA on this machine — CPU is fine
+logging.info("Model loaded.")
+
+
+def embed_mp3(path: Path):
+    """Load an MP3 and produce a (T, 512) embedding array."""
+    audio, sr = librosa.load(str(path), sr=16000)
+    wav = torch.from_numpy(audio).unsqueeze(0)
+    with torch.no_grad():
+        feats = bundle(wav)                   # (batch, T, C)
+    return feats.mean(dim=1).flatten()         # (T, 512)
+
+
+# ---------------------------------------------------------------------------
+# Index audio / RTTM pairs
+# ---------------------------------------------------------------------------
+
+pairs: list[tuple[Path, Path]] = []  # (mp3_path, rttm_path)
+
+for root, dirs, files in os.walk(AUDIO_ROOT):
+    if "chunks" in root.split(os.sep):
+        continue
+    mp3s = [f for f in files if f.endswith(".mp3")]
+    base_names = {Path(f).stem: Path(f) for f in mp3s}
+    for name, mp3_file in base_names.items():
+        rttm_file = mp3_file.with_name(name + "_speakers.rttm")
+        if rttm_file.exists():
+            pairs.append((mp3_file, rttm_file))
+
+pairs.sort(key=lambda p: str(p[0]))
+logging.info("Indexed %d audio+RTTM pairs.", len(pairs))
+
+
+# ---------------------------------------------------------------------------
+# Neo4j: existing Speaker nodes and Segment-Speaker links
+# ---------------------------------------------------------------------------
+
+driver = neo4j.GraphDatabase.driver(NEO_URI, auth=NEO_AUTH)
+
+with driver.session() as session:
+    rows = list(session.execute_read(lambda s: list(s.run("""
+        MATCH (s:Speaker)-[r:HAS_SPEAKER]->(seg:Segment)
+        RETURN id(seg) AS seg_id
+    """))))
+    existing_segments = {r["seg_id"] for r in rows}
+    logging.info("Found %d existing Segment-Speaker links.", len(existing_segments))
+
+
+# ---------------------------------------------------------------------------
+# Process each file
+# ---------------------------------------------------------------------------
+
+all_embeddings: list[np.ndarray] = []  # (T, 512) per segment
+meta: list[dict] = []                   # {"file", "speaker"}
+
+with driver.session() as session:
+    for mp3_path, rttm_path in pairs:
+        logging.info("Processing %s …", mp3_path.name)
+        segments = parse_rttm(rttm_path)
+        if not segments:
             continue
-        
-        audio_file = os.path.join(audio_dir, file)
-        annotation = Annotation()
-        
-        with open(rttm_path, "r") as rttm:
-            for line in rttm:
-                parts = line.strip().split()
-                start = float(parts[3])
-                duration = float(parts[4])
-                speaker = parts[7]
-                segment = Segment(start, start + duration)
-                annotation[segment] = speaker
+        emb = embed_mp3(mp3_path)  # (T, 512)
 
-        for segment, track, label in annotation.itertracks(yield_label=True):
-            print(f"🔊 Segment: {segment.start:.2f}s - {segment.end:.2f}s from {audio_file}")
-            try:
-                waveform, sample_rate = audio_processor.crop(audio_file, segment)
-                if waveform.shape[0] == 2:
-                    waveform = waveform.mean(dim=0, keepdim=True)  # Convert stereo to mono
-                if segment.duration < 0.5:
-                    print(f"⚠️ Skipping short segment ({segment.duration:.2f}s)")
-                    continue
+        for speaker_name, start_sec, dur in segments:
+            seg_id = session.execute_write(
+                lambda s, mp=str(mp3_path), sp=speaker_name, st=start_sec, du=dur:
+                    s.run("""
+                        CREATE (:Segment {id:$mp, start_time:$st, duration:$du})
+                    """, mp=mp, st=st, du=du).consume()
+            )
 
-                emb = model(waveform).data.numpy().mean(axis=0)
-                embeddings.append(emb)
-                segment_metadata.append({
-                    "file": audio_file,
-                    "segment": segment,
-                    "local_speaker": label
-                })
-            except Exception as e:
-                print(f"⚠️ Skipping segment due to error: {e}")
+            all_embeddings.append(emb.numpy())
+            meta.append({"file": str(mp3_path), "speaker": speaker_name})
 
-        count += 1
-        if LIMIT < count:
-            break
-print(f"Total embeddings collected: {len(embeddings)}")
-if not embeddings:
-    print("❌ No embeddings were collected. Exiting early.")
-    exit()
 
-# Cluster speakers globally
-X = np.array(embeddings)
-# Use cosine distance (1 - cosine similarity)
-distance_matrix = cosine_distances(X)
+# ---------------------------------------------------------------------------
+# KMeans clustering on pooled embeddings
+# ---------------------------------------------------------------------------
 
-# You can tune eps (similarity threshold) and min_samples
-clustering = DBSCAN(metric="precomputed", eps=0.3, min_samples=2)
-labels = clustering.fit_predict(distance_matrix)
+X = np.vstack(all_embeddings).astype("float32")  # (N, 512)
 
-# n_clusters = 5  # You can tune this or use a method like DBSCAN
-# clustering = AgglomerativeClustering(n_clusters=n_clusters, metric='cosine', linkage='average')
-# labels = clustering.fit_predict(X)
+logging.info("Clustering %d samples …", X.shape[0])
 
-# Mapping: global speaker ID to all segments
-global_speaker_segments = defaultdict(list)
+silhouettes: list[float] = []
+for k in range(2, 21):
+    km = sklearn.cluster.KMeans(n_clusters=k, random_state=42).fit(X)
+    silhouettes.append(silhouette_score(X, km.labels_))
 
-for idx, global_label in enumerate(labels):
-    metadata = segment_metadata[idx]
-    global_speaker_segments[global_label].append(metadata)
+best_k = list(range(2, 21))[int(np.argmax(silhouettes))]
+logging.info("Best k=%d (sil=%.3f)", best_k, max(silhouettes))
 
-# Optional: create audio files per global speaker
-output_dir = os.path.join(audio_dir, "global_speakers")
-os.makedirs(output_dir, exist_ok=True)
+km_final = sklearn.cluster.KMeans(n_clusters=best_k, random_state=42).fit(X)
+for m, lab in zip(meta, km_final.labels_):
+    logging.info(
+        "  %-50s speaker=%-8s → cluster %d",
+        Path(m["file"]).name, m["speaker"], lab,
+    )
 
-for global_label, segments in global_speaker_segments.items():
-    combined = AudioSegment.silent(duration=500)  # Start with brief silence
-    for seg in segments:
-        audio = AudioSegment.from_mp3(seg["file"])
-        start_ms = int(seg["segment"].start * 1000)
-        end_ms = int(seg["segment"].end * 1000)
-        combined += audio[start_ms:end_ms] + AudioSegment.silent(duration=200)
 
-    combined.export(os.path.join(output_dir, f"speaker_{global_label}.mp3"), format="mp3")
+# ---------------------------------------------------------------------------
+# Persist cluster assignments back to Neo4j
+# ---------------------------------------------------------------------------
 
-print("✅ Global speaker clustering complete. Output saved.")
+with driver.session() as session:
+    for m, lab in zip(meta, km_final.labels_):
+        rec = session.execute_write(
+            lambda s, mp=str(m["file"]):
+                s.run("""
+                    MATCH (seg:Segment {id:$mp}) RETURN id(seg) AS seg_id
+                """, mp=mp).single()
+        )
+
+        if rec is not None and rec["seg_id"] is not None:
+            session.execute_write(
+                lambda s, sid=rec["seg_id"], cl=lab:
+                    s.run("""
+                        MERGE (c:VoiceCluster {cluster_id:$cl})
+                        MATCH (seg) WHERE id(seg) = $sid
+                        CREATE (seg)-[:IN_CLUSTER]->(c)
+                    """, sid=sid, cl=cl),
+            )
+
+driver.close()
+logging.info("Done. Total segments processed: %d", len(meta))
