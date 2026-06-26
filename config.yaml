@@ -3,7 +3,7 @@
 # Each script should load this config and use the appropriate path.
 
 machine_paths:
-  # x1-370 (home Tailscale node)
+  # x1-370 (home Tailscale node — Neo4j server lives here)
   x1-370:
     fileserver_root: /media/scott/SSD_4TB/fileserver
     neo4j_uri: bolt://100.64.43.123:7687
@@ -11,6 +11,20 @@ machine_paths:
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: x1-370
     hot_ssd_root: /media/scott/SSD_4TB/audio
+    nas_mirror_root: /media/scott/NAS3/fileserver
+
+  # Any device on the LAN — uses shared SSD_4TB and NAS3 mounts
+  # Mount points:
+  #   SSD_4TB: /media/scott/SSD_4TB (NFS export from x1-370)
+  #   NAS3:    /media/scott/NAS3 (CIFS //100.64.43.123/nas3)
+  any:
+    fileserver_root: /media/scott/SSD_4TB/fileserver
+    neo4j_uri: bolt://100.64.43.123:7687
+    neo4j_user: neo4j
+    neo4j_password: ${NEO4J_PASSWORD}
+    hostname_pattern: ""
+    hot_ssd_root: /media/scott/SSD_4TB/audio
+    nas_mirror_root: /media/scott/NAS3/fileserver
 
   # deathstar-XPS-8920 — points to NAS3 via CIFS mount
   deathstar:
@@ -20,6 +34,7 @@ machine_paths:
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: deathstar
     hot_ssd_root: /mnt/8TB_2025
+    nas_mirror_root: /media/scott/NAS3/fileserver
 
 # Knowledge Map System configuration (added 2026-05-30)
 knowledge_map:

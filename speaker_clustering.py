@@ -14,7 +14,7 @@ import sklearn.cluster
 from sklearn.metrics import silhouette_score
 
 
-AUDIO_ROOT = "/media/scott/SSD_4TB/audio"
+AUDIO_ROOT = os.environ.get("AUDIO_ROOT", "/media/scott/SSD_4TB/audio")
 NEO_URI    = "bolt://localhost:7687"
 NEO_AUTH=("neo4j", "knowledge_graph_2026")
 
