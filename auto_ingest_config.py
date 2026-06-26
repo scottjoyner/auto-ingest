@@ -63,7 +63,11 @@ def get_storage_layout():
             matched_machine = vals
             break
     if matched_machine is None and machine_paths:
-        matched_machine = list(machine_paths.values())[0]
+        # Try 'any' first (shared mounts), then fall back to first entry
+        if 'any' in machine_paths:
+            matched_machine = machine_paths['any']
+        else:
+            matched_machine = list(machine_paths.values())[0]
 
     return {
         'hot_root': os.environ.get('HOT_STORAGE_ROOT')
