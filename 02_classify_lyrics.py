@@ -13,7 +13,7 @@ from tqdm import tqdm
 # --------------- Config ----------------
 NEO4J_URI  = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
-NEO4J_PASS = os.getenv("NEO4J_PASS") or "livelongandprosper"
+NEO4J_PASS = os.getenv("NEO4J_PASS") or "knowledge_graph_2026"
 
 BATCH_LIMIT   = 1000             # per run; tune for your box
 MODEL_DIR     = os.getenv("ZS_MODEL_DIR") or "models/roberta-large-mnli"  # or models/deberta-mnli

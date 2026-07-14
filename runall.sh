@@ -38,7 +38,7 @@ echo "▶️ Ingest speakers_reconcile (transcripts + RTTM → Neo4j)"
 ./.venv/bin/python3 speakers_reconcile.py \
   --neo4j-uri bolt://localhost:7687 \
   --neo4j-user neo4j \
-  --neo4j-password livelongandprosper \
+  --neo4j-password knowledge_graph_2026 \
   --db neo4j \
   --batch 50 \
   --only-missing  || echo "❌ Failed: speakers_reconcile.py"
@@ -111,14 +111,14 @@ echo "▶️ Dashcam YOLO embeddings"
   --heatmap \
   --neo4j-uri bolt://localhost:7687 \
   --neo4j-user neo4j \
-  --neo4j-pass livelongandprosper \
+  --neo4j-pass knowledge_graph_2026 \
   --win-mins 10 2> /dev/null || echo "❌ Failed: dashcam_yolo_embeddings.py"
 
 echo "▶️ Patch Missing Locations in YOLO Embeddings"
 ./.venv/bin/python3 patch_missing_locations.py \
   --neo4j-uri bolt://localhost:7687 \
   --neo4j-user neo4j \
-  --neo4j-pass livelongandprosper \
+  --neo4j-pass knowledge_graph_2026 \
   --key-limit 1000 \
   --win-mins 10 \
   --validate-m 50

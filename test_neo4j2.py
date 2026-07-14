@@ -4,7 +4,7 @@ import sys
 
 drv = GraphDatabase.driver(
     'bolt://100.64.43.123:7687', 
-    auth=('neo4j', 'livelongandprosper'),
+    auth=('neo4j', 'knowledge_graph_2026'),
     config=Config(tls_enabled=False)
 )
 with drv.session(database='knowledge_graph_2026') as s:

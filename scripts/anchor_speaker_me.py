@@ -84,12 +84,38 @@ def corpus_centroid(corpus_dir):
     return cen
 
 
+def merge_scott_global_speakers(sess, canonical_id, dry_run):
+    ids = [r["id"] for r in sess.run(
+        "MATCH (g:GlobalSpeaker{is_me:true}) WHERE g.id <> $cid RETURN g.id AS id", cid=canonical_id
+    )]
+    if not ids:
+        logging.info("[merge] Scott already a single GlobalSpeaker; nothing to merge.")
+        return 0
+    logging.info(f"[merge] consolidating {len(ids)} extra Scott GlobalSpeakers into {canonical_id}")
+    if dry_run:
+        return len(ids)
+    for gid in ids:
+        sess.run(
+            "MATCH (sp:Speaker)-[r:SAME_PERSON]->(g:GlobalSpeaker{id:$gid}) "
+            "WHERE g.id <> $cid "
+            "MERGE (c:GlobalSpeaker{id:$cid}) "
+            "MERGE (sp)-[:SAME_PERSON]->(c) "
+            "DELETE r "
+            "WITH g WHERE g.id <> $cid AND NOT (g)<-[:SAME_PERSON]-() "
+            "DETACH DELETE g",
+            gid=gid, cid=canonical_id,
+        )
+    return len(ids)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--seed", default=None, help="Override Scott GlobalSpeaker id")
     ap.add_argument("--merge-threshold", type=float, default=0.85,
                     help="Also flag other GlobalSpeakers as Scott if cosine >= this (none trigger at 0.85 today)")
+    ap.add_argument("--merge", action="store_true",
+                    help="Merge all is_me GlobalSpeakers into the canonical seed (one Scott identity)")
     ap.add_argument("--corpus", default=None, help="Folder of known-Scott audio to validate the anchor (torch+speechbrain)")
     args = ap.parse_args()
 
@@ -153,6 +179,10 @@ def main():
                 "MATCH (sp:Speaker{is_me:true}) RETURN count(sp) AS n",
             ).single()["n"]
         logging.info(f"Total Speaker nodes now is_me: {n_sp}.")
+
+        if args.merge:
+            merged = merge_scott_global_speakers(sess, seed, args.dry_run)
+            logging.info(f"[merge] consolidated {merged} extra Scott GlobalSpeaker(s) into canonical {seed}.")
 
         for row in sess.run(
             "MATCH (sp:Speaker{is_me:true})<-[:SPOKEN_BY]-(n) "

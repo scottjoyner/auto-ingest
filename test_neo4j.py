@@ -5,7 +5,7 @@ from neo4j import GraphDatabase
 passwords = [
     "knowle...2026",
     "knowledge_graph_2026",
-    "livelongandprosper",
+    "knowledge_graph_2026",
 ]
 
 for pw in passwords:

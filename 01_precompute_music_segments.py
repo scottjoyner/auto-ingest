@@ -20,7 +20,7 @@ ALLOW_EXT = {".wav", ".mp3", ".m4a", ".flac", ".aac", ".ogg", ".mp4"}
 # Neo4j (optional)
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
-NEO4J_PASS = os.getenv("NEO4J_PASS") or "livelongandprosper"
+NEO4J_PASS = os.getenv("NEO4J_PASS") or "knowledge_graph_2026"
 
 # ----------------------------------------
 

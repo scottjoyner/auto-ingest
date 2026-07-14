@@ -516,7 +516,7 @@ if __name__ == "__main__":
 # ./.venv/bin/python3 patch_missing_locations.py \
 #   --neo4j-uri bolt://localhost:7687 \
 #   --neo4j-user neo4j \
-#   --neo4j-pass livelongandprosper \
+#   --neo4j-pass knowledge_graph_2026 \
 #   --key-limit 2000 \
 #   --win-mins 10 \
 #   --validate-m 50

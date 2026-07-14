@@ -3,7 +3,7 @@
 from neo4j import GraphDatabase
 
 uri = "bolt://100.64.43.123:7687"
-auth = ("neo4j", "livelongandprosper")
+auth = ("neo4j", "knowledge_graph_2026")
 
 with GraphDatabase.driver(uri, auth=auth) as driver:
     with driver.session(database="knowledge_graph_2026") as session:

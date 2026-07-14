@@ -23,7 +23,7 @@ def fetch_points(tx):
 # Neo4j connection settings
 NEO4J_URI = "bolt://localhost:7687"  # or your server URI
 NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "livelongandprosper"
+NEO4J_PASSWORD = "knowledge_graph_2026"
 
 # Connect to Neo4j
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
