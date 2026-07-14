@@ -56,7 +56,7 @@ curl http://localhost:8766/api/status
 | job-api | 8766 | — | HTTP API for enqueueing jobs |
 | ingest-service | — | 5 min | Runs `run_ingest_all.sh` continuously |
 | ingest-worker | — | 30s | Claims `.job` files from `/nas/drop/` |
-| sync-service | — | 10 min | Syncs legacy drop from deathstar |
+| sync-service | — | daily | Syncs legacy drop + all top-level deathstar 8TB roots |
 | content-service | — | 30 min | Content OS CLI status loop |
 | ingest-cron | — | 5 min | Scheduled ingest cron |
 | content-cron | — | 30 min | Scheduled content cron |
@@ -67,7 +67,7 @@ curl http://localhost:8766/api/status
 ```
 +-------------------+     +------------------+     +-----------------+
 |  Job Trigger API  |     |  Ingest Service  |     |  Sync Service   |
-|  (HTTP on :8766)  |     |  (loop 5 min)    |     |  (loop 10 min)   |
+|  (HTTP on :8766)  |     |  (loop 5 min)    |     |  (daily sync)    |
 +-------------------+     +------------------+     +-----------------+
          |                        |                        |
          v                        v                        v

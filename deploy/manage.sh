@@ -173,7 +173,7 @@ cmd_health() {
 
     # Check NAS mount
     echo "--- NAS Mount ---"
-    local root="${NAS_ROOT:-/media/scott/NAS1}"
+    local root="${NAS_ROOT:-/media/scott/NAS3}"
     if mountpoint -q "$root" 2>/dev/null || [[ -d "$root" ]]; then
         echo "NAS root ($root): MOUNTED"
         df -h "$root" 2>/dev/null | tail -1

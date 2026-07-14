@@ -15,7 +15,7 @@ KEY_PREFIX="${YEAR}_${MONTH}${DD}"
 cd "$(dirname "$0")/.."
 
 echo "==== Filesystem coverage for $DAY ===="
-for base in /media/scott/NAS1/fileserver /media/scott/NAS2/fileserver; do
+for base in /media/scott/NAS4/fileserver; do
   for sub in "audio/$REL" "audio/transcriptions/$REL"; do
     p="$base/$sub"
     if [[ -d "$p" ]]; then

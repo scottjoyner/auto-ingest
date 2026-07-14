@@ -28,7 +28,7 @@ services:
       - ./:/app
       - ${NAS_ROOT}:/nas
       - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
-      - ${NAS2_ROOT:-/media/scott/NAS3/fileserver}:/nas2
+      - ${NAS2_ROOT:-/media/scott/NAS4/fileserver}:/nas2
     networks:
       - auto-ingest-net
 
@@ -56,17 +56,22 @@ services:
       - ./:/app
       - ${NAS_ROOT}:/nas
       - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
-      - ${NAS2_ROOT:-/media/scott/NAS3/fileserver}:/nas2
+      - ${NAS2_ROOT:-/media/scott/NAS4/fileserver}:/nas2
     networks:
       - auto-ingest-net
 
   # === Sync Service ===
-  # Continuously syncs legacy drop from deathstar into canonical roots
+  # Daily sync from deathstar into canonical roots
   sync-service:
     build: .
     image: auto-ingest:latest
     container_name: auto-sync-service
-    command: ["bash", "-c", "while true; do /app/deploy/sync_from_legacy_drop.sh >> /var/log/sync.log 2>&1; sleep 600; done"]
+    command:
+      [
+        "bash",
+        "-lc",
+        "set -e; if [ -d /ssh-src ]; then mkdir -p /root/.ssh; cp -a /ssh-src/. /root/.ssh/; chown -R root:root /root/.ssh; chmod 700 /root/.ssh; chmod 600 /root/.ssh/* 2>/dev/null || true; fi; while true; do /app/deploy/sync_from_legacy_drop.sh >> /var/log/sync.log 2>&1; sleep 86400; done"
+      ]
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -82,7 +87,8 @@ services:
       - ./:/app
       - ${NAS_ROOT}:/nas
       - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
-      - ${NAS2_ROOT:-/media/scott/NAS3/fileserver}:/nas2
+      - ${NAS2_ROOT:-/media/scott/NAS4/fileserver}:/nas2
+      - /home/scott/.ssh:/ssh-src:ro
     networks:
       - auto-ingest-net
 
@@ -123,7 +129,7 @@ services:
       - ./:/app
       - ${NAS_ROOT}:/nas
       - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
-      - ${NAS2_ROOT:-/media/scott/NAS3/fileserver}:/nas2
+      - ${NAS2_ROOT:-/media/scott/NAS4/fileserver}:/nas2
     networks:
       - auto-ingest-net
 
@@ -159,7 +165,7 @@ services:
       - ./:/app
       - ${NAS_ROOT}:/nas
       - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
-      - ${NAS2_ROOT:-/media/scott/NAS3/fileserver}:/nas2
+      - ${NAS2_ROOT:-/media/scott/NAS4/fileserver}:/nas2
     environment:
       DROP_ROOT: ${DROP_ROOT}
       NAS_ROOT: ${NAS_ROOT}

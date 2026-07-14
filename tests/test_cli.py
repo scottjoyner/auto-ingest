@@ -1,6 +1,11 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 from content_os.cli import main
+
+
+def _ym() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
 
 
 def test_cli_init_capture_and_status(tmp_path: Path, capsys):
@@ -49,7 +54,7 @@ def test_cli_ingest_source_creates_proof_and_run(tmp_path: Path, capsys):
 
     out = capsys.readouterr().out
     assert "source_type=transcript_json" in out
-    assert "run=2026-05-cli-segments" in out
+    assert f"run={_ym()}-cli-segments" in out
     assert list((root / "stores" / "proof").glob("*cli-segments.md"))
 
 
@@ -70,7 +75,7 @@ def test_cli_failed_approval_without_force_returns_error(tmp_path: Path, capsys)
         )
         == 0
     )
-    run_id = "2026-05-needs-work"
+    run_id = f"{_ym()}-needs-work"
     draft = root / "runs" / "active" / run_id / "draft-package.md"
     draft.write_text("TODO groundbreaking", encoding="utf-8")
     assert main(["--root", str(root), "verify", run_id]) == 0

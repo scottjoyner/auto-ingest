@@ -1,5 +1,9 @@
 from datetime import datetime, timedelta
 from pathlib import Path
+
+import pytest
+
+pytest.importorskip("cv2")
 import numpy as np
 import cv2
 

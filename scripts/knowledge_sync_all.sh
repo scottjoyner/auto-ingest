@@ -4,7 +4,7 @@
 
 set -e
 
-MASTER_PATH="/media/scott/S/shared-knowledge"
+MASTER_PATH="/home/scott/nas-knowledge"
 LOG_FILE="/home/scott/logs/knowledge_sync.log"
 MACHINES=(
     "deathstar@100.78.106.121:~/nas-knowledge"

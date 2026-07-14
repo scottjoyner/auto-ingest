@@ -54,10 +54,10 @@ cd "$(dirname "$0")/.."
 
 # If running inside Compose, prefer the stable dual-NAS container mounts.
 # If running on the host, use host paths directly.
-if [[ -d /nas1/fileserver || -d /nas2/fileserver ]]; then
-  CANDIDATE_BASES=(/nas1/fileserver /nas2/fileserver)
+if [[ -d /nas1 || -d /nas2 ]]; then
+  CANDIDATE_BASES=(/nas1 /nas2)
 else
-  CANDIDATE_BASES=(/media/scott/NAS1/fileserver /media/scott/NAS2/fileserver)
+  CANDIDATE_BASES=(/media/scott/NAS4/fileserver)
 fi
 
 roots=()

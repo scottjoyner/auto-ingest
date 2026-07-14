@@ -38,7 +38,7 @@ PY
 )}"
 
 # Where to scan for transcripts & media
-export SCAN_ROOTS="${SCAN_ROOTS:-${DASHCAM_ROOT}/audio,${DASHCAM_ROOT}/transcriptions,/media/scott/SSD_4TB/audio}"
+export SCAN_ROOTS="${SCAN_ROOTS:-${FILESERVER_ROOT}/dashcam/audio,${FILESERVER_ROOT}/dashcam/transcriptions,${FILESERVER_ROOT}/dashcam/metadata,${FILESERVER_ROOT}/dashcam/yolo,${FILESERVER_ROOT}/audio,${FILESERVER_ROOT}/audio/transcriptions,${FILESERVER_ROOT}/bodycam,${FILESERVER_ROOT}/headcam,${FILESERVER_ROOT}/dashcam}"
 
 # Where to aggressively look for *_metadata.csv
 export DASHCAM_ROOT="${DASHCAM_ROOT:-/media/scott/NAS3/dashcam}"
@@ -67,6 +67,7 @@ export META_FPS="${META_FPS:-30}"
 export META_DOWNSAMPLE_SEC="${META_DOWNSAMPLE_SEC:-1}"
 export META_MAX_SPEED_MPH="${META_MAX_SPEED_MPH:-120}"
 export META_MIN_KEEP_RATIO="${META_MIN_KEEP_RATIO:-0.6}"  # require at least 60% good points
+export META_SKIP_WHEN_BAD="${META_SKIP_WHEN_BAD:-1}"
 
 # ========== Neo4j transaction batching (keeps memory in check) ==========
 export TX_SEG_BATCH="${TX_SEG_BATCH:-120}"
