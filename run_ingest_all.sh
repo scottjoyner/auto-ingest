@@ -37,11 +37,21 @@ print(get_fileserver_root())
 PY
 )}"
 
-# Where to scan for transcripts & media
-export SCAN_ROOTS="${SCAN_ROOTS:-${DASHCAM_ROOT}/audio,${DASHCAM_ROOT}/transcriptions,/media/scott/SSD_4TB/audio}"
+# Local first-cache paths for processing. NAS5 is cold/durable storage, not the
+# primary processing path when /mnt/8TB_2025 is available.
+export DASHCAM_ROOT="${DASHCAM_ROOT:-$($PY - <<'PY'
+from auto_ingest_config import get_dashcam_root
+print(get_dashcam_root())
+PY
+)}"
+export AUDIO_ROOT="${AUDIO_ROOT:-$($PY - <<'PY'
+from auto_ingest_config import get_audio_root
+print(get_audio_root())
+PY
+)}"
 
-# Where to aggressively look for *_metadata.csv
-export DASHCAM_ROOT="${DASHCAM_ROOT:-/media/scott/NAS3/dashcam}"
+# Where to scan for transcripts & media
+export SCAN_ROOTS="${SCAN_ROOTS:-${DASHCAM_ROOT}/audio,${DASHCAM_ROOT}/transcriptions,${AUDIO_ROOT},${AUDIO_ROOT}/transcriptions}"
 
 # Timezone for key→absolute timestamps
 export LOCAL_TZ="${LOCAL_TZ:-America/New_York}"

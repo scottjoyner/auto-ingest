@@ -39,6 +39,10 @@ from typing import Iterable, List, Optional, Tuple
 
 import torch
 import whisper
+try:
+    from faster_whisper import WhisperModel as FasterWhisperModel  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    FasterWhisperModel = None
 from tqdm import tqdm
 
 # -------------------- Logging --------------------
@@ -235,11 +239,21 @@ def cut_chunk_to(
 
 # -------------------- Whisper --------------------
 
-def load_model(model_name: str, device: str):
+def load_model(model_name: str, device: str, backend: str, compute_type: str):
+    if backend in ("auto", "faster") and FasterWhisperModel is not None:
+        try:
+            LOG.info("Loading faster-whisper model '%s' on '%s' compute_type=%s", model_name, device, compute_type)
+            return ("faster", FasterWhisperModel(model_name, device=device, compute_type=compute_type))
+        except Exception as e:
+            if backend == "faster":
+                LOG.error("Failed to load faster-whisper model '%s' on '%s': %s", model_name, device, e)
+                sys.exit(2)
+            LOG.warning("faster-whisper unavailable/failed (%s); falling back to openai-whisper", e)
     try:
-        return whisper.load_model(model_name, device=device)
+        LOG.info("Loading openai-whisper model '%s' on '%s'", model_name, device)
+        return ("openai", whisper.load_model(model_name, device=device))
     except Exception as e:
-        LOG.error("Failed to load model '%s' on '%s': %s", model_name, device, e)
+        LOG.error("Failed to load openai-whisper model '%s' on '%s': %s", model_name, device, e)
         sys.exit(2)
 
 def transcribe_file(
@@ -250,8 +264,33 @@ def transcribe_file(
     temperature: float,
     beam_size: int,
 ) -> dict:
+    backend, actual_model = model
+    if backend == "faster":
+        segments_iter, info = actual_model.transcribe(
+            str(audio_path),
+            language=language,
+            temperature=temperature,
+            beam_size=beam_size,
+            word_timestamps=True,
+            vad_filter=True,
+        )
+        segments = []
+        texts = []
+        for i, seg in enumerate(segments_iter):
+            text = (seg.text or "").strip()
+            item = {"id": i, "start": float(seg.start), "end": float(seg.end), "text": text}
+            if getattr(seg, "avg_logprob", None) is not None:
+                item["avg_logprob"] = seg.avg_logprob
+            if getattr(seg, "compression_ratio", None) is not None:
+                item["compression_ratio"] = seg.compression_ratio
+            if getattr(seg, "no_speech_prob", None) is not None:
+                item["no_speech_prob"] = seg.no_speech_prob
+            segments.append(item)
+            texts.append(text)
+        return {"language": getattr(info, "language", language), "text": " ".join(texts).strip(), "segments": segments}
+
     fp16 = device == "cuda"
-    return model.transcribe(
+    return actual_model.transcribe(
         str(audio_path),
         language=language,
         temperature=temperature,
@@ -313,18 +352,78 @@ def _is_up_to_date(src: Path, *outs: Path) -> bool:
     except OSError:
         return False
 
+def _candidate_transcription_dirs(audio_path: Path, audio_root: Path, trans_root: Path) -> List[Path]:
+    """Places where previous pipeline versions wrote finished transcripts.
+
+    Older/faster-whisper runs commonly wrote outputs next to the source audio,
+    while the chunked wrapper writes a mirrored tree under transcriptions-root.
+    Treat either location as authoritative so we do not retranscribe the whole
+    archive after moving roots or changing wrappers.
+    """
+    dirs = [audio_path.parent, mirror_dir(trans_root, audio_path, audio_root)]
+    out: List[Path] = []
+    seen = set()
+    for d in dirs:
+        key = str(d)
+        if key not in seen:
+            out.append(d)
+            seen.add(key)
+    return out
+
+
+def _is_finished_artifact(*outs: Path) -> bool:
+    """Finished means expected artifact files exist and are non-empty.
+
+    Audio files in this archive are often copied/mirrored after transcription,
+    so source mtimes can be newer than perfectly valid transcript artifacts.
+    Do not use mtime as a re-transcription trigger unless an explicit overwrite
+    mode is requested.
+    """
+    try:
+        return all(o.exists() and o.stat().st_size > 0 for o in outs)
+    except OSError:
+        return False
+
+
+def _has_generic_finished_transcript(audio_path: Path, out_dir: Path) -> bool:
+    """Return true if any known transcript artifact exists and is not stale.
+
+    We accept generic CSV/SRT/VTT and model-tagged text dumps.  This intentionally
+    does not require a current-model dump because a finished faster-whisper or
+    older medium run is still a valid transcript for ingestion purposes.
+    """
+    stem = audio_path.stem
+    candidates = [
+        out_dir / f"{stem}_transcription.csv",
+        out_dir / f"{stem}.srt",
+        out_dir / f"{stem}.vtt",
+    ]
+    candidates.extend(out_dir.glob(f"{stem}_*_transcription.txt"))
+    candidates.extend(out_dir.glob(f"{stem}_*transcription*.json"))
+    for c in candidates:
+        try:
+            if c.exists() and c.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def file_has_finished_transcription_for_model(
     audio_path: Path,
     audio_root: Path,
     trans_root: Path,
     model_name: str,
 ) -> bool:
-    """Finished if both merged outputs exist (this model’s dump + generic CSV) and are at least as new as the source."""
+    """Finished if current model output exists in either legacy or mirrored location."""
     stem = audio_path.stem
-    merged_dir = mirror_dir(trans_root, audio_path, audio_root)
-    merged_dump = _merged_dump_path_for_model(merged_dir, stem, model_name)
-    merged_csv = _merged_csv_path(merged_dir, stem)
-    return _is_up_to_date(audio_path, merged_dump, merged_csv)
+    for out_dir in _candidate_transcription_dirs(audio_path, audio_root, trans_root):
+        merged_dump = _merged_dump_path_for_model(out_dir, stem, model_name)
+        merged_csv = _merged_csv_path(out_dir, stem)
+        if _is_finished_artifact(merged_dump, merged_csv):
+            return True
+    return False
+
 
 def file_has_finished_transcription_for_any_model(
     audio_path: Path,
@@ -332,10 +431,13 @@ def file_has_finished_transcription_for_any_model(
     trans_root: Path,
     model_names: Iterable[str],
 ) -> Optional[str]:
-    """Return the first model name for which the file is finished (up-to-date), else None."""
+    """Return the first model/generic marker showing this file is already done."""
     for m in model_names:
         if file_has_finished_transcription_for_model(audio_path, audio_root, trans_root, m):
             return m
+    for out_dir in _candidate_transcription_dirs(audio_path, audio_root, trans_root):
+        if _has_generic_finished_transcript(audio_path, out_dir):
+            return "existing-transcript"
     return None
 
 
@@ -352,8 +454,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--chunks-root", type=Path, default=None,
                    help="Where to write chunked audio. Default: <audio-root>/chunks")
 
-    p.add_argument("--model", choices=["medium", "large", "large-v3"], default="large-v3",
+    p.add_argument("--model", choices=["tiny", "base", "small", "medium", "large", "large-v2", "large-v3"], default="large-v3",
                    help="Whisper model to use.")
+    p.add_argument("--backend", choices=["auto", "faster", "openai"], default="faster",
+                   help="ASR backend. Default: faster-whisper; openai is the legacy torch/openai-whisper backend.")
+    p.add_argument("--compute-type", default=None,
+                   help="faster-whisper compute_type. Default: int8 on CPU, float16 on CUDA.")
     p.add_argument("--device", choices=["cpu", "cuda"], default=None,
                    help="Force a device. Default: auto-detect (cuda if available).")
     p.add_argument("--language", default=None,
@@ -422,7 +528,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     ensure_dir(trans_root)
     ensure_dir(chunks_root)
 
-    files = list_audio_files(audio_root, exclude_dirs=[chunks_root])
+    files = list_audio_files(audio_root, exclude_dirs=[chunks_root, trans_root])
     if not files:
         LOG.info("No supported audio files found under %s.", audio_root)
         return
@@ -471,7 +577,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         return
 
     # Load model only if we have work
-    model = load_model(args.model, device)
+    compute_type = args.compute_type or ("float16" if device == "cuda" else "int8")
+    model = load_model(args.model, device, args.backend, compute_type)
     total_errors = 0
 
     for audio_path in worklist:

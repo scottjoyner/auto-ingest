@@ -10,6 +10,10 @@ from auto_ingest_config import get_dashcam_root
 print(get_dashcam_root())
 PY
 )}"
+if [[ "$DEST_ROOT" == /media/scott/NAS5* ]] && ! findmnt -rn /media/scott/NAS5 >/dev/null; then
+  echo "❌ NAS5 is required for dashcam destination but /media/scott/NAS5 is not mounted. Refusing to copy to an unmounted directory."
+  exit 1
+fi
 SRC_FOLDERS=("DCIM/Movie" "DCIM/Movie/RO")
 
 # Sidecar/associated file extensions to bring along (case-insensitive)
@@ -28,9 +32,9 @@ copy_file() {
   local src="$1" dest_dir="$2"
   mkdir -p "$dest_dir"
   if [[ "$DRY_RUN" == "1" ]]; then
-    echo "🧪 DRY-RUN: cp -np \"$src\" \"$dest_dir/\""
+    echo "🧪 DRY-RUN: cp --update=none \"$src\" \"$dest_dir/\""
   else
-    cp -np "$src" "$dest_dir/"
+    cp --update=none -p "$src" "$dest_dir/"
   fi
 }
 
@@ -55,7 +59,7 @@ EXT_REGEX="$(join_by '|' "${ASSOC_EXTS[@]}")"
 # =========================
 # Discover mounts (skip system mounts)
 # =========================
-MOUNTS=$(lsblk -o MOUNTPOINT -nr | grep -Ev '^$|^/proc|^/sys|^/dev|^/run' || true)
+MOUNTS=$(findmnt -rn -o TARGET | awk 'NF && $0 !~ "^/proc" && $0 !~ "^/sys" && $0 !~ "^/dev($|/)" && $0 !~ "^/run($|/)" && $0 !~ "^/media/scott/(NAS[0-9]+|SSD_4TB)$" && $0 !~ "^/mnt/8TB_2025($|/)" {print}' || true)
 if [[ -z "${MOUNTS// }" ]]; then
   echo "❌ No mounted drives found."
   exit 1

@@ -11,12 +11,12 @@ machine_paths:
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: x1-370
     hot_ssd_root: /media/scott/SSD_4TB/audio
-    nas_mirror_root: /media/scott/NAS3/fileserver
+    nas_mirror_root: /media/scott/NAS5
 
-  # Any device on the LAN — uses shared SSD_4TB and NAS3 mounts
+  # Any device on the LAN — uses shared SSD_4TB and NAS5 mounts
   # Mount points:
   #   SSD_4TB: /media/scott/SSD_4TB (NFS export from x1-370)
-  #   NAS3:    /media/scott/NAS3 (CIFS //100.64.43.123/nas3)
+  #   NAS5:    /media/scott/NAS5 (CIFS //100.64.43.123/fileserver; do not use legacy NAS3)
   any:
     fileserver_root: /media/scott/SSD_4TB/fileserver
     neo4j_uri: bolt://100.64.43.123:7687
@@ -24,17 +24,18 @@ machine_paths:
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: ""
     hot_ssd_root: /media/scott/SSD_4TB/audio
-    nas_mirror_root: /media/scott/NAS3/fileserver
+    nas_mirror_root: /media/scott/NAS5
 
-  # deathstar-XPS-8920 — points to NAS3 via CIFS mount
+  # deathstar-XPS-8920 — local 8TB HDD first-cache/processing layer plus NAS5 cold storage
+  # NAS5 is durable/cold; process from /mnt/8TB_2025 when possible, then mirror/archive.
   deathstar:
-    fileserver_root: /media/scott/NAS3/fileserver
+    fileserver_root: /mnt/8TB_2025/fileserver
     neo4j_uri: bolt://100.64.43.123:7687
     neo4j_user: neo4j
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: deathstar
-    hot_ssd_root: /mnt/8TB_2025
-    nas_mirror_root: /media/scott/NAS3/fileserver
+    hot_ssd_root: /mnt/8TB_2025/fileserver/audio
+    nas_mirror_root: /media/scott/NAS5
 
 # Knowledge Map System configuration (added 2026-05-30)
 knowledge_map:
@@ -46,7 +47,7 @@ knowledge_map:
   local_vault_path: /home/scott/nas-knowledge
 
   # Durable NAS mirror for the vault and derived artifacts.
-  mirror_vault_path: /media/scott/NAS3/fileserver/shared-knowledge
+  mirror_vault_path: /media/scott/NAS5/shared-knowledge
 
   # Git configuration for versioning
   git:

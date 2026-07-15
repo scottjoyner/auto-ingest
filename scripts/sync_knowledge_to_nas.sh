@@ -2,7 +2,7 @@
 set -euo pipefail
 
 VAULT_PATH="${KNOWLEDGE_VAULT_PATH:-/home/scott/knowledge}"
-MIRROR_PATH="${KNOWLEDGE_MIRROR_PATH:-/media/scott/NAS3/fileserver/shared-knowledge}"
+MIRROR_PATH="${KNOWLEDGE_MIRROR_PATH:-/media/scott/NAS5/shared-knowledge}"
 
 mkdir -p "$MIRROR_PATH"
 

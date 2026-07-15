@@ -3,30 +3,58 @@ set -euo pipefail
 
 cd ~/git/auto-ingest || { echo "❌ Failed to cd into ~/git/auto-ingest"; exit 1; }
 
-echo "▶️ Copy: audio / dashcam / bodycam"
-./audio_copy.sh        || echo "❌ Failed: audio_copy.sh"
-./dashcam_copy.sh      || echo "❌ Failed: dashcam_copy.sh"
-./bodycam_copy.sh      || echo "❌ Failed: bodycam_copy.sh"
+# Load host-specific roots and service endpoints. Several scripts still default
+# to localhost/NAS3-era values when these are not exported.
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
+fi
 
-echo "▶️ Whisper (chunked, merged, large-v3) over AUDIO tree"
+NEO4J_URI="${NEO4J_URI:-bolt://100.64.43.123:7687}"
+NEO4J_USER="${NEO4J_USER:-neo4j}"
+NEO4J_PASSWORD="${NEO4J_PASSWORD:-${NEO4J_PASS:-knowledge_graph_2026}}"
+NEO4J_PASS="$NEO4J_PASSWORD"
+# Avoid TensorFlow/Keras import path in transformers/sentence-transformers;
+# this venv is torch-first and Keras 3 breaks older TF integrations.
+USE_TF="${USE_TF:-0}"
+TRANSFORMERS_NO_TF="${TRANSFORMERS_NO_TF:-1}"
+export NEO4J_URI NEO4J_USER NEO4J_PASSWORD NEO4J_PASS USE_TF TRANSFORMERS_NO_TF
+
+echo "▶️ Copy: audio / dashcam / bodycam"
+copy_failed=0
+./audio_copy.sh || { echo "❌ Failed: audio_copy.sh"; copy_failed=1; }
+./dashcam_copy.sh || { echo "❌ Failed: dashcam_copy.sh"; copy_failed=1; }
+./bodycam_copy.sh || { echo "❌ Failed: bodycam_copy.sh"; copy_failed=1; }
+if [ "$copy_failed" -ne 0 ]; then
+  echo "❌ Aborting before Whisper because one or more required copy stages failed."
+  echo "   Fix the mount/path error above, then rerun."
+  exit 1
+fi
+
+echo "▶️ faster-whisper (chunked, merged, medium/int8 CPU by default) over AUDIO tree"
 # ./.venv/bin/python3 whisper_audio_chunked.py \
 #   --audio-root FILESERVER_ROOT/audio \
 #   --fast-copy \
 #   --merge \
 #   --model large-v3 || echo "❌ Failed: whisper_audio_chunked.py"
 ./.venv/bin/python3 whisper_audio_chunked.py \
-  --model medium \
+  --backend faster \
+  --compute-type "${WHISPER_COMPUTE_TYPE:-int8}" \
+  --model "${WHISPER_MODEL:-medium}" \
   --merge \
   --audio-root "${AUDIO_ROOT:-$(python3 - <<'PY'
 from auto_ingest_config import get_audio_root
 print(get_audio_root())
 PY
-)}/audio" \
-  --transcriptions-root "${AUDIO_ROOT:-$(python3 - <<'PY'
+)}" \
+  --transcriptions-root "${TRANSCRIPTIONS_ROOT:-$(python3 - <<'PY'
+from pathlib import Path
 from auto_ingest_config import get_audio_root
-print(get_audio_root())
+print(Path(get_audio_root()) / 'transcriptions')
 PY
-)}/audio/transcriptions"
+)}"
 
 echo "▶️ Speaker diarization (dashcam videos + standalone audio)"
 ./.venv/bin/python3 speakers.py || echo "❌ Failed: speakers.py"
@@ -36,9 +64,9 @@ echo "▶️ Ingest (transcripts + RTTM → Neo4j)"
 
 echo "▶️ Ingest speakers_reconcile (transcripts + RTTM → Neo4j)"
 ./.venv/bin/python3 speakers_reconcile.py \
-  --neo4j-uri bolt://localhost:7687 \
-  --neo4j-user neo4j \
-  --neo4j-password livelongandprosper \
+  --neo4j-uri "$NEO4J_URI" \
+  --neo4j-user "$NEO4J_USER" \
+  --neo4j-password "$NEO4J_PASSWORD" \
   --db neo4j \
   --batch 50 \
   --only-missing  || echo "❌ Failed: speakers_reconcile.py"
@@ -49,16 +77,8 @@ echo "▶️ YOLO vehicle detection"
 
 echo "▶️ Dashcam HUD metadata"
 ./.venv/bin/python3 metadata_scraper_iterator.py || echo "❌ Failed: metadata_scraper_iterator.py"
-# ./.venv/bin/python3 dashcam_hud_iterate.py --base "${DASHCAM_ROOT:-$(python3 - <<'PY'
-from auto_ingest_config import get_dashcam_root
-print(get_dashcam_root())
-PY
-)}" || echo "❌ Failed: dashcam_hud_iterator.py"
-# ./.venv/bin/python3 dashcam_hud_iterate.py --base "${DASHCAM_ROOT:-$(python3 - <<'PY'
-from auto_ingest_config import get_dashcam_root
-print(get_dashcam_root())
-PY
-)}" || echo "❌ Failed: dashcam_hud_iterator.py"
+# Example if needed:
+# ./.venv/bin/python3 dashcam_hud_iterate.py --base "$DASHCAM_ROOT" || echo "❌ Failed: dashcam_hud_iterator.py"
 
 echo "▶️ Music precompute + lyrics classifier (optional)"
 ./.venv/bin/python3 01_precompute_music_segments.py --push-neo4j || echo "❌ Failed: 01_precompute_music_segments.py"
@@ -109,19 +129,23 @@ echo "▶️ Dashcam YOLO embeddings"
   --grid 16x9 \
   --pyramid \
   --heatmap \
-  --neo4j-uri bolt://localhost:7687 \
-  --neo4j-user neo4j \
-  --neo4j-pass livelongandprosper \
+  --neo4j-uri "$NEO4J_URI" \
+  --neo4j-user "$NEO4J_USER" \
+  --neo4j-pass "$NEO4J_PASSWORD" \
   --win-mins 10 2> /dev/null || echo "❌ Failed: dashcam_yolo_embeddings.py"
 
 echo "▶️ Patch Missing Locations in YOLO Embeddings"
-./.venv/bin/python3 patch_missing_locations.py \
-  --neo4j-uri bolt://localhost:7687 \
-  --neo4j-user neo4j \
-  --neo4j-pass livelongandprosper \
-  --key-limit 1000 \
-  --win-mins 10 \
-  --validate-m 50
+if [ -f patch_missing_locations.py ]; then
+  ./.venv/bin/python3 patch_missing_locations.py \
+    --neo4j-uri "$NEO4J_URI" \
+    --neo4j-user "$NEO4J_USER" \
+    --neo4j-pass "$NEO4J_PASSWORD" \
+    --key-limit 1000 \
+    --win-mins 10 \
+    --validate-m 50 || echo "❌ Failed: patch_missing_locations.py"
+else
+  echo "⚠️ Skipping patch_missing_locations.py: file not present in this checkout."
+fi
 echo "▶️ Dashcam Merger"
 ./.venv/bin/python3 dashcam_merge_FR.py \
   --base "${DASHCAM_ROOT:-$(python3 - <<'PY'

@@ -12,6 +12,14 @@ except Exception:
     HAVE_FASTER_WHISPER = False
 
 import torch  # noqa: F401
+try:
+    import torchaudio  # type: ignore
+    if not hasattr(torchaudio, "set_audio_backend"):
+        # pyannote.audio 3.1 still calls this legacy torchaudio API during
+        # import; torchaudio 2.6 removed it because backends are dispatcher based.
+        setattr(torchaudio, "set_audio_backend", lambda *args, **kwargs: None)  # type: ignore[attr-defined]
+except Exception:
+    pass
 from pyannote.audio import Pipeline
 
 # ========= Config =========

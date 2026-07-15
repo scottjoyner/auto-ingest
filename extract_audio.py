@@ -8,17 +8,22 @@ from auto_ingest_config import get_dashcam_root
 def list_files(directory):
     """Find all valid video keys in a directory.
     
-    Supports both legacy formats (_F.MP4) and new numeric timestamp formats
-    (2025_0101_002327_000008F.MP4, 2025_0101_002427_000011R.MP4)."""
+    Supports legacy formats (_F.MP4), numeric timestamp formats with frame suffixes
+    (2025_0101_002327_000008F.MP4, 2025_0101_002427_000011R.MP4), and plain numeric
+    timestamps without frame suffixes (20250713105005_000013.MP4)."""
     file_keys = set()
     for filename in os.listdir(directory):
-        # New numeric format patterns (e.g., 2025_0101_002327_000008F.MP4)
+        # New numeric format patterns with F/R frame indicators
         if re.search(r"_\d+F\.mp4$", filename, re.IGNORECASE):
             file_keys.add(filename.rsplit('.', 1)[0])
         elif re.search(r"_\d+R\.mp4$", filename, re.IGNORECASE):
             file_keys.add(filename.rsplit('.', 1)[0])
         # Legacy pattern (backward compatible)
         if re.search("_F.MP4", filename):
+            file_keys.add(filename.rsplit('.', 1)[0])
+        # Generic numeric timestamp without frame suffix — catches bodycam and other formats
+        # e.g. 20250713105005_000013.MP4 or 2025_0101_173933.MP4
+        if re.search(r"_\d+\.mp4$", filename, re.IGNORECASE):
             file_keys.add(filename.rsplit('.', 1)[0])
     return sorted(file_keys)
 
@@ -39,7 +44,7 @@ def list_directories(base_path):
         if is_valid_date_structure(temp_path):
             print(f"Valid directory structure found: {root}")
             file_path = root
-            dashcam_root = get_dashcam_root()  # canonical /media/scott/NAS3/dashcam
+            dashcam_root = get_dashcam_root()  # canonical local cache/processing dashcam root
             transcriptions = os.path.join(dashcam_root, "transcriptions")
             audio_dir = os.path.join(dashcam_root, "audio")
             
