@@ -387,11 +387,16 @@ def ensure_priority_gs(sess, name_regex: Optional[str]) -> Optional[str]:
     if best_gid:
         return best_gid
 
-    # Create a fresh priority GS if not found
+    # Create a fresh priority GS if not found. The priority identity IS you, so
+    # seed it as the confirmed "me" anchor (person_id='scott'); this lets the anchor
+    # grow automatically via update_existing_gs_with_assignments even before
+    # `whoami --merge` runs. If the canonical Scott GS already exists (matched by
+    # name/aliases above) we return that instead, so no duplicate is created.
     gid = hashlib.md5(("priority|" + name_regex).encode("utf-8")).hexdigest()
     sess.run("""
       MERGE (g:GlobalSpeaker {id:$gid})
-      ON CREATE SET g.created_at=datetime(), g.status='tentative', g.name=$name
+      ON CREATE SET g.created_at=datetime(), g.status='confirmed', g.name=$name,
+                    g.label='Scott', g.person_id='scott', g.is_me=true
       ON MATCH  SET g.updated_at=datetime()
     """, gid=gid, name=name_regex)
     return gid
@@ -667,29 +672,9 @@ def save_audio_cache(path: Optional[Path], cache: Dict[str, str]):
     except Exception as ex:
         logging.warning(f"Failed to write audio cache {path}: {ex}")
 
-def _norm_stem(key: str) -> str:
-    return re.sub(r"_R$", "", key)
-
-def discover_audio_for_key(key: str) -> Optional[Path]:
-    stem = _norm_stem(key)
-    hit = _index_lookup(stem)
-    if hit is not None:
-        return hit
-    # When the index is loaded it is authoritative: a miss means "no audio";
-    # skip the (very slow on big trees) rglob fallback to keep the run scalable.
-    if _AUDIO_INDEX is not None:
-        return None
-    for ext in AUDIO_EXTS:
-        hits = list(AUDIO_BASE.rglob(f"**/{stem}{ext}"))
-        if hits:
-            return hits[0]
-    for base in ALT_AUDIO_BASES:
-        for ext in AUDIO_EXTS:
-            hits = list(base.rglob(f"**/{stem}{ext}"))
-            if hits:
-                return hits[0]
-    hits = list(AUDIO_BASE.rglob(f"**/{stem}*"))
-    return hits[0] if hits else None
+# NOTE: _norm_stem / discover_audio_for_key are defined earlier (rich versions with
+# sidecar-stripping + audio-index lookup). The duplicate simple copies were removed
+# (merge artifact) so the authoritative definitions are used.
 
 
 # -----------------------
@@ -1017,11 +1002,14 @@ def update_existing_gs_with_assignments(
       - create SAME_PERSON edges for members with score=cos(local, e_new)
     """
     for gid, sids in assignments.items():
-        prev = sess.run("MATCH (g:GlobalSpeaker {id:$gid}) RETURN g.embedding AS emb, g.weight_sum AS w", gid=gid).single()
+        prev = sess.run("MATCH (g:GlobalSpeaker {id:$gid}) RETURN g.embedding AS emb, g.weight_sum AS w, g.is_me AS me, g.person_id AS pid, g.label AS lbl", gid=gid).single()
         if not prev:
             continue
         e_prev = np.asarray(prev["emb"], dtype=np.float32) if prev["emb"] is not None else None
         w_prev = float(prev["w"]) if prev["w"] is not None else 0.0
+        g_me = bool(prev["me"]) if prev["me"] is not None else False
+        g_pid = prev["pid"]
+        g_lbl = prev["lbl"]
 
         # local contribution
         sum_vec = np.zeros_like(next(iter(local_centroids.values())), dtype=np.float32)
@@ -1059,14 +1047,24 @@ def update_existing_gs_with_assignments(
           SET g.embedding=$emb, g.weight_sum=$w, g.status=$status, g.method=$method
         """, gid=gid, emb=list(map(float, e_new)), w=float(w_combined), status=status, method=method)
 
-        # write edges
+        # write edges — carry is_me from the GlobalSpeaker onto each linked local
+        # Speaker so the Scott anchor grows automatically as new clips are linked.
         for sid, sc, tentative, wloc in edge_payload:
-            sess.run("""
-              MATCH (s:Speaker {id:$sid}), (g:GlobalSpeaker {id:$gid})
-              MERGE (s)-[r:SAME_PERSON]->(g)
-              ON CREATE SET r.created_at=datetime()
-              SET r.updated_at=datetime(), r.method=$method, r.score=$score, r.tentative=$tentative, r.weight=$w
-            """, sid=sid, gid=gid, method=method, score=float(sc), tentative=bool(tentative), w=float(wloc))
+            if g_me:
+                sess.run("""
+                  MATCH (s:Speaker {id:$sid}), (g:GlobalSpeaker {id:$gid})
+                  MERGE (s)-[r:SAME_PERSON]->(g)
+                  ON CREATE SET r.created_at=datetime()
+                  SET r.updated_at=datetime(), r.method=$method, r.score=$score, r.tentative=$tentative, r.weight=$w,
+                      s.is_me=true, s.person_id=$gpid, s.label=$glbl
+                """, sid=sid, gid=gid, method=method, score=float(sc), tentative=bool(tentative), w=float(wloc), gpid=g_pid, glbl=g_lbl)
+            else:
+                sess.run("""
+                  MATCH (s:Speaker {id:$sid}), (g:GlobalSpeaker {id:$gid})
+                  MERGE (s)-[r:SAME_PERSON]->(g)
+                  ON CREATE SET r.created_at=datetime()
+                  SET r.updated_at=datetime(), r.method=$method, r.score=$score, r.tentative=$tentative, r.weight=$w
+                """, sid=sid, gid=gid, method=method, score=float(sc), tentative=bool(tentative), w=float(wloc))
 
 
 # -----------------------
@@ -1114,6 +1112,26 @@ def write_clusters_incremental(
             gid = hashlib.md5("|".join(cluster_sorted).encode("utf-8")).hexdigest()
             status = "tentative" if tentative else "confirmed"
 
+            # If any member is already Scott (is_me), the new GlobalSpeaker is Scott
+            # too, and every linked local Speaker inherits is_me. This lets the anchor
+            # grow automatically as new clips are linked by future runs.
+            any_me = bool(sess.run(
+                "MATCH (s:Speaker) WHERE s.id IN $ids AND s.is_me=true RETURN count(s) > 0 AS b",
+                ids=cluster_sorted,
+            ).single()["b"]) if cluster_sorted else False
+            if any_me:
+                rep = sess.run(
+                    "MATCH (s:Speaker{is_me:true}) WHERE s.id IN $ids "
+                    "RETURN s.person_id AS pid, s.label AS lbl LIMIT 1",
+                    ids=cluster_sorted,
+                ).single()
+                g_pid = (rep["pid"] if rep and rep["pid"] else "scott")
+                g_lbl = (rep["lbl"] if rep and rep["lbl"] else "Scott")
+            else:
+                g_pid, g_lbl = None, None
+            gs_extra = ", g.is_me=true, g.person_id=$gpid, g.label=$glbl" if any_me else ""
+            sp_extra = ", s.is_me=true, s.person_id=$gpid, s.label=$glbl" if any_me else ""
+
             if dry_run:
                 logging.info(f"DRY-RUN cluster<{len(cluster_sorted)}> gs={gid} status={status} conf={conf:.3f} members={cluster_sorted}")
             else:
@@ -1138,16 +1156,17 @@ def write_clusters_incremental(
                       ON CREATE SET g.created_at=datetime()
                       ON MATCH  SET g.updated_at=datetime()
                       SET g.status=$status, g.method=$method, g.confidence=$conf,
-                          g.embedding=$emb, g.weight_sum=$w
+                          g.embedding=$emb, g.weight_sum=$w""" + gs_extra + """
                     """, gid=gid, status=status, method=method, conf=float(conf),
-                         emb=list(map(float, e_new)), w=float(w_new))
+                         emb=list(map(float, e_new)), w=float(w_new), gpid=g_pid, glbl=g_lbl)
                 else:
                     sess.run("""
                       MERGE (g:GlobalSpeaker {id:$gid})
                       ON CREATE SET g.created_at=datetime()
                       ON MATCH  SET g.updated_at=datetime()
-                      SET g.status=$status, g.method=$method, g.confidence=$conf
-                    """, gid=gid, status=status, method=method, conf=float(conf))
+                      SET g.status=$status, g.method=$method, g.confidence=$conf""" + gs_extra + """
+                    """, gid=gid, status=status, method=method, conf=float(conf),
+                         gpid=g_pid, glbl=g_lbl)
 
                 for sid in cluster_sorted:
                     best = 1.0 if len(cluster_sorted) == 1 else max(
@@ -1157,10 +1176,11 @@ def write_clusters_incremental(
                     sess.run("""
                       MATCH (s:Speaker {id:$sid}), (g:GlobalSpeaker {id:$gid})
                       MERGE (s)-[r:SAME_PERSON]->(g)
-                      ON CREATE SET r.method=$method, r.score=$score, r.weight=$w, r.tentative=$tentative, r.created_at=datetime()
-                      ON MATCH  SET r.method=$method, r.score=$score, r.weight=$w, r.tentative=$tentative, r.updated_at=datetime()
+                      ON CREATE SET r.method=$method, r.score=$score, r.weight=$w, r.tentative=$tentative, r.created_at=datetime()""" + sp_extra + """
+                      ON MATCH  SET r.method=$method, r.score=$score, r.weight=$w, r.tentative=$tentative, r.updated_at=datetime()""" + sp_extra + """
                     """, sid=sid, gid=gid, method=method, score=float(best),
-                         w=float(spk_weights.get(sid, 1.0)), tentative=bool(tentative))
+                         w=float(spk_weights.get(sid, 1.0)), tentative=bool(tentative),
+                         gpid=g_pid, glbl=g_lbl)
 
 
 # -----------------------

@@ -1,38 +1,47 @@
 #!/usr/bin/env python3
-"""Check current speaker state in Neo4j."""
+"""Check current speaker state in Neo4j (speaker counts, GlobalSpeaker linkage,
+is_me coverage). Uses NEO4J_* env (default bolt://localhost:7687, db neo4j)."""
+import os
 from neo4j import GraphDatabase
 
-uri = "bolt://100.64.43.123:7687"
-auth = ("neo4j", "knowledge_graph_2026")
+URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+USER = os.environ.get("NEO4J_USER", "neo4j")
+PASS = os.environ.get("NEO4J_PASSWORD", "knowledge_graph_2026")
+DB = os.environ.get("NEO4J_DB", "neo4j")
 
-with GraphDatabase.driver(uri, auth=auth) as driver:
-    with driver.session(database="knowledge_graph_2026") as session:
-        # Speaker counts by label
-        r = session.run("""
-            MATCH (s:Speaker)
-            WITH s.label AS label, count(s) AS cnt
-            ORDER BY cnt DESC
-            RETURN label, cnt
-        """).data()
 
-        print("=== Current Speaker labels ===")
-        for row in r[:10]:
-            print(f"  {row['label']}: {row['cnt']}")
+def main() -> None:
+    with GraphDatabase.driver(URI, auth=(USER, PASS)) as driver:
+        with driver.session(database=DB) as s:
+            # Speaker counts by label
+            rows = s.run("""
+                MATCH (sp:Speaker)
+                WITH sp.label AS label, count(sp) AS cnt
+                ORDER BY cnt DESC
+                RETURN label, cnt
+            """).data()
+            print("=== Current Speaker labels (top 10) ===")
+            for row in rows[:10]:
+                print(f"  {row['label']}: {row['cnt']}")
 
-        # Total speaker count
-        total = session.run("MATCH (s:Speaker) RETURN count(s)").single()["count(s)"]
-        print(f"\n=== Total Speaker nodes: {total} ===")
+            total = s.run("MATCH (sp:Speaker) RETURN count(sp) AS c").single()["c"]
+            print(f"\n=== Total Speaker nodes: {total} ===")
 
-        # GlobalSpeaker linkage
-        r2 = session.run("""
-            MATCH (s:Speaker)-[r:SPOKEN_BY]->(g:GlobalSpeaker)
-            RETURN count(DISTINCT s) AS linked_speakers, 
-                   count(g) AS global_speaker_refs
-        """).data()
+            # GlobalSpeaker linkage via SAME_PERSON
+            r = s.run("""
+                MATCH (sp:Speaker)-[:SAME_PERSON]->(g:GlobalSpeaker)
+                RETURN count(DISTINCT sp) AS linked, count(DISTINCT g) AS globals
+            """).single()
+            linked = r["linked"]; globals_ = r["globals"]
+            print(f"\n=== Linked speakers (SAME_PERSON): {linked} ===")
+            print(f"=== Distinct GlobalSpeakers: {globals_} ===")
+            cov = (linked / total * 100) if total else 0.0
+            print(f"=== Linkage coverage: {cov:.1f}% ===")
 
-        print(f"\n=== Linked speakers: {r2[0]['linked_speakers']} ===")
-        print(f"=== GlobalSpeaker refs: {r2[0]['global_speaker_refs']} ===")
+            me = s.run("MATCH (sp:Speaker{is_me:true}) RETURN count(sp) AS c").single()["c"]
+            gs_me = s.run("MATCH (g:GlobalSpeaker{is_me:true}) RETURN count(g) AS c").single()["c"]
+            print(f"\n=== Speaker is_me: {me} | GlobalSpeaker is_me: {gs_me} ===")
 
-        # Coverage percentage
-        coverage = r2[0]['linked_speakers'] / total * 100 if total else 0
-        print(f"=== Coverage: {coverage:.1f}% ===")
+
+if __name__ == "__main__":
+    main()

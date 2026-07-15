@@ -91,6 +91,7 @@ def build_ffmpeg_cmd(
         "-i", str(src),
         "-map_metadata", "0",
         "-map", "0",
+        "-f", "mp4",
         "-movflags", "+faststart",
         "-pix_fmt", "yuv420p",
         "-vf", vf_str,
