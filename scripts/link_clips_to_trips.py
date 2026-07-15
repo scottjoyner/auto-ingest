@@ -122,30 +122,21 @@ def report_trip_speakers(sess, ident):
         logging.error(f"No Trip with tripId/uniqueKey={ident}")
         return
     logging.info(f"Trip {rec['uk']} src={rec['src']} clips={rec['cc']} {rec['s']} -> {rec['e']}")
-    # Collect clip keys for the trip, then find linked Transcriptions via the indexed key.
-    # Dashcam transcriptions (when present) are keyed by the clip stem/key; fall back to the
-    # stem without the _F/_R/_L/_I suffix.
-    keys = [r["k"] for r in sess.run(
-        "MATCH (t:Trip{uniqueKey:$uk})<-[:IN_TRIP]-(c:DashcamClip) RETURN c.key AS k", uk=rec["uk"]
-    )]
-    tkeys = []
-    for k in keys:
-        stem = re.sub(r"_[FRIL]$", "", k)
-        for kr in (k, stem):
-            if sess.run("MATCH (t:Transcription{key:$k}) RETURN count(t) AS n", k=kr).single()["n"] > 0:
-                tkeys.append(kr)
-                break
-    if not tkeys:
-        logging.info("  No Transcriptions linked to this trip's clips (dashcam transcription<->clip "
-                     "attribution is sparse; see gap notes). Anchor + Trip edges are still in place.")
-        return
-    for row in sess.run(
-        "MATCH (t:Transcription)-[:HAS_SEGMENT]->(seg:Segment)-[:SPOKEN_BY]->(sp:Speaker) "
-        "WHERE t.key IN $tkeys "
-        "RETURN coalesce(sp.label,'?') AS label, coalesce(sp.is_me,false) AS me, count(*) AS segs "
+    # Precise per-trip speaker breakdown via the FOR_CLIP edges backfilled by
+    # scripts/backfill_segment_clip_key.py (G13 fix). This avoids the aggregated
+    # transcriptions that previously inflated counts to corpus scale.
+    rows = sess.run(
+        "MATCH (tr:Trip{uniqueKey:$uk})<-[:IN_TRIP]-(c:DashcamClip)<-[:FOR_CLIP]-(t:Transcription) "
+        "MATCH (t)-[:HAS_SEGMENT]->(seg:Segment)-[:SPOKEN_BY]->(sp:Speaker) "
+        "RETURN coalesce(sp.label,'?') AS label, coalesce(sp.is_me,false) AS me, count(seg) AS segs "
         "ORDER BY segs DESC",
-        tkeys=tkeys,
-    ).data():
+        uk=rec["uk"],
+    ).data()
+    if not rows:
+        logging.info("  No Transcriptions linked to this trip's clips yet. Run "
+                     "scripts/backfill_segment_clip_key.py to attach FOR_CLIP edges.")
+        return
+    for row in rows:
         tag = "  <== SCOTT" if row["me"] else ""
         logging.info(f"  {row['label']:12} is_me={row['me']} segs={row['segs']}{tag}")
 
