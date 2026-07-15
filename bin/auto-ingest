@@ -164,6 +164,8 @@ def cmd_link_speakers(args) -> int:
         flags.append("--rank-and-label")
     if args.dry_run:
         flags.append("--dry-run")
+    if args.state_file:
+        opts["--state-file"] = args.state_file
 
     cli = list(flags)
     for k, v in opts.items():
@@ -209,6 +211,8 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--rank-and-label", action="store_true",
                     help="Also run full-graph dominance + Transcription labeling (heavy; final pass only).")
     pl.add_argument("--dry-run", action="store_true", help="Do not write to Neo4j.")
+    pl.add_argument("--state-file", type=str, default="",
+                   help="JSON file of already-processed speaker IDs for monotonic chunked/resumed runs.")
     pl.set_defaults(func=cmd_link_speakers)
 
     pw = sub.add_parser("whoami", help="Anchor / verify the 'me' (Scott) speaker.")

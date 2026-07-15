@@ -28,7 +28,7 @@ import sqlite3
 import time
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Set, Tuple, Optional
 import subprocess
 
 import numpy as np
@@ -543,29 +543,58 @@ def _fetch_from_utterances(sess, min_seg_sec: float) -> Dict[str, Dict]:
                            1.0))
     return out
 
+
+def _mark_no_audio(drv, sids: List[str]) -> None:
+    """Set a `no_audio` flag on speakers we attempted but could not embed, so
+    chunked / resumed runs skip them and make monotonic forward progress."""
+    if not sids:
+        return
+    with drv.session(database=NEO4J_DB) as sess:
+        for i in range(0, len(sids), 1000):
+            batch = sids[i:i + 1000]
+            sess.run(
+                "UNWIND $ids AS sid MATCH (sp:Speaker {id: sid}) "
+                "SET sp.no_audio = true",
+                ids=batch,
+            )
+
+
 def fetch_speakers_and_segments(drv, min_seg_sec: float, min_prop: float,
                                 include_unknown: bool, limit_speakers: int = 0,
                                 source_level: str = "auto",
                                 speaker_batch: int = 1500,
                                 items_per_speaker: int = 64,
-                                max_speakers: int = 0) -> Dict[str, Dict]:
+                                max_speakers: int = 0,
+                                skip_already_linked: bool = False,
+                                include_no_audio: bool = False,
+                                exclude_sids: Optional[Set[str]] = None) -> Dict[str, Dict]:
     """
     Batched, seek-paginated pull using ONE query per page (a Cypher CALL subquery
     caps rows per speaker). Avoids the old N separate per-speaker round-trips that
     made a full 245k-speaker pass infeasible.
 
+    When skip_already_linked is set, speakers that already have a SAME_PERSON edge
+    are excluded in the query itself, so successive chunks (--max-speakers N) advance
+    through the *next* unlinked speakers instead of reprocessing the first ones.
+
     Returns { speaker_id: {label, items:[(file_key,start,end,text,prop), ...]} }
     """
+    linked_pred = "AND NOT (sp)-[:SAME_PERSON]->(:GlobalSpeaker)" if skip_already_linked else ""
+    no_audio_pred = "AND coalesce(sp.no_audio, false) = false" if not include_no_audio else ""
+    excl_pred = "AND NOT sp.id IN $excl" if exclude_sids else ""
     out: Dict[str, Dict] = {}
     nsp = 0
     after = None
     with drv.session(database=NEO4J_DB) as sess:
         while True:
-            cy = """
+            cy = f"""
             MATCH (sp:Speaker)
             WHERE sp.id > coalesce($after, '')
+            {linked_pred}
+            {no_audio_pred}
+            {excl_pred}
             WITH sp ORDER BY sp.id LIMIT $batch
-            CALL {
+            CALL {{
                 WITH sp
                 MATCH (sp)<-[r:SPOKEN_BY]-(s:Segment)<-[:HAS_SEGMENT]-(t:Transcription)
                 WHERE coalesce(s.end,0) - coalesce(s.start,0) >= $min_seg
@@ -574,19 +603,33 @@ def fetch_speakers_and_segments(drv, min_seg_sec: float, min_prop: float,
                        s.text AS text, coalesce(r.proportion,1.0) AS prop
                 ORDER BY prop DESC, (coalesce(s.end,0) - coalesce(s.start,0)) DESC
                 LIMIT $lim
-            }
+            }}
             RETURN sp.id AS sid, sp.label AS label, file_key, start, end, text, prop
             ORDER BY sid
             """
             rows = sess.run(cy, after=after, batch=speaker_batch, lim=items_per_speaker,
-                            min_seg=min_seg_sec, min_prop=min_prop)
+                            min_seg=min_seg_sec, min_prop=min_prop,
+                            excl=list(exclude_sids) if exclude_sids else [])
             page = []
             for rec in rows:
                 page.append((rec["sid"], rec["label"], rec["file_key"],
                              float(rec["start"] or 0.0), float(rec["end"] or 0.0),
                              (rec["text"] or ""), float(rec["prop"] or 1.0)))
+            # When skipping linked / no_audio speakers the page can be empty even
+            # though more speakers exist beyond $after; advance the cursor by a
+            # plain id page that respects the same filters.
             if not page:
-                break
+                nxt = sess.run(
+                    "MATCH (sp:Speaker) WHERE sp.id > coalesce($after,'') "
+                    f"{linked_pred} {no_audio_pred} {excl_pred} "
+                    "RETURN sp.id AS sid ORDER BY sp.id LIMIT $batch",
+                    after=after, batch=speaker_batch,
+                    excl=list(exclude_sids) if exclude_sids else [],
+                ).data()
+                if not nxt:
+                    break
+                after = nxt[-1]["sid"]
+                continue
             for sid, label, fk, st, en, tx, prop in page:
                 d = out.get(sid)
                 if d is None:
@@ -1182,6 +1225,8 @@ class Args:
     global_thresh: float
     global_include_tentative: bool
     skip_already_linked: bool
+    include_no_audio: bool
+    state_file: str
 
     # 🔹 NEW: priority identity + ranking
     priority_name: Optional[str]          # regex like "Scott|Kipnerter"
@@ -1260,7 +1305,11 @@ def parse_args():
     p.add_argument("--items-per-speaker", type=int, default=64,
                 help="Upper bound of (Segment, proportion) rows fetched per speaker before local caps.")
     p.add_argument("--max-speakers", type=int, default=0,
-                help="Optional global cap of speakers processed this run (0 = no cap).")
+                 help="Optional global cap of speakers processed this run (0 = no cap).")
+    p.add_argument("--include-no-audio", action="store_true", default=False,
+                 help="Include speakers previously marked no_audio (default skips them so resumed runs make progress).")
+    p.add_argument("--state-file", type=str, default="",
+                 help="Path to a JSON file recording speaker IDs already processed; enables monotonic progress across chunked/resumed runs (speakers in this file are skipped).")
 
     return Args(**vars(p.parse_args()))
 
@@ -1273,6 +1322,17 @@ def main():
     drv = driver()
     ensure_schema(drv)
 
+    # Persistent state: speakers already fetched in prior (chunked) runs are
+    # excluded so each run advances monotonically through never-seen speakers.
+    done: Set[str] = set()
+    if args.state_file:
+        try:
+            with open(args.state_file) as fh:
+                done = set(json.load(fh))
+            logging.info(f"Loaded {len(done)} already-processed speakers from {args.state_file}.")
+        except FileNotFoundError:
+            pass
+
     logging.info("Querying Segment-level diarization (with auto fallback)…")
     speakers = fetch_speakers_and_segments(
         drv,
@@ -1284,8 +1344,17 @@ def main():
         speaker_batch=args.speaker_batch,
         items_per_speaker=args.items_per_speaker,
         max_speakers=args.max_speakers,
+        skip_already_linked=args.skip_already_linked,
+        include_no_audio=args.include_no_audio,
+        exclude_sids=done or None,
     )
     logging.info(f"Found {len(speakers)} speakers with qualifying items.")
+
+    if args.state_file and speakers:
+        done.update(speakers.keys())
+        with open(args.state_file, "w") as fh:
+            json.dump(sorted(done), fh)
+        logging.info(f"Saved {len(done)} processed speakers to {args.state_file}.")
 
     # audio index (one-time walk; O(1) per-key lookup) — built before the embed loop
     index_path = Path(args.audio_index) if args.audio_index else None
@@ -1353,6 +1422,7 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
 
     logging.info("Selecting, gating, clipping & embedding per Speaker…")
+    no_audio_sids: List[str] = []  # attempted but no usable audio -> mark to skip on resume
     for sid, meta in speakers.items():
         items = meta["items"]  # (key, start, end, text, prop)
         items.sort(key=lambda x: (x[4], x[2]-x[1]), reverse=True)
@@ -1364,6 +1434,7 @@ def main():
         chosen = cap_snips_per_file(items_text, args.max_per_file, args.max_snips, rng)
         if not chosen:
             logging.warning(f"No eligible segments for speaker {sid}")
+            no_audio_sids.append(sid)
             continue
 
         # hold-out candidate
@@ -1375,10 +1446,12 @@ def main():
         used = 0
         held: Optional[np.ndarray] = None
 
+        got_audio = False
         for idx, (key, s, e, text, prop) in enumerate(chosen):
             pack = get_audio_for_key(key)
             if pack is None:
                 continue
+            got_audio = True
             wav, sr, _ = pack
             snip = fixed_snip(wav, sr, s, e, args.pad, args.snip_len)
             if snip.numel() == 0:
@@ -1417,7 +1490,13 @@ def main():
                 held = emb_u
 
         if used == 0:
-            logging.warning(f"All snips gated out for speaker {sid}")
+            if not got_audio:
+                # No audio file could be located for any segment of this speaker;
+                # nothing a future run (even more-aggressive) can do -> skip on resume.
+                logging.warning(f"No audio available for speaker {sid}")
+                no_audio_sids.append(sid)
+            else:
+                logging.warning(f"All snips gated out for speaker {sid}")
             continue
 
         cen = unit(sum_vec if sum_vec is not None else np.zeros_like(emb_u))
@@ -1428,6 +1507,12 @@ def main():
 
     if cache_path:
         save_audio_cache(cache_path, audio_cache)
+
+    # Mark speakers we attempted but could not embed (no usable audio / all gated out)
+    # so that chunked / resumed runs skip them and make monotonic forward progress.
+    if no_audio_sids:
+        _mark_no_audio(drv, no_audio_sids)
+        logging.info(f"Marked {len(no_audio_sids)} speakers as no_audio (skipped on resume).")
 
     if not spk_centroids:
         logging.warning("No centroids built; nothing to cluster.")

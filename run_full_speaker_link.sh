@@ -8,6 +8,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
+STATE_FILE="${STATE_FILE:-./linker_state.json}"
 export NEO4J_URI="${NEO4J_URI:-bolt://localhost:7687}"
 export NEO4J_USER="${NEO4J_USER:-neo4j}"
 export NEO4J_PASSWORD="${NEO4J_PASSWORD:-knowledge_graph_2026}"
@@ -25,7 +26,9 @@ trap cleanup EXIT
 echo "=== FULL global speaker-linking pass ==="
 # No --max-speakers => process every qualifying speaker. --faiss widens nets.
 # Add --rank-and-label ONLY as a final, separate pass (heavy full-graph query).
-python3 -u bin/auto-ingest link-speakers --faiss "$@"
+# --state-file records processed speaker IDs so a re-launch (after a crash or
+# Ctrl-C) resumes where it left off instead of reprocessing the same speakers.
+python3 -u bin/auto-ingest link-speakers --faiss --state-file "$STATE_FILE" "$@"
 
 echo "=== anchoring Scott (idempotent) + optional final rank/label ==="
 python3 -u bin/auto-ingest whoami --merge
