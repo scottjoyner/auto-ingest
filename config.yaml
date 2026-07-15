@@ -1,6 +1,17 @@
 # auto-ingest configuration
 # This file defines the fileserver root path for each machine.
 # Each script should load this config and use the appropriate path.
+# Nextcloud store (true iPhone images/videos/audio). Separate store, only
+# mounted on some machines. Override with NEXTCLOUD_ROOT env.
+nextcloud_root: /media/scott/SSD_4TB/nextcloud
+
+# Nextcloud WebDAV connection (used by ingest_media.py / run_worker.sh).
+# Password is pulled from the NEXTCLOUD_PASS env (do not hardcode secrets here).
+nextcloud:
+  webdav_url: "https://x1-370.tailcb8954.ts.net/nextcloud"
+  user: admin
+  pass_env: NEXTCLOUD_PASS
+
 
 machine_paths:
   # x1-370 (home Tailscale node — Neo4j server lives here)

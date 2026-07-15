@@ -193,7 +193,16 @@ def cmd_whoami(args) -> int:
 # argparse
 # ---------------------------------------------------------------------------
 def cmd_tiktok(args) -> int:
-    cli = ["tiktok_shorts.py", "--clip", args.clip, "--out", args.out]
+    if args.nextcloud:
+        cli = ["tiktok_shorts.py", "--nextcloud"]
+    elif args.source_root:
+        cli = ["tiktok_shorts.py", "--source-root", args.source_root]
+    else:
+        cli = ["tiktok_shorts.py", "--clip", args.clip]
+    cli += ["--out", args.out]
+    cli += ["--pick", args.pick]
+    if args.date:
+        cli += ["--date", args.date]
     if args.transcript_json:
         cli += ["--transcript-json", args.transcript_json]
     if args.hook:
@@ -206,6 +215,48 @@ def cmd_tiktok(args) -> int:
             "--max-dur", str(args.max_dur)]
     if args.no_auto_transcript:
         cli.append("--no-auto-transcript")
+    return _run(cli[0], cli[1:], extra_env=neo4j_env())
+
+
+def cmd_worker(args) -> int:
+    return _run("./run_worker.sh", [], extra_env=neo4j_env())
+
+
+# ---------------------------------------------------------------------------
+# ingest  (iPhone movies + pictures -> graph + content)
+# ---------------------------------------------------------------------------
+def cmd_ingest(args) -> int:
+    cli = ["ingest_media.py"]
+    if args.root:
+        cli += ["--root", args.root]
+    if args.nextcloud_url:
+        cli += ["--nextcloud-url", args.nextcloud_url]
+        if args.nextcloud_user:
+            cli += ["--nextcloud-user", args.nextcloud_user]
+        if args.nextcloud_pass:
+            cli += ["--nextcloud-pass", args.nextcloud_pass]
+        cli += ["--nextcloud-root", args.nextcloud_root]
+    if args.source:
+        cli += ["--source", args.source]
+    cli += ["--kind", args.kind]
+    if args.state:
+        cli += ["--state", args.state]
+    if args.limit:
+        cli += ["--limit", str(args.limit)]
+    if args.no_transcribe:
+        cli.append("--no-transcribe")
+    if args.no_embed:
+        cli.append("--no-embed")
+    if args.no_shorts:
+        cli.append("--no-shorts")
+    if args.music:
+        cli += ["--music", args.music]
+    if args.slideshow:
+        cli.append("--slideshow")
+    if args.force:
+        cli.append("--force")
+    if args.dry_run:
+        cli.append("--dry-run")
     return _run(cli[0], cli[1:], extra_env=neo4j_env())
 
 
@@ -240,7 +291,12 @@ def build_parser() -> argparse.ArgumentParser:
     pw.set_defaults(func=cmd_whoami)
 
     pt = sub.add_parser("tiktok", help="Generate iPhone TikTok-style vertical shorts from footage.")
-    pt.add_argument("--clip", required=True, help="Source video (e.g. *_FR.MP4)")
+    src = pt.add_mutually_exclusive_group(required=True)
+    src.add_argument("--clip", help="Source video (e.g. *_FR.MP4)")
+    src.add_argument("--source-root", help="Scan a media root and pick a clip")
+    src.add_argument("--nextcloud", action="store_true", help="Scan the Nextcloud (iPhone) root for a clip")
+    pt.add_argument("--pick", choices=["newest", "random"], default="newest", help="Clip pick when scanning")
+    pt.add_argument("--date", default=None, help="Filter scanned clips by YYYY-MM-DD")
     pt.add_argument("--out", required=True, help="Output mp4 path")
     pt.add_argument("--transcript-json", default=None, help="Optional JSON list of {start,end,text}")
     pt.add_argument("--hook", default=None, help="Top hook/title text")
@@ -252,6 +308,30 @@ def build_parser() -> argparse.ArgumentParser:
     pt.add_argument("--no-auto-transcript", action="store_true",
                     help="Do not fetch transcript from Neo4j")
     pt.set_defaults(func=cmd_tiktok)
+
+    pwk = sub.add_parser("worker", help="Run the idle-gated background worker (speaker-link/compress/content).")
+    pwk.set_defaults(func=cmd_worker)
+
+    pi = sub.add_parser("ingest", help="Ingest iPhone movies/pictures (Nextcloud/local) -> graph + content.")
+    src = pi.add_mutually_exclusive_group()
+    src.add_argument("--root", help="Local media root to scan (e.g. /media/scott/SSD_4TB/photos)")
+    src.add_argument("--nextcloud-url", help="Nextcloud WebDAV base URL (live pull)")
+    pi.add_argument("--nextcloud-user", help="Nextcloud WebDAV user")
+    pi.add_argument("--nextcloud-pass", help="Nextcloud WebDAV password/app-token")
+    pi.add_argument("--nextcloud-root", default="Photos",
+                    help="Subfolder under the user's files when URL is the bare server root")
+    pi.add_argument("--source", default="nextcloud", help="source label for MediaFile nodes")
+    pi.add_argument("--kind", choices=["movie", "picture", "all"], default="all")
+    pi.add_argument("--state", default="./media_ingest.json", help="Resume state file")
+    pi.add_argument("--limit", type=int, default=0, help="Max files this run (0=all)")
+    pi.add_argument("--no-transcribe", action="store_true", help="Skip Whisper transcription")
+    pi.add_argument("--no-embed", action="store_true", help="Skip CLIP image embedding")
+    pi.add_argument("--no-shorts", action="store_true", help="Skip short generation")
+    pi.add_argument("--music", default=None, help="Background music for slideshows")
+    pi.add_argument("--slideshow", action="store_true", help="Build per-date Ken Burns slideshow shorts")
+    pi.add_argument("--force", action="store_true", help="Re-process already-done files")
+    pi.add_argument("--dry-run", action="store_true", help="Scan + metadata only, no Neo4j write")
+    pi.set_defaults(func=cmd_ingest)
 
     return p
 

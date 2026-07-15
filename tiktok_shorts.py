@@ -93,7 +93,7 @@ def fetch_transcript(key: str) -> List[Seg]:
             rows = s.run(
                 """
                 MATCH (t:Transcription)-[:HAS_SEGMENT]->(seg:Segment)
-                WHERE coalesce(t.key, t.file_key, '') CONTAINS $k
+                WHERE coalesce(t.key, t.clip_key, '') CONTAINS $k
                 RETURN seg.start AS a, seg.end AS b, seg.text AS txt
                 ORDER BY a
                 """,
@@ -153,17 +153,17 @@ def build_ass(segs: List[Seg], hook: Optional[str], cta: Optional[str],
                  "Alignment, MarginL, MarginR, MarginV, Encoding")
     # Lower-third captions: bold, large, yellow karaoke fill -> white.
     lines.append(
-        f"Style: Cap,{FONT},96,{C_WHITE},{C_YELLOW},{C_BLACK},{C_BLACK},"
-        f"-1,0,0,0,100,100,1,0,1,7,0,2,40,40,200,1"
+        f"Style: Cap,{FONT},92,{C_WHITE},{C_YELLOW},{C_BLACK},{C_BLACK},"
+        f"-1,0,0,0,100,100,1,0,1,5,1,2,40,40,200,1"
     )
     # Hook (top) + CTA (bottom-ish) styles.
     lines.append(
         f"Style: Hook,{FONT},72,{C_WHITE},{C_WHITE},{C_BLACK},{C_BLACK},"
-        f"-1,0,0,0,100,100,1,0,1,6,0,8,40,40,150,1"
+        f"-1,0,0,0,100,100,1,0,1,4,1,8,40,40,150,1"
     )
     lines.append(
         f"Style: CTA,{FONT},80,{C_YELLOW},{C_YELLOW},{C_BLACK},{C_BLACK},"
-        f"-1,0,0,0,100,100,1,0,1,7,0,2,40,40,260,1"
+        f"-1,0,0,0,100,100,1,0,1,5,1,2,40,40,260,1"
     )
     lines.append("")
     lines.append("[Events]")
@@ -218,9 +218,51 @@ def _ffmpeg_ok(codec: str) -> bool:
         return False
 
 
+def _has_audio(path: Path) -> bool:
+    try:
+        pa = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=index", "-of", "csv=p=0", str(path)],
+            text=True).strip()
+        return bool(pa)
+    except Exception:
+        return False
+
+
+def find_paired_audio(clip: Path, extra_root: Optional[Path] = None) -> Optional[Path]:
+    """Return a usable audio track for a clip.
+
+    Dashcam `_FR`/`_F` clips are video-only; the spoken audio lives in the
+    paired `_R` rear clip. We return the clip's own audio if present, otherwise
+    look for the sibling `_R` (in the same dir, in the uncompressed source tree
+    if this clip lives under `.../compressed/`, or under an explicit root).
+    """
+    if _has_audio(clip):
+        return clip
+    parts = clip.parts
+    stem = clip.stem
+    paired_stem = re.sub(r"_(FR|F|R)$", "_R", stem, flags=re.I)
+    cands: List[Path] = []
+    # same-dir sibling (compressed tree may eventually hold _R too)
+    for ext in (clip.suffix or ".mp4", ".mp4", ".MP4"):
+        cands.append(clip.parent / (paired_stem + ext))
+    # if under .../compressed/, map to the source tree (parent of 'compressed')
+    if "compressed" in parts:
+        idx = parts.index("compressed")
+        source_root = Path(*parts[:idx])
+        rel = Path(*parts[idx + 1:])
+        cands.append(source_root / rel.parent / (paired_stem + ".MP4"))
+        if extra_root is not None:
+            cands.append(extra_root / rel.parent / (paired_stem + ".MP4"))
+    for c in cands:
+        if c.exists() and _has_audio(c):
+            return c
+    return None
+
+
 def run(in_clip: Path, out_path: Path, segs: List[Seg], hook: Optional[str],
-        cta: Optional[str], music: Optional[Path], zoom: float, crf: int,
-        max_dur: float) -> int:
+         cta: Optional[str], music: Optional[Path], audio: Optional[Path],
+         zoom: float, crf: int, max_dur: float) -> int:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         print("ERROR: ffmpeg not found", file=sys.stderr)
@@ -248,59 +290,55 @@ def run(in_clip: Path, out_path: Path, segs: List[Seg], hook: Optional[str],
         ass_path = Path(tmp) / "subs.ass"
         ass_path.write_text(build_ass(segs, hook, cta, total_dur), encoding="utf-8")
 
-        # Vertical crop (center) + optional slight zoom-punch, then scale to 1080x1920.
-        # Crop the source to its own 9:16 center, then scale up to fill the frame.
+        # Cover-crop to 9:16 centred (preserve aspect — no vertical stretch),
+        # then scale to 1080x1920. Optional zoom-punch scales up first.
         vf = []
         vf.append(
-            f"scale='if(gt(iw/ih,9/16),-2,ih*9/16)':'if(gt(iw/ih,9/16),iw*16/9,-2)'"
+            "crop=w='if(gt(iw/ih\\,9/16),trunc(ih*9/16/2)*2,iw)':"
+            "h='if(gt(iw/ih\\,9/16),ih,trunc(iw*16/9/2)*2)'"
         )
-        vf.append(f"crop=min(iw\\,ih*9/16):min(ih\\,iw*16/9)")
         if zoom and zoom != 1.0:
-            # subtle zoom-punch: scale up a touch then crop back to 9:16
             vf.append(f"scale={int(WIDTH*zoom)}:{int(HEIGHT*zoom)}")
             vf.append(f"crop={WIDTH}:{HEIGHT}")
         else:
             vf.append(f"scale={WIDTH}:{HEIGHT}")
-        vf.append(f"setsar=1")
-        vf.append(f"subtitles={str(ass_path).replace(':', '\\:')}:fontsdir=/usr/share/fonts/truetype/dejavu")
+        vf.append("setsar=1")
+        vf.append(f"subtitles={str(ass_path).replace(':', '\\:')}"
+                  f":fontsdir=/usr/share/fonts/truetype/dejavu")
 
-        # Does the clip itself carry an audio track? (_FR dashcam clips often
-        # have none; the audio lives in the paired _R file.) Probe to decide.
-        has_clip_audio = False
-        try:
-            pa = subprocess.check_output(
-                ["ffprobe", "-v", "error", "-select_streams", "a",
-                 "-show_entries", "stream=index", "-of", "csv=p=0", str(in_clip)],
-                text=True).strip()
-            has_clip_audio = bool(pa)
-        except Exception:
-            has_clip_audio = False
-
-        fc_in = []
-        fc_audio = ""
+        # Audio graph: clip audio (or paired _R voice) + optional ducked music.
+        infiles = [str(in_clip)]
+        arefs: List[str] = []
+        if audio and Path(audio).exists() and _has_audio(Path(audio)):
+            infiles.append(str(audio))
+            arefs.append(f"[{len(infiles) - 1}:a]")
         if music and Path(music).exists():
-            fc_in = ["-i", str(music)]
-            fade_st = max(0.0, total_dur - 0.5)
-            if has_clip_audio:
-                # Duck music under the clip's own audio.
-                fc_audio = (
-                    f"[0:a]aresample=44100,volume=1.0[a0];"
-                    f"[1:a]aresample=44100,afade=t=out:st={fade_st:.2f}:d=0.5,volume=0.18[a1];"
-                    f"[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[aout]"
-                )
-                amap = ["-map", "[aout]"]
+            infiles.append(str(music))
+            arefs.append(f"[{len(infiles) - 1}:a]")
+
+        fc_audio = ""
+        amap: List[str] = []
+        if arefs:
+            norm = [f"{ref}aresample=44100[a{i}]" for i, ref in enumerate(arefs)]
+            if len(arefs) == 1:
+                fc_audio = norm[0] + ";[a0]volume=1.0[aout]"
             else:
-                # Clip is silent: use the music track as the sole audio.
+                fade_st = max(0.0, total_dur - 0.5)
                 fc_audio = (
-                    f"[1:a]aresample=44100,afade=t=out:st={fade_st:.2f}:d=0.5,volume=0.5[aout]"
+                    norm[0] + ";" + norm[1] + ";"
+                    f"[a0]volume=1.0[v];"
+                    f"[a1]afade=t=out:st={fade_st:.2f}:d=0.5,volume=0.18[m];"
+                    f"[v][m]amix=inputs=2:duration=first:dropout_transition=0[aout]"
                 )
-                amap = ["-map", "[aout]"]
-        else:
-            amap = ["-map", "0:a"] if has_clip_audio else []  # silent short if no audio
+            amap = ["-map", "[aout]"]
+        # else: silent short
 
         vfilter = ",".join(vf)
         fc = f"[0:v]{vfilter}[v]" + (f";{fc_audio}" if fc_audio else "")
-        cmd = [ffmpeg, "-hide_banner", "-y", "-i", str(in_clip), *fc_in,
+        in_args = []
+        for f in infiles:
+            in_args += ["-i", f]
+        cmd = [ffmpeg, "-hide_banner", "-y", *in_args,
                "-filter_complex", fc, "-map", "[v]", *amap,
                "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
@@ -325,14 +363,53 @@ def shlex_quote(s: str) -> str:
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
+def pick_clip(source_root: Path, pick: str, date: Optional[str]) -> Optional[Path]:
+    """Scan a media root for candidate clips and return one to use.
+
+    Prefers dashcam _FR clips, then any mp4/mov. Optional --date filters by a
+    YYYY-MM-DD substring in the path. Returns the newest (default) or a random
+    clip.
+    """
+    if not source_root.exists():
+        print(f"[warn] source root missing: {source_root}", file=sys.stderr)
+        return None
+    pats = ("*_FR.MP4", "*_F.MP4", "*_R.MP4", "*.mp4", "*.mov", "*.MP4", "*.MOV")
+    cands = []
+    for pat in pats:
+        for pp in source_root.rglob(pat):
+            if not pp.is_file():
+                continue
+            if date and date not in pp.as_posix():
+                continue
+            cands.append(pp)
+    if not cands:
+        return None
+    cands.sort(key=lambda q: q.stat().st_mtime, reverse=(pick == "newest"))
+    if pick == "random":
+        import random
+        return random.choice(cands)
+    return cands[0]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Generate iPhone TikTok-style vertical shorts.")
-    ap.add_argument("--clip", required=True, type=Path, help="Source video (e.g. *_FR.MP4)")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--clip", type=Path, help="Source video (e.g. *_FR.MP4)")
+    src.add_argument("--source-root", type=Path, help="Scan a media root and pick a clip")
+    src.add_argument("--nextcloud", action="store_true",
+                     help="Shortcut: scan the Nextcloud root for a clip (iPhone media)")
+    ap.add_argument("--pick", choices=["newest", "random"], default="newest",
+                    help="Which clip to pick when scanning a root")
+    ap.add_argument("--date", type=str, default=None, help="Filter scanned clips by YYYY-MM-DD")
     ap.add_argument("--out", required=True, type=Path, help="Output mp4 path")
     ap.add_argument("--transcript-json", type=Path, help="Optional JSON list of {start,end,text}")
     ap.add_argument("--hook", type=str, default=None, help="Top hook/title text")
     ap.add_argument("--cta", type=str, default="Follow for more", help="Closing CTA text")
     ap.add_argument("--music", type=Path, default=None, help="Optional background music (looped+ducked)")
+    ap.add_argument("--audio", type=Path, default=None,
+                    help="Explicit audio track (else auto-detect paired _R voice)")
+    ap.add_argument("--no-auto-audio", action="store_true",
+                    help="Disable auto paired-audio detection")
     ap.add_argument("--zoom", type=float, default=1.06, help="Slight zoom-punch factor (>1)")
     ap.add_argument("--crf", type=int, default=24, help="H.264 CRF")
     ap.add_argument("--max-dur", type=float, default=60.0, help="Cap short length (seconds)")
@@ -340,15 +417,42 @@ def main() -> int:
                     help="Do not fetch transcript from Neo4j (use --transcript-json or none)")
     args = ap.parse_args()
 
-    if not args.clip.exists():
-        print(f"ERROR: clip not found: {args.clip}", file=sys.stderr)
+    clip = args.clip
+    if clip is None:
+        root = args.source_root
+        if args.nextcloud:
+            try:
+                import auto_ingest_config as cfg
+                root = Path(cfg.get_nextcloud_root())
+            except Exception as ex:
+                print(f"ERROR: cannot resolve Nextcloud root: {ex}", file=sys.stderr)
+                return 2
+        if root is None:
+            print("ERROR: provide --clip, --source-root, or --nextcloud", file=sys.stderr)
+            return 2
+        clip = pick_clip(root, args.pick, args.date)
+        if clip is None:
+            print(f"ERROR: no clips found under {root}", file=sys.stderr)
+            return 2
+        print(f"Picked clip: {clip}")
+
+    if not clip.exists():
+        print(f"ERROR: clip not found: {clip}", file=sys.stderr)
         return 2
+
+    audio = args.audio
+    if audio is None and not args.no_auto_audio:
+        audio = find_paired_audio(clip)
+        if audio:
+            print(f"Paired audio: {audio}")
+        else:
+            print("No paired audio found (silent short).")
 
     if args.transcript_json:
         segs = load_transcript_json(args.transcript_json)
         print(f"Loaded {len(segs)} segments from JSON.")
     elif not args.no_auto_transcript:
-        key = clip_key(args.clip)
+        key = clip_key(clip)
         segs = fetch_transcript(key)
         print(f"Fetched {len(segs)} segments from Neo4j (key='{key}').")
     else:
@@ -356,8 +460,8 @@ def main() -> int:
         print("No transcript (captions disabled).")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    return run(args.clip, args.out, segs, args.hook, args.cta,
-               args.music, args.zoom, args.crf, args.max_dur)
+    return run(clip, args.out, segs, args.hook, args.cta,
+               args.music, audio, args.zoom, args.crf, args.max_dur)
 
 
 if __name__ == "__main__":

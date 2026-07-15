@@ -131,6 +131,39 @@ def get_neo4j_config():
     }
 
 
+def get_nextcloud_root():
+    """Path to the Nextcloud store (true iPhone images/videos/audio).
+
+    The Nextcloud data is on a separate store and is only mounted on some
+    machines. Priority: NEXTCLOUD_ROOT env -> config.yaml 'nextcloud_root' ->
+    sensible default mount point. Callers must handle the directory being
+    absent (graceful skip).
+    """
+    cfg = _load_config()
+    root = (os.environ.get("NEXTCLOUD_ROOT")
+           or cfg.get("nextcloud_root")
+           or "/media/scott/SSD_4TB/nextcloud")
+    return root
+
+
+def get_nextcloud_webdav():
+    """Return Nextcloud WebDAV connection as (url, user, password).
+
+    url/user come from config.yaml 'nextcloud:' (or NEXTCLOUD_URL /
+    NEXTCLOUD_USER env); password from NEXTCLOUD_PASS env. Returns
+    (None, None, None) if not configured.
+    """
+    cfg = _load_config()
+    nc = cfg.get("nextcloud", {}) if isinstance(cfg, dict) else {}
+    url = os.environ.get("NEXTCLOUD_URL") or nc.get("webdav_url")
+    user = os.environ.get("NEXTCLOUD_USER") or nc.get("user")
+    pass_env = nc.get("pass_env", "NEXTCLOUD_PASS")
+    password = os.environ.get("NEXTCLOUD_PASS") or os.environ.get(pass_env)
+    if not url or not user:
+        return (None, None, None)
+    return (url.rstrip("/"), user, password)
+
+
 def get_fileserver_path(*parts):
     """Get a full fileserver path for the given sub-paths."""
     root = get_fileserver_root()

@@ -1,0 +1,15 @@
+#!/bin/bash
+# Convenience aliases for the auto-ingest pipeline.
+# Source me from the repo root:  source ./aliases.auto-ingest
+# (aliases resolve relative to the repo, so stay in the repo dir.)
+alias ai='python3 bin/auto-ingest'
+alias ailink='python3 bin/auto-ingest link-speakers --faiss'
+alias aitok='python3 bin/auto-ingest tiktok'
+alias aicomp='./run_compress_dashcam.sh'
+alias aiwho='python3 bin/auto-ingest whoami --merge'
+alias aistatus='python3 bin/auto-ingest status'
+alias aimedia='python3 media_index.py'
+alias aiworker='./run_worker.sh'
+alias aipipe='./run_pipeline.sh'
+alias aicheck='python3 check_speakers.py'
+echo "auto-ingest aliases loaded (ai, ailink, aitok, aicomp, aiwho, aistatus, aimedia, aiworker, aipipe, aicheck)"
