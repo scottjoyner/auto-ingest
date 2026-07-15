@@ -9,3 +9,8 @@ logs/
 .venv/
 .env/
 .env
+
+# speaker-linking generated caches
+emb_cache.sqlite
+audio_index.json
+audio_path_cache.json

@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""
+Unified `auto-ingest` CLI — one host-agnostic command for the whole pipeline.
+
+Implements the surface described in docs/PROPOSED_RUN_CLI.md:
+  auto-ingest status                # graph / preprocessing status
+  auto-ingest caps                  # probe hardware + backend profile
+  auto-ingest link-speakers [...]   # globally link local Speakers -> GlobalSpeaker
+  auto-ingest whoami [...]          # anchor / verify the "me" (Scott) speaker
+
+Credentials come ONLY from the environment / config.yaml (never hardcoded in this file).
+Host + fileserver paths are resolved via auto_ingest_config (same logic as the linker).
+
+This is the single entrypoint to launch a global-speaker linking pass. Run with
+`--help` on any subcommand for options.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import platform
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Dict
+
+REPO = Path(__file__).resolve().parent.parent
+DEFAULT_LINKER = "link_global_speakers_2.py"
+
+# ---------------------------------------------------------------------------
+# Neo4j connection (env first, then config.yaml; never hardcoded here)
+# ---------------------------------------------------------------------------
+def neo4j_env() -> Dict[str, str]:
+    try:
+        from auto_ingest_config import get_neo4j_config
+        cfg = get_neo4j_config() or {}
+    except Exception:
+        cfg = {}
+    env = dict(os.environ)
+    env["NEO4J_URI"] = os.environ.get("NEO4J_URI") or cfg.get("uri") or "bolt://localhost:7687"
+    env["NEO4J_USER"] = os.environ.get("NEO4J_USER") or cfg.get("user") or "neo4j"
+    # config password is ${NEO4J_PASSWORD} -> resolves from env; fall back to the
+    # documented dev default only if nothing else is available (parity with linker).
+    pw = os.environ.get("NEO4J_PASSWORD") or cfg.get("password") or "knowledge_graph_2026"
+    env["NEO4J_PASSWORD"] = pw
+    env["NEO4J_DB"] = os.environ.get("NEO4J_DB") or "neo4j"
+    return env
+
+
+def _run(py_script: str, args: list, extra_env: Dict[str, str] | None = None) -> int:
+    cmd = [sys.executable, "-u", py_script, *args]
+    env = extra_env or neo4j_env()
+    print(f"[auto-ingest] $ {' '.join(cmd)}", flush=True)
+    return subprocess.call(cmd, cwd=str(REPO), env=env)
+
+
+# ---------------------------------------------------------------------------
+# caps
+# ---------------------------------------------------------------------------
+def cmd_caps(_args) -> int:
+    print(f"HOST: {platform.node()}  ({platform.system()} {platform.release()})")
+    print(f"CPU:  {platform.processor() or 'n/a'}  cores={os.cpu_count()}")
+    nvidia = shutil.which("nvidia-smi")
+    rocm = shutil.which("rocminfo")
+    if nvidia:
+        be = "CUDA"
+    elif rocm:
+        be = "ROCm"
+    elif platform.system() == "Darwin" and platform.processor() == "arm":
+        be = "MLX"
+    else:
+        be = "ONNX (CPU)"
+    print(f"GPU backend: {be}")
+    print(f"  nvidia-smi: {nvidia or 'absent'}  rocminfo: {rocm or 'absent'}")
+    for mod, label in [("torch", "torch"), ("torchaudio", "torchaudio"),
+                       ("speechbrain", "speechbrain"), ("pyannote.audio", "pyannote"),
+                       ("faiss", "faiss"), ("neo4j", "neo4j")]:
+        try:
+            __import__(mod)
+            ok = "ok"
+        except Exception:
+            ok = "MISSING"
+        print(f"  {label:12s} {ok}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+def cmd_status(args) -> int:
+    env = neo4j_env()
+    try:
+        from neo4j import GraphDatabase
+    except Exception as e:
+        print(f"neo4j driver unavailable: {e}", file=sys.stderr)
+        return 1
+    try:
+        d = GraphDatabase.driver(env["NEO4J_URI"], auth=(env["NEO4J_USER"], env["NEO4J_PASSWORD"]))
+        with d.session(database=env["NEO4J_DB"]) as s:
+            def n(q):
+                r = s.run(q).single()
+                return r["c"] if r else 0
+            sp = n("MATCH (s:Speaker) RETURN count(*) AS c")
+            gs = n("MATCH (g:GlobalSpeaker) RETURN count(*) AS c")
+            gsc = n("MATCH (g:GlobalSpeaker{status:'confirmed'}) RETURN count(*) AS c")
+            edges = n("MATCH (s:Speaker)-[:SAME_PERSON]->(g:GlobalSpeaker) RETURN count(*) AS c")
+            linked = n("MATCH (s:Speaker)-[:SAME_PERSON]->() RETURN count(DISTINCT s) AS c")
+            me = n("MATCH (s:Speaker{is_me:true}) RETURN count(*) AS c")
+            seg = n("MATCH (s:Segment) RETURN count(*) AS c")
+            print(f"NEO4J: {env['NEO4J_URI']}  db={env['NEO4J_DB']}")
+            print(f"  Speaker        : {sp}")
+            print(f"  GlobalSpeaker  : {gs}  (confirmed {gsc}, tentative {gs-gsc})")
+            print(f"  SAME_PERSON    : {edges}  (distinct linked Speaker: {linked})")
+            print(f"  Speaker is_me  : {me}")
+            print(f"  Segment        : {seg}")
+            if sp:
+                print(f"  linkage coverage: {linked/sp*100:.1f}% of Speaker nodes linked")
+        d.close()
+    except Exception as e:
+        print(f"neo4j query failed: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# link-speakers
+# ---------------------------------------------------------------------------
+def cmd_link_speakers(args) -> int:
+    cli = [
+        "--global-prefilter", "--global-thresh", "0.78", "--global-k", "8",
+        "--skip-already-linked",
+        "--source-level", "auto",
+        "--min-seg", "0.7", "--max-snips", "8", "--max-per-file", "3", "--snip-len", "1.6",
+        "--thresh", "0.72",
+        "--holdout", "--holdout-min", "0.62", "--holdout-action", "drop-members",
+        "--priority-name", args.priority or "Scott|Kipnerter",
+        "--emb-cache", "./emb_cache.sqlite",
+        "--audio-index", "./audio_index.json",
+        "--audio-cache", "./audio_path_cache.json",
+    ]
+    # rank-and-label is a full-graph aggregation (21M nodes) that can exceed Neo4j's
+    # transaction memory; only run it when explicitly requested, ideally as a final pass.
+    if args.rank_and_label:
+        cli += ["--rank-and-label"]
+    if args.faiss:
+        cli += ["--faiss-prefilter", "--faiss-k", "128", "--faiss-index", "hnsw",
+                "--faiss-m", "48", "--faiss-ef", "256", "--global-include-tentative"]
+    if args.limit:
+        cli += ["--limit-speakers", str(args.limit)]
+    if args.max_speakers:
+        cli += ["--max-speakers", str(args.max_speakers)]
+    if args.dry_run:
+        cli += ["--dry-run"]
+    if args.more_aggressive:
+        # wider nets (see docs/PROPOSED_RUN_CLI.md "More Aggressive Command")
+        cli += ["--global-thresh", "0.74", "--global-k", "16", "--global-m", "48",
+                "--global-ef", "256", "--min-seg", "0.6", "--max-snips", "12",
+                "--max-per-file", "4", "--snip-len", "2.0", "--min-proportion", "0.4",
+                "--min-rms", "0.004", "--min-snr-db", "5.0", "--thresh", "0.68",
+                "--holdout-min", "0.58", "--quarantine-min", "0.72"]
+    return _run(DEFAULT_LINKER, cli, extra_env=neo4j_env())
+
+
+# ---------------------------------------------------------------------------
+# whoami  (anchor / verify the "me" speaker)
+# ---------------------------------------------------------------------------
+def cmd_whoami(args) -> int:
+    cli = ["scripts/anchor_speaker_me.py"]
+    if args.dry_run:
+        cli += ["--dry-run"]
+    if args.corpus:
+        cli += ["--corpus", args.corpus]
+    if args.merge:
+        cli += ["--merge"]
+    if args.seed:
+        cli += ["--seed", args.seed]
+    return _run(cli[0], cli[1:], extra_env=neo4j_env())
+
+
+# ---------------------------------------------------------------------------
+# argparse
+# ---------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="auto-ingest", description="Unified auto-ingest pipeline CLI.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("caps", help="Probe hardware + backend profile.").set_defaults(func=cmd_caps)
+
+    ps = sub.add_parser("status", help="Show graph / linkage status.")
+    ps.add_argument("--source", choices=["dashcam", "audio", "bodycam"], default=None)
+    ps.set_defaults(func=cmd_status)
+
+    pl = sub.add_parser("link-speakers", help="Globally link local Speakers -> GlobalSpeaker.")
+    pl.add_argument("--limit", type=int, default=0, help="Process at most N speakers (debug).")
+    pl.add_argument("--max-speakers", type=int, default=0, help="Global cap of speakers this run.")
+    pl.add_argument("--priority", type=str, default=None, help="Override priority-name regex.")
+    pl.add_argument("--faiss", action="store_true", help="Use FAISS local prefilter (wider nets).")
+    pl.add_argument("--more-aggressive", action="store_true", help="Wider thresholds/nets.")
+    pl.add_argument("--rank-and-label", action="store_true",
+                    help="Also run full-graph dominance + Transcription labeling (heavy; final pass only).")
+    pl.add_argument("--dry-run", action="store_true", help="Do not write to Neo4j.")
+    pl.set_defaults(func=cmd_link_speakers)
+
+    pw = sub.add_parser("whoami", help="Anchor / verify the 'me' (Scott) speaker.")
+    pw.add_argument("--dry-run", action="store_true")
+    pw.add_argument("--corpus", type=str, default=None, help="Folder of known-me audio to validate.")
+    pw.add_argument("--merge", action="store_true", help="Merge fragmented Scott GlobalSpeakers.")
+    pw.add_argument("--seed", type=str, default=None, help="Override Scott GlobalSpeaker id.")
+    pw.set_defaults(func=cmd_whoami)
+
+    return p
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

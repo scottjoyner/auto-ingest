@@ -170,9 +170,34 @@ def find_audio_for_key(key: str) -> Optional[Path]:
     cand = list(AUDIO_BASE.rglob(f"**/{stem}*"))
     return cand[0] if cand else None
 
+def _load_via_ffmpeg(path: Path, target_sr: int = DEFAULT_SR):
+    import subprocess
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+           "-i", str(path), "-ac", "1", "-ar", str(target_sr), "-f", "f32le", "pipe:1"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as ex:
+        raise RuntimeError(f"ffmpeg decode failed for {path}: {ex}")
+    data = np.frombuffer(proc.stdout, dtype=np.float32)
+    if data.size == 0:
+        raise RuntimeError(f"ffmpeg produced empty audio for {path}")
+    return torch.from_numpy(data.copy()).contiguous(), target_sr
+
+
 def load_audio(path: Path, target_sr: int = DEFAULT_SR) -> Tuple[torch.Tensor, int]:
-    wav, sr = torchaudio.load(str(path))
-    if wav.shape[0] > 1:
+    if path.suffix.lower() in {".mp3", ".m4a", ".aac"}:
+        return _load_via_ffmpeg(path, target_sr)
+    try:
+        wav, sr = torchaudio.load(str(path))
+    except Exception:
+        if path.suffix.lower() in {".wav", ".flac", ".ogg"}:
+            wav, sr = sf.read(str(path), dtype="float32", always_2d=False)
+            if wav.ndim == 2:
+                wav = wav.mean(axis=1)
+            wav = torch.from_numpy(wav)
+        else:
+            return _load_via_ffmpeg(path, target_sr)
+    if wav.ndim == 2:
         wav = wav.mean(dim=0, keepdim=True)
     if sr != target_sr:
         wav = torchaudio.functional.resample(wav, sr, target_sr)

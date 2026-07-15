@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
+import subprocess
 
 import numpy as np
 import torch
@@ -56,7 +57,70 @@ ALT_AUDIO_BASES = [
 ]
 AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".flac", ".aac", ".ogg"}
 
-# Neo4j
+# ---- audio filename index (one-time tree walk; O(1) lookup per key) ----
+_AUDIO_INDEX = None  # dict: norm_stem -> List[Path]
+
+def build_audio_index(bases, exts, cache_path=None, refresh=False):
+    """Walk all audio bases ONCE and build stem->[paths]. Cached to JSON when cache_path set.
+    Uses `find` (fast on network mounts) with an os.walk fallback."""
+    if cache_path and not refresh and Path(cache_path).exists():
+        try:
+            raw = json.loads(Path(cache_path).read_text())
+            idx = {k: [Path(x) for x in v] for k, v in raw.items()}
+            logging.info(f"Loaded audio index from {cache_path}: {len(idx)} stems")
+            return idx
+        except Exception as ex:
+            logging.warning(f"Failed to load audio index cache ({ex}); rebuilding.")
+
+    idx: Dict[str, List[Path]] = {}
+    exts_l = {e.lower() for e in exts}
+    for base in bases:
+        b = Path(base)
+        if not b.exists():
+            continue
+        # Fast path: `find` enumerates the tree quickly even on network mounts.
+        try:
+            out = subprocess.run(
+                ["find", str(b), "-type", "f"],
+                capture_output=True, text=True, timeout=600,
+            )
+            lines = out.stdout.splitlines()
+        except Exception:
+            lines = []
+        if not lines:
+            # Fallback: os.walk
+            for root, _dirs, files in os.walk(b):
+                for fn in files:
+                    lines.append(os.path.join(root, fn))
+        for line in lines:
+            p = Path(line)
+            if p.suffix.lower() in exts_l:
+                stem = _norm_stem(p.stem)
+                idx.setdefault(stem, []).append(p)
+    logging.info(f"Built audio index: {len(idx)} distinct stems from {len(bases)} base(s).")
+    if cache_path:
+        try:
+            raw = {k: [str(x) for x in v] for k, v in idx.items()}
+            Path(cache_path).write_text(json.dumps(raw))
+            logging.info(f"Wrote audio index cache {cache_path}.")
+        except Exception as ex:
+            logging.warning(f"Failed to write audio index cache: {ex}")
+    return idx
+
+def set_audio_index(idx):
+    global _AUDIO_INDEX
+    _AUDIO_INDEX = idx
+
+def _index_lookup(stem: str):
+    if _AUDIO_INDEX is None:
+        return None
+    hits = _AUDIO_INDEX.get(stem)
+    if not hits:
+        return None
+    hits = sorted(hits, key=lambda h: (not _looks_like_audio_dir(h.parent), len(h.as_posix())))
+    return hits[0]
+
+
 NEO4J_URI      = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER     = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026")
@@ -150,11 +214,15 @@ def _looks_like_audio_dir(p: Path) -> bool:
 def discover_audio_for_key(key: str) -> Optional[Path]:
     """
     Strictly return a valid audio file for a given key.
-    - Only consider AUDIO_EXTS
-    - Prefer files in 'audio-like' directories
-    - Avoid sidecar/transcription folders by name
+    - O(1) lookup via the prebuilt audio index when available
+    - Falls back to rglob scan (slow) when the index has no hit
     """
     stem = _norm_stem(key)
+    hit = _index_lookup(stem)
+    if hit is not None:
+        return hit
+    if _AUDIO_INDEX is not None:
+        return None
     # 1) strict filename match stem + ext
     for base in [AUDIO_BASE, *ALT_AUDIO_BASES]:
         for ext in AUDIO_EXTS:
@@ -179,11 +247,33 @@ def discover_audio_for_key(key: str) -> Optional[Path]:
 
     return None
 
+def _load_via_ffmpeg(path: Path, target_sr: int = DEFAULT_SR) -> Tuple[torch.Tensor, int]:
+    """Decode any ffmpeg-readable file (mp3/m4a/aac/wav/flac/ogg) to mono float32
+    at target_sr using ffmpeg piped to stdout as f32le. Falls back when ffmpeg missing."""
+    import subprocess
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-i", str(path),
+        "-ac", "1", "-ar", str(target_sr),
+        "-f", "f32le", "pipe:1",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as ex:
+        raise RuntimeError(f"ffmpeg decode failed for {path}: {ex}")
+    data = np.frombuffer(proc.stdout, dtype=np.float32)
+    if data.size == 0:
+        raise RuntimeError(f"ffmpeg produced empty audio for {path}")
+    wav = torch.from_numpy(data.copy())
+    return wav.contiguous(), target_sr
+
+
 def load_audio(path: Path, target_sr: int = DEFAULT_SR) -> Tuple[torch.Tensor, int]:
     """
     Robust loader:
-      - Torchaudio primary
-      - SoundFile fallback for WAV/FLAC
+      - Torchaudio primary (wav/flac/ogg; mp3 needs torchcodec)
+      - SoundFile fallback for WAV/FLAC/OGG
+      - ffmpeg fallback for mp3/m4a/aac and anything else ffmpeg reads
     Returns mono float32 tensor [T], sr
     """
     if not _is_audio_path(path):
@@ -192,15 +282,20 @@ def load_audio(path: Path, target_sr: int = DEFAULT_SR) -> Tuple[torch.Tensor, i
     try:
         wav, sr = torchaudio.load(str(path))
     except Exception:
-        # fallback for typical PCM containers
+        # SoundFile handles wav/flac/ogg natively
         if path.suffix.lower() in {".wav", ".flac", ".ogg"}:
-            import soundfile as _sf
-            data, sr = _sf.read(str(path), dtype="float32", always_2d=False)
-            if data.ndim == 2:
-                data = data.mean(axis=1)
-            wav = torch.from_numpy(data)
+            try:
+                import soundfile as _sf
+                data, sr = _sf.read(str(path), dtype="float32", always_2d=False)
+                if data.ndim == 2:
+                    data = data.mean(axis=1)
+                wav = torch.from_numpy(data)
+            except Exception as ex:
+                raise RuntimeError(f"SoundFile decode failed for {path}: {ex}")
         else:
-            raise
+            # mp3/m4a/aac and everything else -> ffmpeg
+            wav, sr = _load_via_ffmpeg(path, target_sr)
+            return wav, sr
 
     if wav.ndim == 2:
         wav = wav.mean(dim=0)  # mono
@@ -364,43 +459,7 @@ def assign_to_priority_first(
         )
     return best_map, attached
 
-def _seek_page_speaker_ids(sess, min_seg_sec: float, min_prop: float,
-                           after_id: Optional[str], limit: int) -> List[Tuple[str, str]]:
-    """
-    Returns list[(speaker_id, label)], ordered by speaker_id, strictly greater than after_id (seek pagination).
-    Only speakers that HAVE qualifying segments are returned (duration & proportion gates).
-    """
-    cy = """
-    MATCH (t:Transcription)-[:HAS_SEGMENT]->(s:Segment)-[r:SPOKEN_BY]->(sp:Speaker)
-    WHERE coalesce(s.end,0) - coalesce(s.start,0) >= $min_seg
-      AND coalesce(r.proportion,1.0) >= $min_prop
-      AND ($after IS NULL OR sp.id > $after)
-    WITH sp.id AS sid, max(sp.label) AS label
-    RETURN sid AS speaker_id, label AS label
-    ORDER BY speaker_id
-    LIMIT $limit
-    """
-    rows = sess.run(cy, min_seg=min_seg_sec, min_prop=min_prop, after=after_id, limit=limit)
-    return [(r["speaker_id"], r["label"]) for r in rows]
 
-def _fetch_items_for_speaker(sess, sid: str, min_seg_sec: float, min_prop: float, per_speaker_limit: int):
-    """
-    Returns list of tuples: (file_key, start, end, text, prop), already sorted by quality.
-    """
-    cy = """
-    MATCH (sp:Speaker {id:$sid})<- [r:SPOKEN_BY] - (s:Segment) <-[:HAS_SEGMENT]- (t:Transcription)
-    WHERE coalesce(s.end,0) - coalesce(s.start,0) >= $min_seg
-      AND coalesce(r.proportion,1.0) >= $min_prop
-    RETURN t.key AS file_key, s.start AS start, s.end AS end, s.text AS text, coalesce(r.proportion,1.0) AS prop
-    ORDER BY prop DESC, (coalesce(s.end,0) - coalesce(s.start,0)) DESC
-    LIMIT $lim
-    """
-    rows = sess.run(cy, sid=sid, min_seg=min_seg_sec, min_prop=min_prop, lim=per_speaker_limit)
-    out = []
-    for r in rows:
-        out.append( (r["file_key"], float(r["start"] or 0.0), float(r["end"] or 0.0),
-                     (r["text"] or ""), float(r["prop"] or 1.0)) )
-    return out
 
 
 def compute_dominance_and_label_transcriptions(sess):
@@ -491,25 +550,53 @@ def fetch_speakers_and_segments(drv, min_seg_sec: float, min_prop: float,
                                 items_per_speaker: int = 64,
                                 max_speakers: int = 0) -> Dict[str, Dict]:
     """
-    Batched, seek-paginated pull to avoid server transaction OOMs.
+    Batched, seek-paginated pull using ONE query per page (a Cypher CALL subquery
+    caps rows per speaker). Avoids the old N separate per-speaker round-trips that
+    made a full 245k-speaker pass infeasible.
+
     Returns { speaker_id: {label, items:[(file_key,start,end,text,prop), ...]} }
     """
     out: Dict[str, Dict] = {}
-    total = 0
+    nsp = 0
     after = None
     with drv.session(database=NEO4J_DB) as sess:
         while True:
-            ids = _seek_page_speaker_ids(sess, min_seg_sec, min_prop, after, speaker_batch)
-            if not ids:
+            cy = """
+            MATCH (sp:Speaker)
+            WHERE sp.id > coalesce($after, '')
+            WITH sp ORDER BY sp.id LIMIT $batch
+            CALL {
+                WITH sp
+                MATCH (sp)<-[r:SPOKEN_BY]-(s:Segment)<-[:HAS_SEGMENT]-(t:Transcription)
+                WHERE coalesce(s.end,0) - coalesce(s.start,0) >= $min_seg
+                  AND coalesce(r.proportion,1.0) >= $min_prop
+                RETURN t.key AS file_key, s.start AS start, s.end AS end,
+                       s.text AS text, coalesce(r.proportion,1.0) AS prop
+                ORDER BY prop DESC, (coalesce(s.end,0) - coalesce(s.start,0)) DESC
+                LIMIT $lim
+            }
+            RETURN sp.id AS sid, sp.label AS label, file_key, start, end, text, prop
+            ORDER BY sid
+            """
+            rows = sess.run(cy, after=after, batch=speaker_batch, lim=items_per_speaker,
+                            min_seg=min_seg_sec, min_prop=min_prop)
+            page = []
+            for rec in rows:
+                page.append((rec["sid"], rec["label"], rec["file_key"],
+                             float(rec["start"] or 0.0), float(rec["end"] or 0.0),
+                             (rec["text"] or ""), float(rec["prop"] or 1.0)))
+            if not page:
                 break
-            for sid, label in ids:
-                items = _fetch_items_for_speaker(sess, sid, min_seg_sec, min_prop, items_per_speaker)
-                if items:
-                    out[sid] = {"label": label, "items": items}
-                    total += 1
-                    if (limit_speakers and total >= limit_speakers) or (max_speakers and total >= max_speakers):
-                        return out
-            after = ids[-1][0]
+            for sid, label, fk, st, en, tx, prop in page:
+                d = out.get(sid)
+                if d is None:
+                    out[sid] = {"label": label, "items": []}
+                    d = out[sid]
+                    nsp += 1
+                d["items"].append((fk, st, en, tx, prop))
+                if (limit_speakers and nsp >= limit_speakers) or (max_speakers and len(out) >= max_speakers):
+                    return out
+            after = page[-1][0]
     return out
 
 
@@ -542,6 +629,13 @@ def _norm_stem(key: str) -> str:
 
 def discover_audio_for_key(key: str) -> Optional[Path]:
     stem = _norm_stem(key)
+    hit = _index_lookup(stem)
+    if hit is not None:
+        return hit
+    # When the index is loaded it is authoritative: a miss means "no audio";
+    # skip the (very slow on big trees) rglob fallback to keep the run scalable.
+    if _AUDIO_INDEX is not None:
+        return None
     for ext in AUDIO_EXTS:
         hits = list(AUDIO_BASE.rglob(f"**/{stem}{ext}"))
         if hits:
@@ -556,17 +650,8 @@ def discover_audio_for_key(key: str) -> Optional[Path]:
 
 
 # -----------------------
-# Audio loading + snips + gating
+# Audio loading + snips + gating (load_audio defined earlier, robust w/ ffmpeg fallback)
 # -----------------------
-def load_audio(path: Path, target_sr: int = DEFAULT_SR) -> Tuple[torch.Tensor, int]:
-    wav, sr = torchaudio.load(str(path))
-    if wav.shape[0] > 1:
-        wav = wav.mean(dim=0, keepdim=True)
-    if sr != target_sr:
-        wav = torchaudio.functional.resample(wav, sr, target_sr)
-        sr = target_sr
-    return wav.squeeze(0), sr
-
 def fixed_snip(wav: torch.Tensor, sr: int, start: float, end: float, pad: float, snip_len: float) -> torch.Tensor:
     seg_mid = (start + end) / 2.0
     half = snip_len / 2.0
@@ -1066,6 +1151,8 @@ class Args:
     # caches
     audio_cache: Optional[Path]
     cache_refresh: bool
+    audio_index: Optional[Path]
+    audio_index_refresh: bool
     emb_cache: Optional[Path]
     emb_refresh: bool
 
@@ -1129,6 +1216,10 @@ def parse_args():
     # caches
     p.add_argument("--audio-cache", type=str, default=DEFAULT_AUDIO_CACHE)
     p.add_argument("--cache-refresh", action="store_true", default=DEFAULT_CACHE_REFRESH)
+    p.add_argument("--audio-index", type=str, default="./audio_index.json",
+                   help="Path to persist the one-time audio filename->path index (JSON).")
+    p.add_argument("--audio-index-refresh", action="store_true", default=False,
+                   help="Rebuild the audio index from disk instead of loading the cache.")
     p.add_argument("--emb-cache", type=str, default=DEFAULT_EMB_CACHE)
     p.add_argument("--emb-refresh", action="store_true", default=DEFAULT_EMB_REFRESH)
 
@@ -1190,8 +1281,17 @@ def main():
         include_unknown=args.include_unknown,
         limit_speakers=args.limit_speakers,
         source_level=args.source_level,
+        speaker_batch=args.speaker_batch,
+        items_per_speaker=args.items_per_speaker,
+        max_speakers=args.max_speakers,
     )
     logging.info(f"Found {len(speakers)} speakers with qualifying items.")
+
+    # audio index (one-time walk; O(1) per-key lookup) — built before the embed loop
+    index_path = Path(args.audio_index) if args.audio_index else None
+    audio_idx = build_audio_index([AUDIO_BASE, *ALT_AUDIO_BASES], AUDIO_EXTS,
+                                  cache_path=index_path, refresh=args.audio_index_refresh)
+    set_audio_index(audio_idx)
 
     # audio cache
     cache_path = Path(args.audio_cache) if args.audio_cache else None
@@ -1380,7 +1480,10 @@ def main():
 
     # Remove assigned locals from the pool before local clustering
     remaining_centroids = {sid: vec for sid, vec in spk_centroids.items() if sid not in assigned_locals}
-        # --- Priority attach to Scott/Kipnerter first (if requested) ---
+    remaining_weights   = {sid: spk_weights[sid] for sid in remaining_centroids.keys()}
+    remaining_holdouts  = {sid: holdout_embs[sid] for sid in remaining_centroids.keys()}
+
+    # --- Priority attach to Scott/Kipnerter first (if requested) ---
     if args.priority_name:
         with drv.session(database=NEO4J_DB) as sess:
             pr_gid = ensure_priority_gs(sess, args.priority_name)
@@ -1401,9 +1504,6 @@ def main():
                     remaining_weights.pop(sid, None)
                     remaining_holdouts.pop(sid, None)
                 logging.info(f"Priority attach: {len(attached)} local speakers → GS<{pr_gid}>.")
-
-    remaining_weights   = {sid: spk_weights[sid] for sid in remaining_centroids.keys()}
-    remaining_holdouts  = {sid: holdout_embs[sid] for sid in remaining_centroids.keys()}
 
     logging.info(f"Remaining locals after global assignment: {len(remaining_centroids)}")
 
