@@ -192,6 +192,23 @@ def cmd_whoami(args) -> int:
 # ---------------------------------------------------------------------------
 # argparse
 # ---------------------------------------------------------------------------
+def cmd_tiktok(args) -> int:
+    cli = ["tiktok_shorts.py", "--clip", args.clip, "--out", args.out]
+    if args.transcript_json:
+        cli += ["--transcript-json", args.transcript_json]
+    if args.hook:
+        cli += ["--hook", args.hook]
+    if args.cta:
+        cli += ["--cta", args.cta]
+    if args.music:
+        cli += ["--music", args.music]
+    cli += ["--zoom", str(args.zoom), "--crf", str(args.crf),
+            "--max-dur", str(args.max_dur)]
+    if args.no_auto_transcript:
+        cli.append("--no-auto-transcript")
+    return _run(cli[0], cli[1:], extra_env=neo4j_env())
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="auto-ingest", description="Unified auto-ingest pipeline CLI.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -221,6 +238,20 @@ def build_parser() -> argparse.ArgumentParser:
     pw.add_argument("--merge", action="store_true", help="Merge fragmented Scott GlobalSpeakers.")
     pw.add_argument("--seed", type=str, default=None, help="Override Scott GlobalSpeaker id.")
     pw.set_defaults(func=cmd_whoami)
+
+    pt = sub.add_parser("tiktok", help="Generate iPhone TikTok-style vertical shorts from footage.")
+    pt.add_argument("--clip", required=True, help="Source video (e.g. *_FR.MP4)")
+    pt.add_argument("--out", required=True, help="Output mp4 path")
+    pt.add_argument("--transcript-json", default=None, help="Optional JSON list of {start,end,text}")
+    pt.add_argument("--hook", default=None, help="Top hook/title text")
+    pt.add_argument("--cta", default="Follow for more", help="Closing CTA text")
+    pt.add_argument("--music", default=None, help="Optional background music (looped+ducked)")
+    pt.add_argument("--zoom", type=float, default=1.06, help="Slight zoom-punch factor (>1)")
+    pt.add_argument("--crf", type=int, default=24, help="H.264 CRF")
+    pt.add_argument("--max-dur", type=float, default=60.0, help="Cap short length (seconds)")
+    pt.add_argument("--no-auto-transcript", action="store_true",
+                    help="Do not fetch transcript from Neo4j")
+    pt.set_defaults(func=cmd_tiktok)
 
     return p
 
