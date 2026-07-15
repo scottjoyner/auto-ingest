@@ -127,38 +127,47 @@ def cmd_status(args) -> int:
 # link-speakers
 # ---------------------------------------------------------------------------
 def cmd_link_speakers(args) -> int:
-    cli = [
-        "--global-prefilter", "--global-thresh", "0.78", "--global-k", "8",
-        "--skip-already-linked",
-        "--source-level", "auto",
-        "--min-seg", "0.7", "--max-snips", "8", "--max-per-file", "3", "--snip-len", "1.6",
-        "--thresh", "0.72",
-        "--holdout", "--holdout-min", "0.62", "--holdout-action", "drop-members",
-        "--priority-name", args.priority or "Scott|Kipnerter",
-        "--emb-cache", "./emb_cache.sqlite",
-        "--audio-index", "./audio_index.json",
-        "--audio-cache", "./audio_path_cache.json",
-    ]
+    # Value flags as a dict so --more-aggressive can override in place (no dupes).
+    opts = {
+        "--global-thresh": "0.78", "--global-k": "8",
+        "--source-level": "auto",
+        "--min-seg": "0.7", "--max-snips": "8", "--max-per-file": "3", "--snip-len": "1.6",
+        "--thresh": "0.72",
+        "--holdout-min": "0.62", "--holdout-action": "drop-members",
+        "--priority-name": args.priority or "Scott|Kipnerter",
+        "--emb-cache": "./emb_cache.sqlite",
+        "--audio-index": "./audio_index.json",
+        "--audio-cache": "./audio_path_cache.json",
+    }
+    flags = ["--global-prefilter", "--skip-already-linked", "--holdout"]
+
+    if args.more_aggressive:
+        # wider nets (see docs/PROPOSED_RUN_CLI.md "More Aggressive Command")
+        opts.update({
+            "--global-thresh": "0.74", "--global-k": "16", "--global-m": "48",
+            "--global-ef": "256", "--min-seg": "0.6", "--max-snips": "12",
+            "--max-per-file": "4", "--snip-len": "2.0", "--min-proportion": "0.4",
+            "--min-rms": "0.004", "--min-snr-db": "5.0", "--thresh": "0.68",
+            "--holdout-min": "0.58", "--quarantine-min": "0.72",
+        })
+    if args.faiss:
+        opts.update({"--faiss-k": "128", "--faiss-index": "hnsw",
+                     "--faiss-m": "48", "--faiss-ef": "256"})
+        flags += ["--faiss-prefilter", "--global-include-tentative"]
+    if args.limit:
+        opts["--limit-speakers"] = str(args.limit)
+    if args.max_speakers:
+        opts["--max-speakers"] = str(args.max_speakers)
     # rank-and-label is a full-graph aggregation (21M nodes) that can exceed Neo4j's
     # transaction memory; only run it when explicitly requested, ideally as a final pass.
     if args.rank_and_label:
-        cli += ["--rank-and-label"]
-    if args.faiss:
-        cli += ["--faiss-prefilter", "--faiss-k", "128", "--faiss-index", "hnsw",
-                "--faiss-m", "48", "--faiss-ef", "256", "--global-include-tentative"]
-    if args.limit:
-        cli += ["--limit-speakers", str(args.limit)]
-    if args.max_speakers:
-        cli += ["--max-speakers", str(args.max_speakers)]
+        flags.append("--rank-and-label")
     if args.dry_run:
-        cli += ["--dry-run"]
-    if args.more_aggressive:
-        # wider nets (see docs/PROPOSED_RUN_CLI.md "More Aggressive Command")
-        cli += ["--global-thresh", "0.74", "--global-k", "16", "--global-m", "48",
-                "--global-ef", "256", "--min-seg", "0.6", "--max-snips", "12",
-                "--max-per-file", "4", "--snip-len", "2.0", "--min-proportion", "0.4",
-                "--min-rms", "0.004", "--min-snr-db", "5.0", "--thresh", "0.68",
-                "--holdout-min", "0.58", "--quarantine-min", "0.72"]
+        flags.append("--dry-run")
+
+    cli = list(flags)
+    for k, v in opts.items():
+        cli += [k, v]
     return _run(DEFAULT_LINKER, cli, extra_env=neo4j_env())
 
 
