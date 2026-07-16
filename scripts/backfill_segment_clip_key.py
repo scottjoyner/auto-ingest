@@ -23,10 +23,11 @@ This script:
 
 --dry-run prints what it would do without writing.
 """
-import os
-import time
 import argparse
 import logging
+import os
+import time
+
 from neo4j import GraphDatabase
 from neo4j.exceptions import TransientError
 
@@ -89,7 +90,7 @@ def backfill_clip_key(sess, dry_run, limit=0):
     if limit:
         rows = rows[:limit]
     logging.info(f"Processing {len(rows)} transcriptions with FOR_CLIP (dry-run={dry_run}).")
-    done = skipped = 0
+    done = 0
     for i, row in enumerate(rows):
         tk, ck = row["tk"], row["ck"]
         if dry_run:
