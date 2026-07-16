@@ -118,6 +118,27 @@ Closed real gaps found in an orphan/coverage audit:
   is a separate task (see memory: trading subgraph orphaned in neo4j).
 - All 7 scripts syntax-validated.
 
+## ENHANCEMENT ROUND 3 (2026-07-16, "idle harvest + life timeline")
+- LifeTimeline harvest (NEW): `scripts/life_timeline_harvest.py` stitches Scott's
+  activity into one `(:LifeEvent {date})` node per calendar day (85 days,
+  2025-09-25..2026-06-16). Each has summary_count, utterance_count, dominant_place
+  (from PlaceHour pings), and a text digest. Linked `(:LifeEvent)-[:INCLUDES]->(:Summary)`
+  (capped 25/day), `(:LifeEvent)-[:AT]->(:SummaryPlace)`, and chained
+  `(:LifeEvent)-[:NEXT]->(:LifeEvent)` in date order (1 head, 1 tail — verified).
+  Agents traverse "what happened on / around / after day X" without scanning 181K
+  Summaries. Constraint `life_event_date` (date UNIQUE). Cron `kg-life-timeline-harvest`
+  daily 04:33 (`--days-back 10` incremental + full NEXT rebuild). Idempotent (MERGE on date).
+  GOTCHA handled: Summary.created_at is MIXED (181,641 DateTime + 14 Long ms); day
+  normalized via `CASE WHEN created_at IS :: INTEGER THEN datetime({epochMillis:..}) ELSE created_at END`.
+- Fixed the fleet idle-harvest `scripts/knowledge_harvest.py` (cron 1035ff22e8eb was
+  erroring): (1) load-avg parser now grabs the last float token so SSH "Identity file
+  not accessible" warnings don't poison it; (2) removed the over-broad "No such file"
+  reject guard (that harmless key warning was disqualifying valid loads); (3) create
+  ~/.hermes/knowledge-harvest before the summary write (was crashing at end); (4)
+  summary line prints len(action_items) not the list. Now detects idle hosts and
+  completes exit 0. NOTE: its nested SSH to `scott@x1-370:/media/scott/S/neo4j` for
+  SophiaVoiceUiEvent returns empty (stale path / label) but no longer crashes.
+
 ## NOTES / GOTCHAS
 - Signal bridge is NON-DESTRUCTIVE: it only reads envelopes; messages are stored in
   Neo4j before any cursor advance. It does NOT delete from signal-cli.

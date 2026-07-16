@@ -32,7 +32,10 @@ def check_agent_load(host: str) -> float:
         # Check if it's actually a number (not an error message)
         output = result.stdout.strip()
         print(f"   Linux check: {repr(output)}")  # DEBUG
-        if output and not "No such file" in output and "Permission denied" not in output:
+        # Only a real auth failure should disqualify; the harmless
+        # "Identity file ... not accessible: No such file" warning still
+        # precedes a valid load number via fallback auth.
+        if output and "Permission denied" not in output and "Connection refused" not in output:
             # stdout may contain SSH 'Warning: ...' lines before the number; grab the
             # last whitespace-delimited token that parses as a float.
             load_avg = None
