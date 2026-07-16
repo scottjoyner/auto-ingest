@@ -41,7 +41,19 @@ def _driver():
 def _cmd_plan(args) -> int:
     driver, _ = _driver()
     try:
-        brief = curator.curate_brief(driver, args.topic, top_papers=args.top_papers)
+        if args.discusses:
+            clips = curator.discusses_topic(
+                driver, args.topic, min_score=args.min_score,
+                min_text_len=args.min_text_len, limit=args.discuss_limit)
+            if not clips:
+                print(f"No spoken discussion found for topic {args.topic!r} "
+                      f"(min_score={args.min_score}). Run link-concepts first.")
+                return 1
+            brief = curator.brief_from_discussions(args.topic, clips)
+            print(f"Curated {len(clips)} spoken clip(s) about {args.topic!r} "
+                  f"-> {len(brief.points)} points")
+        else:
+            brief = curator.curate_brief(driver, args.topic, top_papers=args.top_papers)
         anchors = backdrop.select_highway_pool(driver, limit=args.pool)
     finally:
         driver.close()
@@ -127,6 +139,15 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--seed", type=int, default=1)
     pp.add_argument("--pool", type=int, default=400, help="Highway anchor pool size")
     pp.add_argument("--plans-dir", type=Path, default=DEFAULT_PLANS_DIR)
+    pp.add_argument("--discusses", action="store_true",
+                    help="Curate from spoken Utterance-[:MENTIONS]->Concept edges "
+                         "instead of papers (needs link-concepts run).")
+    pp.add_argument("--min-score", type=float, default=0.65,
+                    help="Min MENTIONS score when --discusses")
+    pp.add_argument("--min-text-len", type=int, default=30,
+                    help="Drop utterances shorter than this when --discusses")
+    pp.add_argument("--discuss-limit", type=int, default=40,
+                    help="Max discussion clips to curate when --discusses")
     pp.set_defaults(func=_cmd_plan)
 
     pi = sub.add_parser("iterate", help="Regenerate a plan (variation / drop rejects).")

@@ -198,13 +198,17 @@ class DiscussionClip:
 
 
 def discusses_topic(driver, topic: str, *, min_score: float = 0.65,
-                    limit: int = 40) -> List[DiscussionClip]:
+                    min_text_len: int = 40, limit: int = 40) -> List[DiscussionClip]:
     """Find spoken utterances that discuss a research Topic.
 
     Uses the Utterance-[:MENTIONS]->Concept edges (populated by
     scripts/link_utterances_to_concepts.py) joined to the Topic via
     Paper-[:BELONGS_TO_TOPIC]->Topic so a viewer's *own words* about LLMs/agents
     can be curated, not just the papers.
+
+    ``min_text_len`` drops degenerate short utterances (e.g. "math.") that score
+    spuriously high against a concept embedding; curation wants substantive
+    spoken lines, not filler.
     """
     with driver.session() as sess:
         rows = sess.run(
@@ -213,13 +217,19 @@ def discusses_topic(driver, topic: str, *, min_score: float = 0.65,
                   -[:HAS_CONCEPT]->(c:Concept)<-[m:MENTIONS]-(u:Utterance)
             MATCH (u)<-[:HAS_UTTERANCE]-(tr:Transcription)
             WHERE m.score >= $min
+              AND size(u.text) >= $minlen
+            WITH u, tr, collect(DISTINCT c.name) AS concepts,
+                 max(m.score) AS best_score
             RETURN u.id AS uid, u.text AS text, tr.key AS tkey,
-                   tr.started_at AS started, c.name AS concept, m.score AS score
-            ORDER BY m.score DESC
+                   tr.started_at AS started, concepts[0] AS concept,
+                   best_score AS score
+            ORDER BY score DESC
             LIMIT $limit
             """,
-            topic=topic, min=min_score, limit=limit,
+            topic=topic, min=min_score, minlen=min_text_len, limit=limit,
         ).data()
+    # Query already groups per utterance (best concept/score), so each row is
+    # a distinct utterance.
     return [
         DiscussionClip(
             utterance_id=r["uid"], text=r["text"] or "",
@@ -228,3 +238,43 @@ def discusses_topic(driver, topic: str, *, min_score: float = 0.65,
         )
         for r in rows
     ]
+
+
+def brief_from_discussions(topic: str, clips: List[DiscussionClip],
+                           topic_title: Optional[str] = None) -> Brief:
+    """Build a :class:`Brief` from spoken DiscussionClips (no LLM needed).
+
+    The hook and points are drawn directly from the viewer's own words, so a
+    'your own discussion' short is citable to a real utterance rather than a
+    paper. Utterances are de-duplicated and trimmed to the best-scoring few.
+    """
+    seen: set = set()
+    points: List[str] = []
+    sources: List[SourceRef] = []
+    for c in clips:
+        key = (c.utterance_id, c.text)
+        if key in seen:
+            continue
+        seen.add(key)
+        text = (c.text or "").strip().replace("\n", " ")
+        if len(text) < 20:
+            continue
+        points.append(text[:240])
+        sources.append(SourceRef(
+            kind="utterance",
+            ref_id=str(c.utterance_id),
+            title=f"{c.concept} ({c.score:.2f})",
+            url=None,
+            year=None,
+        ))
+    if not points:
+        raise ValueError(f"No usable discussion clips for topic {topic!r}")
+    hook = points[0]
+    return Brief(
+        topic=topic,
+        title=str(topic_title or topic).replace("_", " "),
+        hook=hook,
+        points=points[:6],
+        sources=sources[:6],
+        tags=sorted({c.concept for c in clips}),
+    )

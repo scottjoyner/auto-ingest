@@ -194,3 +194,57 @@ def test_discusses_topic_returns_spoken_discussions():
     assert all(c.score >= 0.65 for c in clips)
     assert clips[0].concept == "large language model"
     assert "LLMs" in clips[0].text
+
+
+def test_brief_from_discussions_no_llm():
+    clips = [
+        curator.DiscussionClip("u1", "I think LLMs will change everything",
+                               "k1", None, "large language model", 0.81),
+        curator.DiscussionClip("u2", "agents can call tools",
+                               "k2", None, "agent", 0.72),
+        curator.DiscussionClip("u1", "I think LLMs will change everything",  # dup
+                               "k1", None, "large language model", 0.81),
+    ]
+    brief = curator.brief_from_discussions("large_language_models", clips,
+                                           topic_title="Large Language Models")
+    assert brief.hook == "I think LLMs will change everything"
+    assert len(brief.points) == 2  # de-duped
+    assert brief.sources[0].kind == "utterance"
+    assert brief.sources[0].ref_id == "u1"
+    assert "large language model" in brief.tags
+
+
+def test_brief_from_discussions_empty_raises():
+    import pytest
+    with pytest.raises(ValueError):
+        curator.brief_from_discussions("x", [])
+
+
+def test_plan_discusses_flag_wires_through(monkeypatch, tmp_path):
+    from auto_ingest.shorts import cli as shorts_cli
+
+    caught = {}
+
+    def _fake_discusses(driver, topic, *, min_score=0.65, min_text_len=30, limit=40):
+        caught["topic"] = topic
+        caught["min"] = min_score
+        caught["minlen"] = min_text_len
+        caught["limit"] = limit
+        return [
+            curator.DiscussionClip("u1", "spoken point about the topic here",
+                                   "k1", None, "concept_a", 0.7),
+        ]
+
+    monkeypatch.setattr(curator, "discusses_topic", _fake_discusses)
+    monkeypatch.setattr(backdrop, "select_highway_pool", lambda d, limit=400: [])
+
+    args = shorts_cli.build_parser().parse_args([
+        "plan", "large_language_models", "--discusses",
+        "--min-score", "0.7", "--discuss-limit", "5",
+        "--plans-dir", str(tmp_path),
+    ])
+    rc = args.func(args)
+    assert rc == 0
+    assert caught == {"topic": "large_language_models", "min": 0.7, "minlen": 30, "limit": 5}
+    written = list(tmp_path.glob("*.json"))
+    assert written and "large_language_models" in written[0].name
