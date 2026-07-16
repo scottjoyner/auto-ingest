@@ -26,6 +26,10 @@ from pathlib import Path
 from typing import Dict
 
 REPO = Path(__file__).resolve().parent.parent
+# Put the repo root on the import path so `auto_ingest.*` and the repo-level
+# `auto_ingest_config` module resolve regardless of the caller's CWD.
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 # Canonical linker now lives in the package (W-42). Run it as a module so the
 # relative config import resolves from the repo root.
 DEFAULT_LINKER_MODULE = "auto_ingest.diarize.link_global_speakers"
@@ -254,6 +258,12 @@ def cmd_tiktok(args) -> int:
     return _run(cli[0], cli[1:], extra_env=neo4j_env())
 
 
+def cmd_shorts(args) -> int:
+    """Forward to the research-scripted shorts package CLI."""
+    return _run("python3", ["-m", "auto_ingest.shorts.cli"] + args.rest,
+                extra_env=neo4j_env())
+
+
 def cmd_worker(args) -> int:
     return _run("./run_worker.sh", [], extra_env=neo4j_env())
 
@@ -447,6 +457,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     pwk = sub.add_parser("worker", help="Run the idle-gated background worker (speaker-link/compress/content).")
     pwk.set_defaults(func=cmd_worker)
+
+    ps = sub.add_parser("shorts", help="Research-scripted shorts (Neo4j topic + highway B-roll).",
+                          add_help=False)
+    ps.add_argument("rest", nargs=argparse.REMAINDER, help="Forwarded to auto_ingest.shorts.cli")
+    ps.set_defaults(func=cmd_shorts)
 
     pi = sub.add_parser("ingest", help="Ingest iPhone movies/pictures (Nextcloud/local) -> graph + content.")
     src = pi.add_mutually_exclusive_group()

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 from auto_ingest_config import get_fileserver_path
 # -*- coding: utf-8 -*-
 """
@@ -10,7 +12,6 @@ Adds:
 - Optional Neo4j manifest upsert for Video/Short/Segments/Speakers
 """
 
-from __future__ import annotations
 
 import argparse
 import csv
@@ -797,6 +798,100 @@ def compose_shorts(
         except Exception:
             pass
     logging.info(f"Wrote {out_path}")
+
+
+def compose_scripted_short(
+    shots: List[Dict[str, Any]],
+    cues: List[Dict[str, Any]],
+    out_path: Path,
+    *,
+    profile_name: str = "clean",
+    profile: Optional[Dict] = None,
+    y_ratio: float = 0.78,
+    width: int = 1080,
+    height: int = 1920,
+    target_w: int = 1080,
+    target_h: int = 1920,
+    bitrate: str = "6M",
+    fade: float = 0.12,
+) -> None:
+    """Compose a research-scripted short from highway B-roll + a cue track.
+
+    Unlike :func:`compose_shorts` (which captions a clip's own transcription),
+    this overlays an externally-authored **script** (the ``cues`` list of
+    ``{start, end, text, kind}``) on top of one or more highway clips
+    (``shots`` of ``{fr_path, t_sec, dur}``). Used by the research-shorts
+    package so the research DB becomes the narration and dashcam footage is the
+    backdrop.
+
+    Falls back gracefully when moviepy is unavailable (raises ImportError) so the
+    planner/curator remain unit-testable without the render stack.
+    """
+    try:
+        from moviepy.editor import (
+            CompositeVideoClip, ImageClip, VideoFileClip, concatenate_videoclips,
+        )
+    except Exception as e:  # pragma: no cover - environment dependent
+        raise ImportError("moviepy is required to render scripted shorts") from e
+
+    if profile is None:
+        profile = DEFAULT_PROFILES.get(profile_name, DEFAULT_PROFILES["clean"])
+    profile = _normalize_profile_from_json(profile)
+
+    empty_smap: Dict[str, Any] = {}
+
+    # Build the B-roll piece(s) from highway shots.
+    pieces = []
+    for i, sh in enumerate(shots):
+        frp = Path(sh["fr_path"])
+        t0 = float(sh.get("t_sec", 0.0))
+        t1 = t0 + float(sh.get("dur", 6.0))
+        with VideoFileClip(str(frp)) as v:
+            t1 = min(float(v.duration or 0.0), t1)
+            sub = v.subclip(max(0.0, t0), t1)
+            vcrop = sub.crop(
+                x1=(sub.w - target_w) // 2, y1=(sub.h - target_h) // 2,
+                width=min(target_w, sub.w), height=min(target_h, sub.h),
+            )
+            vcrop = vcrop.resize((width, height))
+        if i > 0 and fade:
+            vcrop = vcrop.crossfadein(fade)
+        pieces.append(vcrop)
+
+    if not pieces:
+        raise SystemExit("No highway shots to render (shot list empty).")
+    broll = concatenate_videoclips(pieces, method="compose") if len(pieces) > 1 else pieces[0]
+    total = float(broll.duration or 0.0)
+
+    # Overlay cues on top of the B-roll.
+    base_y = int(height * y_ratio)
+    caption_clips = []
+    for c in cues:
+        start = float(c.get("start", 0.0))
+        end = float(c.get("end", start + 3.0))
+        if end <= start:
+            end = start + 3.0
+        if start >= total:
+            continue
+        end = min(end, total)
+        text = (c.get("text") or "").strip()
+        if not text:
+            continue
+        arr = _draw_sentence(text, width, profile, None, empty_smap)
+        ic = ImageClip(arr).set_start(start).set_duration(end - start)
+        ic = ic.set_position(("center", base_y))
+        caption_clips.append(ic)
+
+    comp = CompositeVideoClip([broll] + caption_clips)
+    _write_videofile_safely(
+        comp, out_path, fps=float(broll.fps or 30.0),
+        codec="libx264", audio_codec="aac", bitrate=bitrate,
+    )
+    try:
+        comp.close()
+    except Exception:
+        pass
+    logging.info(f"Wrote scripted short: {out_path}")
 
 
 # ---------------------------
