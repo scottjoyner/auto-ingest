@@ -91,12 +91,36 @@ def run(args) -> int:
                     done += c
                     if c == 0:
                         break
-                if not quiet:
+                if not args.quiet:
                     print(f"[scott_unify] linked {done} PhoneLog via COMMUNICATED_VIA", flush=True)
                 total += done
 
             # ---- Phase 2: time-resolved place for Utterance + Summary ----
+            # Strategy: materialize an hour->place map ONCE (aggregate PhoneLogs by
+            # 1-hour bucket into :PlaceHour nodes), then attach each Utterance/Summary
+            # to the dominant place of its own hour bucket. Avoids a 21M-row scan
+            # per utterance (the naive datetime join is unindexed -> deadly slow).
             if args.with_time_place:
+                if not args.quiet:
+                    print("[scott_unify] Phase 2: building hour->place map from PhoneLog...", flush=True)
+                # Build/rebuild PlaceHour map (idempotent: deletes old first)
+                sess.run("MATCH (ph:PlaceHour) DELETE ph")
+                sess.run(
+                    """
+                    MATCH (p:PhoneLog)-[:AT_PLACE]->(pl:SummaryPlace)
+                    WHERE p.epoch_millis IS NOT NULL
+                    WITH p.epoch_millis - (p.epoch_millis % 3600000) AS hb,
+                         pl.name AS pn, count(*) AS c
+                    ORDER BY hb, c DESC
+                    WITH hb, collect({pn: pn, c: c})[0] AS top
+                    MERGE (ph:PlaceHour {hourBucket: hb})
+                    SET ph.place = top.pn, ph.pings = top.c
+                    """
+                )
+                nph = sess.run("MATCH (ph:PlaceHour) RETURN count(ph) AS c").single()["c"]
+                if not args.quiet:
+                    print(f"[scott_unify] Phase 2: {nph} PlaceHour buckets built", flush=True)
+
                 for lbl, time_prop in [("Utterance", "created_at"), ("Summary", "created_at")]:
                     done = 0
                     while True:
@@ -105,17 +129,26 @@ def run(args) -> int:
                                 f"""
                                 MATCH (s:{lbl}) WHERE s.{time_prop} IS NOT NULL
                                   AND NOT (s)-[:AT_PLACE]->()
-                                MATCH (p:PhoneLog)
-                                  WHERE p.epoch_millis IS NOT NULL
-                                    AND p.epoch_millis >= datetime(s.{time_prop}).epochMillis - $w
-                                    AND p.epoch_millis <= datetime(s.{time_prop}).epochMillis + $w
-                                    AND (p)-[:AT_PLACE]->()
-                                WITH s, p, abs(p.epoch_millis - datetime(s.{time_prop}).epochMillis) AS d
-                                ORDER BY d LIMIT 1
-                                MATCH (p)-[:AT_PLACE]->(pl:SummaryPlace)
+                                WITH s,
+                                  CASE
+                                    WHEN s.{time_prop} IS TYPED INTEGER OR s.{time_prop} IS TYPED FLOAT
+                                      THEN toInteger(s.{time_prop})
+                                    ELSE datetime(s.{time_prop}).epochMillis
+                                  END AS em
+                                WITH s, em - (em % 3600000) AS hb
+                                // Timezone mismatch: Utterance/Summary created_at is local (Eastern),
+                                // PhoneLog epoch_millis is UTC -> ~4-5h offset (DST-varying).
+                                // Match the NEAREST PlaceHour bucket within +-6h (DST-agnostic).
+                                UNWIND [0,3600000,7200000,10800000,14400000,18000000,21600000,
+                                        -3600000,-7200000,-10800000,-14400000,-18000000,-21600000] AS off
+                                MATCH (ph:PlaceHour {{hourBucket: hb + off}})
+                                WITH s, ph, abs(off) AS ad
+                                ORDER BY ad
+                                WITH s, collect(ph)[0] AS ph0
+                                MATCH (pl:SummaryPlace {{name: ph0.place}})
                                 MERGE (s)-[:AT_PLACE]->(pl)
                                 RETURN count(s) AS c
-                                """, w=WINDOW_MS
+                                """,
                             ).single()
                         except neo4j.exceptions.TransientError:
                             continue
