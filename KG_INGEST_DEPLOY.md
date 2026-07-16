@@ -95,6 +95,29 @@ After "go for it", accelerated + hardened the stack:
   * SIGNAL_ACCOUNT now read from env (was hardcoded None).
 - All 5 scripts syntax-validated.
 
+## ENHANCEMENT ROUND 2 (2026-07-16, "can we improve further")
+Closed real gaps found in an orphan/coverage audit:
+- Created `concept_embedding_768` vector index (768-dim, COSINE, ONLINE) on
+  Concept.embedding_768. Concepts carry BOTH embedding(384) and embedding_768(270 each).
+- bridge_paper_concept_768.py — links each 768-space Paper to its 5 nearest
+  Concepts via concept_embedding_768, writing (:Paper)-[:DISCUSSES {method:'vector',score}]->(:Concept).
+  This is the missing semantic bridge between the research corpus and the concept/activity
+  graph. Ran over all 2068 papers -> 10,340 vector DISCUSSES edges.
+  CRON (xwing): kg-paper-concept-bridge daily 04:51 (after the 768-backfill tick).
+- signal_kg_bridge.py: RE-ENABLED semantic ABOUT (was disabled in round 1). Now that
+  concept_embedding_768 exists, SignalMessages (768) link to Concepts (768) via vector.
+  Keyword ABOUT + semantic ABOUT both run; edges method-tagged.
+- kg_nl_query.py (NEW) — natural-language -> Cypher against the graph via LM Studio.
+  * Auto-selects a loaded chat model (DEFAULT_MODELS fallback list; only one needs VRAM).
+  * Forces read-only (rejects CREATE/MERGE/DELETE/SET).
+  * Guards against empty/truncated/malformed Cypher (retry once, then clean error).
+  * Verified: "top research themes at home" -> theme freqs; "papers about speech
+    recognition" -> 59 papers. The conversational upgrade to the idle-query system.
+- AUDIT FINDING (not fixed, noted): PriceBar (218k), Filing (44k), Ticker (512) are
+  100% orphaned in neo4j — these belong in the `trading` DB, not here. Cleanup/relocation
+  is a separate task (see memory: trading subgraph orphaned in neo4j).
+- All 7 scripts syntax-validated.
+
 ## NOTES / GOTCHAS
 - Signal bridge is NON-DESTRUCTIVE: it only reads envelopes; messages are stored in
   Neo4j before any cursor advance. It does NOT delete from signal-cli.
