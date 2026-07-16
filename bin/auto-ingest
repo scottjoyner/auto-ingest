@@ -279,6 +279,87 @@ def cmd_ingest(args) -> int:
     return _run(cli[0], cli[1:], extra_env=neo4j_env())
 
 
+# ---------------------------------------------------------------------------
+# run-all  (machine-agnostic orchestration of the full historical ingest pass)
+# ---------------------------------------------------------------------------
+def cmd_run_all(args) -> int:
+    """Chain the historical memory-enrichment pipeline end to end.
+
+    Stages are skipped when their --skip-* flag is set. Credentials and paths
+    come exclusively from neo4j_env() / auto_ingest_config, never hardcoded.
+    """
+    env = neo4j_env()
+    rc = 0
+
+    def step(name: str, fn) -> int:
+        nonlocal rc
+        print(f"\n=== auto-ingest run-all: {name} ===", flush=True)
+        r = fn()
+        if r != 0:
+            rc = r
+            print(f"[auto-ingest] WARNING: {name} exited {r} (continuing)", flush=True)
+        return r
+
+    if not args.skip_copy:
+        step("copy audio/dashcam/bodycam", lambda: (
+            _run("./audio_copy.sh", [], env) or
+            _run("./dashcam_copy.sh", [], env) or
+            _run("./bodycam_copy.sh", [], env)
+        ))
+
+    if not args.skip_diarize:
+        step("speaker diarization", lambda: _run_module("speakers", [], env))
+
+    if not args.skip_ingest:
+        step("ingest transcripts -> Neo4j", lambda: _run("./run_ingest_all.sh", [], env))
+        step("reconcile speakers (RTTM -> graph)",
+             lambda: _run_module("speakers_reconcile", [
+                 "--neo4j-uri", env["NEO4J_URI"], "--neo4j-user", env["NEO4J_USER"],
+                 "--neo4j-password", env["NEO4J_PASSWORD"], "--db", env["NEO4J_DB"],
+                 "--batch", "50", "--only-missing", "--allow-discovery",
+             ], env))
+
+    if not args.skip_classify:
+        step("music/lyrics segment classification",
+             lambda: _run_module("01_precompute_music_segments", ["--push-neo4j"], env) or
+                     _run_module("02_classify_lyrics",
+                                 ["--segments-source", "neo4j", "--limit", "50000"], env))
+
+    if not args.skip_link:
+        # Delegate to the existing link-speakers orchestration (package linker).
+        link = cmd_link_speakers(_link_args(args))
+        if link != 0:
+            rc = link
+
+    if not args.skip_yolo:
+        step("dashcam YOLO embeddings",
+             lambda: _run_module(MODULE_YOLO, [
+                 "--resume", "--grid", "16x9", "--pyramid", "--heatmap",
+                 "--repair-missing-moov",
+                 "--neo4j-uri", env["NEO4J_URI"], "--neo4j-user", env["NEO4J_USER"],
+                 "--neo4j-pass", env["NEO4J_PASSWORD"], "--win-mins", "10",
+             ], env))
+
+    print(f"\n=== auto-ingest run-all complete (rc={rc}) ===", flush=True)
+    return rc
+
+
+def _link_args(args):
+    """Build a fake args namespace for cmd_link_speakers from run-all options."""
+    class _A:
+        pass
+    a = _A()
+    a.limit = args.limit
+    a.max_speakers = args.max_speakers
+    a.priority = None
+    a.faiss = args.faiss
+    a.more_aggressive = args.more_aggressive
+    a.rank_and_label = args.rank_and_label
+    a.dry_run = args.dry_run
+    a.state_file = args.state_file or ""
+    return a
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="auto-ingest", description="Unified auto-ingest pipeline CLI.")
     sub = p.add_subparsers(dest="cmd", required=True)

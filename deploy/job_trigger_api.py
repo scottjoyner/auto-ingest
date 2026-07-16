@@ -103,10 +103,25 @@ class JobTriggerHandler(http.server.BaseHTTPRequestHandler):
             "failed_files": [f.name for f in sorted(failed)[-10:]]
         })
 
+    def _safe_scan_roots(self, raw):
+        """Validate and shell-escape scan_roots (W-47).
+
+        scan_roots is forwarded to the worker shell script as an environment
+        variable, never interpolated into a bash string. We still reject
+        obviously dangerous characters so a malicious client cannot smuggle
+        shell metacharacters. Returns a sanitized string (may be empty).
+        """
+        if not raw:
+            return ""
+        if any(ch in raw for ch in ";|&$()`<>{}*?[]!#\\'\"\n"):
+            # Reject anything that could be interpreted by the shell.
+            return ""
+        return raw
+
     def _handle_enqueue(self, data):
         """Create a .job file in the drop queue."""
         kind = data.get("kind", "all")
-        scan_roots = data.get("scan_roots")
+        scan_roots = self._safe_scan_roots(data.get("scan_roots"))
 
         # Validate kind
         if kind not in ("audio", "dashcam", "bodycam", "all"):
@@ -118,21 +133,16 @@ class JobTriggerHandler(http.server.BaseHTTPRequestHandler):
         job_name = f"{ts}_{kind}.job"
         job_path = Path(DROP_ROOT) / job_name
 
-        # Build job script
-        cmd = ""
-        if kind == "audio":
-            roots = scan_roots or os.environ.get("AUDIO_ROOT", "/nas/S/audio")
-            cmd = f'cd /app && SCAN_ROOTS="{roots}" /usr/bin/env bash run_ingest_all.sh'
-        elif kind == "dashcam":
-            roots = scan_roots or os.environ.get("DASHCAM_ROOT", "/nas/fileserver/dashcam")
-            cmd = f'cd /app && SCAN_ROOTS="{roots}" DASHCAM_ROOT="{roots}" /usr/bin/env bash run_ingest_all.sh'
-        elif kind == "bodycam":
-            roots = scan_roots or os.environ.get("BODYCAM_ROOT", "/nas/fileserver/bodycam")
-            cmd = f'cd /app && SCAN_ROOTS="{roots}" /usr/bin/env bash run_ingest_all.sh'
-        else:
-            cmd = "cd /app && /usr/bin/env bash run_ingest_all.sh"
-
-        job_content = f"#!/usr/bin/env bash\nset -euo pipefail\n{cmd}\n"
+        # Build job script — roots are passed via ENV (exported), never
+        # interpolated into the command string (W-47 shell-injection fix).
+        roots_export = f'export SCAN_ROOTS="{scan_roots}"\n' if scan_roots else ""
+        dashcam_export = f'export DASHCAM_ROOT="{scan_roots}"\n' if (kind == "dashcam" and scan_roots) else ""
+        cmd = "cd /app && /usr/bin/env bash run_ingest_all.sh"
+        job_content = (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            f"{roots_export}{dashcam_export}{cmd}\n"
+        )
 
         # Ensure drop dirs exist
         drop = Path(DROP_ROOT)
@@ -154,12 +164,20 @@ class JobTriggerHandler(http.server.BaseHTTPRequestHandler):
     def _handle_run(self, data):
         """Trigger an immediate one-shot run."""
         run_type = data.get("type", "ingest")
+        if run_type not in ("ingest", "sync"):
+            self._send_json(400, {"error": f"unknown run type: {run_type}"})
+            return
 
+        scan_roots = self._safe_scan_roots(os.environ.get("SCAN_ROOTS", ""))
         if run_type == "ingest":
-            # Run ingest directly (not via job queue)
+            # Run ingest directly (not via job queue). SCAN_ROOTS is passed via
+            # env, not interpolated into the bash command (W-47).
+            env = dict(os.environ)
+            if scan_roots:
+                env["SCAN_ROOTS"] = scan_roots
             result = subprocess.run(
-                ["bash", "-c", f"cd {APP_DIR} && SCAN_ROOTS='{os.environ.get('SCAN_ROOTS', '')}' /app/run_ingest_all.sh"],
-                capture_output=True, text=True, timeout=3600
+                ["bash", "-c", f"cd {APP_DIR} && /app/run_ingest_all.sh"],
+                capture_output=True, text=True, timeout=3600, env=env,
             )
             self._send_json(200, {
                 "status": "completed" if result.returncode == 0 else "failed",
@@ -184,6 +202,12 @@ class JobTriggerHandler(http.server.BaseHTTPRequestHandler):
 def main():
     host = os.environ.get("JOB_API_HOST", "0.0.0.0")
     port = int(os.environ.get("JOB_API_PORT", "8765"))
+    # SECURITY TODO (W-47): the job API on :8766 (mapped from :8765) currently
+    # has NO authentication and serves plain HTTP. Before any unified/external
+    # deployment it MUST be placed behind an authenticating reverse proxy
+    # (e.g. Caddy + bearer token / mTLS) and TLS-terminated. The handler also
+    # executes local ingest/sync jobs, so unauthenticated access = RCE risk.
+    # Do NOT rely on network isolation alone.
     server = http.server.HTTPServer((host, port), JobTriggerHandler)
     print(f"Job Trigger API listening on {host}:{port}")
     print(f"Drop root: {DROP_ROOT}")
