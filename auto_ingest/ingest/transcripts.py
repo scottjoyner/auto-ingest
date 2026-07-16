@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 try:
-    from auto_ingest_config import get_fileserver_path
+    from auto_ingest_config import get_fileserver_path, get_neo4j_env
 except Exception:  # packaged import fallback
-    from auto_ingest._config import get_fileserver_path
+    from auto_ingest._config import get_fileserver_path, get_neo4j_env
 # -*- coding: utf-8 -*-
 """
 ingest_transcriptsv5_3.py
@@ -64,10 +64,7 @@ LOCAL_TZ = os.getenv("LOCAL_TZ", "America/New_York")
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")  # 384 dims
 EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))
 
-NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026")
-NEO4J_DB = os.getenv("NEO4J_DB", "neo4j")
+NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, NEO4J_DB = get_neo4j_env()
 NEO4J_ENABLED = bool(NEO4J_URI and NEO4J_USER and NEO4J_PASSWORD)
 
 DEFAULT_BATCH_SIZE = int(os.getenv("EMBED_BATCH", "32"))

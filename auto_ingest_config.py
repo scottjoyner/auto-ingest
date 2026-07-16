@@ -131,7 +131,34 @@ def get_neo4j_config():
     }
 
 
-def get_nextcloud_root():
+def get_neo4j_db():
+    """Return the target Neo4j database name (default ``neo4j``)."""
+    config_path = _find_config_path()
+    if config_path:
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+        db = cfg.get("neo4j_db")
+        if db:
+            return db
+    return os.environ.get("NEO4J_DB", "neo4j")
+
+
+def get_neo4j_env():
+    """Return the full (uri, user, password, db) Neo4j tuple.
+
+    Single source of truth for every ingest script (W-45). Replaces the ~30
+    inline ``NEO4J_URI/USER/PASSWORD/DB`` constant blocks that hardcoded the
+    ``knowledge_graph_2026`` password fallback. Prefer this over re-declaring
+    the four module-level globals.
+    """
+    cfg = get_neo4j_config()
+    return (
+        cfg.get("uri", os.environ.get("NEO4J_URI", "bolt://localhost:7687")),
+        cfg.get("user", os.environ.get("NEO4J_USER", "neo4j")),
+        cfg.get("password", os.environ.get("NEO4J_PASSWORD", "")),
+        get_neo4j_db(),
+    )
+
     """Path to the Nextcloud store (true iPhone images/videos/audio).
 
     The Nextcloud data is on a separate store and is only mounted on some

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 try:
-    from auto_ingest_config import get_fileserver_path
+    from auto_ingest_config import get_fileserver_path, get_neo4j_env
 except Exception:  # packaged import fallback
-    from auto_ingest._config import get_fileserver_path
+    from auto_ingest._config import get_fileserver_path, get_neo4j_env
 """
 Global speaker linking with:
   - Segment-level diarization selection (SPOKEN_BY proportion) with auto fallback to Utterances
@@ -124,10 +124,7 @@ def _index_lookup(stem: str):
     return hits[0]
 
 
-NEO4J_URI      = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_USER     = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026")
-NEO4J_DB       = os.getenv("NEO4J_DB", "neo4j")
+NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, NEO4J_DB = get_neo4j_env()
 
 # Embedding backend
 SPK_MODEL  = os.getenv("SPK_MODEL", "speechbrain")  # "speechbrain" | "pyannote"

@@ -33,6 +33,10 @@ EMBED_BATCH, LOCAL_TZ, FRAME_DIM (default 256)
 import os, sys, csv, json, argparse, logging, math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+try:
+    from auto_ingest_config import get_neo4j_env
+except Exception:  # packaged import fallback
+    from auto_ingest._config import get_neo4j_env
 
 import numpy as np
 import torch
@@ -60,10 +64,7 @@ DEFAULT_BATCH_SIZE = int(os.getenv("EMBED_BATCH", "32"))
 FRAME_DIM = int(os.getenv("FRAME_DIM", "256"))
 
 # Neo4j
-NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026")
-NEO4J_DB = os.getenv("NEO4J_DB", "neo4j")
+NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, NEO4J_DB = get_neo4j_env()
 
 # =========================
 # Embedding model
