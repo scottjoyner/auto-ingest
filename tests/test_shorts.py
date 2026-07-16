@@ -389,8 +389,13 @@ def test_plan_trip_story_builds_journey_plan():
 def test_tts_narrate_graceful_without_reference(monkeypatch, tmp_path):
     from auto_ingest.shorts import tts
 
-    # No owner audio resolvable -> narrate returns None (silent render path).
-    monkeypatch.setattr(tts, "owner_audio_captures", lambda: [])
+    # When TTS synthesis is unavailable, narrate returns None so callers fall
+    # back to a silent render. (Owner audio reference may be cached on disk,
+    # so we stub the synthesis step itself.)
+    monkeypatch.setattr(
+        tts, "synthesize",
+        lambda *a, **k: (_ for _ in ()).throw(tts.TTSUnavailable("no tts")),
+    )
     out = tts.narrate("demo", [{"text": "hello world", "start": 0, "end": 2}])
     assert out is None
 

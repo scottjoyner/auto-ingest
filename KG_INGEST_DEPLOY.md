@@ -55,6 +55,26 @@ signal-cli -a +170XXXX5781 receive --help   # or check the running signal-cli se
   (score 0.735, method 'semantic'), cleaned to 0. Production graph: 0 SIMILAR, 322,904
   RELATED_CONCEPT (untouched), 68,418 Paper, 100,014 Chunk.
 
+## PAPER SIMILARITY SYSTEM (2026-07-16, iteration — closes the gap)
+After pruning, there were 0 SIMILAR edges and the bridge only linked fresh papers.
+Built a proper paper-to-paper similarity layer:
+- `arxiv_kg_bridge` writes `embedding_768` (768-dim, nomic-embed-text-v1.5 via LM Studio).
+  NOTE: this is a DIFFERENT space from the corpus-standard `embedding` (384-dim,
+  all-MiniLM-L6-v2) used by 61K existing papers + the `paper_embedding` index.
+- Created vector index `paper_embedding_768` (768-dim, COSINE, ONLINE) on
+  `Paper.embedding_768`.
+- `backfill_paper_similar.py` — uses `db.index.vector.queryNodes('paper_embedding_768', k, q)`
+  (proper k-NN, NOT O(n^2)) to write `(:Paper)-[:SIMILAR {method:'vector', score}]->(:Paper)`.
+  Idempotent (drops method:'vector' edges, rebuilds). Verified: 68 papers -> 680 edges,
+  avg 10.0 neighbors/paper.
+- `backfill_paper_768.py` — resumable backfill that embeds existing papers' abstracts
+  (384-space only) into `embedding_768` so they join the 768 corpus. Processes --limit
+  per run, idempotent.
+- CRON JOBS (xwing):
+  - kg-paper768-backfill: every 6h, --limit 500 (gentle on LM Studio; ~61K in ~2 weeks)
+  - kg-paper-similar: daily 04:41, rebuilds vector SIMILAR over the 768 corpus
+- VERIFIED: 68 papers in 768-space, 680 vector SIMILAR edges, RELATED_CONCEPT untouched.
+
 ## NOTES / GOTCHAS
 - Signal bridge is NON-DESTRUCTIVE: it only reads envelopes; messages are stored in
   Neo4j before any cursor advance. It does NOT delete from signal-cli.
