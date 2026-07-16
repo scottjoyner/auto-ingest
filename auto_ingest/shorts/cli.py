@@ -108,6 +108,23 @@ def _cmd_highlights(args) -> int:
     return 0
 
 
+def _cmd_trip(args) -> int:
+    driver, _ = _driver()
+    try:
+        plan = planner.plan_trip_story(
+            driver, trip_key=args.trip_key or None, count=args.shorts,
+            short_dur=args.dur, shots_per_trip=args.shots_per_short,
+            clip_dur=args.clip_dur, seed=args.seed,
+        )
+    finally:
+        driver.close()
+    out = args.plans_dir or DEFAULT_PLANS_DIR
+    path = Path(out) / f"trip__{plan.plan_id}.json"
+    plan.save(path)
+    print(f"Planned {len(plan.shorts)} trip-story short(s) -> {path}")
+    return 0
+
+
 def _cmd_iterate(args) -> int:
     prev = Plan.load(Path(args.plan))
     driver, _ = _driver()
@@ -231,6 +248,17 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--seed", type=int, default=None)
     ph.add_argument("--plans-dir", type=Path, default=DEFAULT_PLANS_DIR)
     ph.set_defaults(func=_cmd_highlights)
+
+    pt = sub.add_parser("trip", help="Plan 'Trip Story' shorts (geo + footage sequence).")
+    pt.add_argument("--trip-key", type=str, default=None,
+                   help="Specific Trip uniqueKey; else the N longest trips.")
+    pt.add_argument("--shorts", type=int, default=3)
+    pt.add_argument("--dur", type=float, default=30.0, help="Seconds per short")
+    pt.add_argument("--shots-per-short", dest="shots_per_short", type=int, default=4)
+    pt.add_argument("--clip-dur", dest="clip_dur", type=float, default=6.0)
+    pt.add_argument("--seed", type=int, default=1)
+    pt.add_argument("--plans-dir", type=Path, default=DEFAULT_PLANS_DIR)
+    pt.set_defaults(func=_cmd_trip)
 
     return p
 

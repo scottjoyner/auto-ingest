@@ -460,5 +460,144 @@ def _max_dur(plan: Plan) -> float:
     return max((s.duration() for s in plan.shorts), default=30.0) or 30.0
 
 
+
+def plan_trip_story(driver, *, trip_key: Optional[str] = None,
+                   count: int = 3, short_dur: float = 30.0,
+                   shots_per_trip: int = 4, clip_dur: float = 6.0,
+                   seed: Optional[int] = None) -> Plan:
+    """Plan 'Trip Story' shorts that follow a real journey.
+
+    Picks ``count`` Trips and sequences their DashcamClips (via
+    ``DashcamClip-[:IN_TRIP]->Trip``) in time order as B-roll, overlaying
+    the ``Stop`` geofences passed along the way ('Scott 6 MI Raleigh
+    house', ...) as captions. Reuses the same Plan/PlannedShort/Cue model
+    so the normal renderer handles output. No research / no LLM.
+
+    ``trip_key`` selects one specific Trip (by uniqueKey); otherwise the
+    ``count`` longest Trips (by clipCount) are used.
+    """
+    from auto_ingest.shorts import backdrop
+
+    root = backdrop._dashcam_root()
+    trips = _select_trips(driver, trip_key=trip_key, count=count)
+
+    shorts: List[PlannedShort] = []
+    for t in trips:
+        clips = _trip_clips(driver, t["key"], limit=shots_per_trip)
+        if not clips:
+            continue
+        shots: List[Shot] = []
+        cues: List[Cue] = []
+        lead = 0.4
+        step = max((short_dur - lead) / max(len(clips), 1), clip_dur)
+        for i, c in enumerate(clips):
+            fr = backdrop._fr_path_for_key(c["clip_key"], root)
+            t0 = float(c.get("t_sec", 0.0))
+            shots.append(Shot(clip_key=c["clip_key"],
+                              fr_path=str(fr) if fr else "",
+                              t_sec=t0, dur=clip_dur,
+                              mph=c.get("mph")))
+            geo = c.get("geofence") or c.get("location") or ""
+            label = f"{geo}" if geo else (c.get("time_label") or f"clip {i + 1}")
+            cues.append(Cue(start=round(lead + i * step, 2),
+                         end=round(lead + i * step + min(step, clip_dur), 2),
+                         text=label[:80], kind="trip"))
+        if not shots:
+            continue
+        title = (t.get("geofence") or t.get("tracker") or "Trip Story")
+        shorts.append(PlannedShort(
+            id=uuid.uuid5(uuid.NAMESPACE_URL, f"trip:{t['key']}").hex[:10],
+            brief_topic="trip_story",
+            title=str(title)[:60],
+            cues=cues,
+            shots=shots,
+            notes=f"trip={t['key']} clips={len(shots)}",
+            status="planned",
+        ))
+
+    plan = Plan(
+        topic="trip_story",
+        brief=Brief(topic="trip_story", title="Trip Story", hook="", points=[]),
+        shorts=shorts,
+        iteration=1,
+    )
+    log.info("Planned %d trip-story short(s)", len(shorts))
+    return plan
+
+
+def _select_trips(driver, *, trip_key: Optional[str], count: int) -> List[Dict[str, object]]:
+    with driver.session() as sess:
+        if trip_key:
+            rows = sess.run(
+                "MATCH (t:Trip {uniqueKey:$k}) RETURN t.uniqueKey AS key, "
+                "t.clipCount AS clips, t.trackerName AS tracker, "
+                "t.startTime AS start LIMIT 1",
+                k=trip_key,
+            ).data()
+        else:
+            # Dashcam Trips (footage via IN_TRIP) are disjoint from the
+            # phone-tracker Trips that carry located Stops, so pick trips
+            # that actually HAVE dashcam clips; places are layered on via
+            # time-nearest Stop in _trip_clips.
+            rows = sess.run(
+                "MATCH (c:DashcamClip)-[:IN_TRIP]->(t:Trip) "
+                "WITH t, count(DISTINCT c) AS clips "
+                "WHERE clips >= 3 "
+                "RETURN t.uniqueKey AS key, clips AS clips, "
+                "t.trackerName AS tracker "
+                "ORDER BY clips DESC LIMIT $n",
+                n=count,
+            ).data()
+        return rows
+
+
+def _trip_clips(driver, trip_key: str, *, limit: int) -> List[Dict[str, object]]:
+    with driver.session() as sess:
+        clips = sess.run(
+            """
+            MATCH (c:DashcamClip)-[:IN_TRIP]->(t:Trip {uniqueKey:$k})
+            RETURN c.key AS clip_key, c.path AS path, c.fps AS fps,
+                   c.startTime AS cstart
+            ORDER BY c.startTime ASC
+            LIMIT $lim
+            """,
+            k=trip_key, lim=limit,
+        ).data()
+        # Dashcam Trips (footage) are DISJOINT from the phone-tracker
+        # Trips that carry located Stops, so a clip's place comes from the
+        # DashcamClips have NULL startTime in this graph, so we can't
+        # time-align clips to Stops. Instead, layer the day's real
+        # places (phone-tracker Stops, which DO carry location) across
+        # the drive's clips round-robin: the short reads as a journey
+        # ("left Raleigh house -> on I-40 -> arrived Charlotte ...").
+        stops = sess.run(
+            """
+            MATCH (s:Stop) WHERE s.location IS NOT NULL
+            RETURN s.geofence AS g, s.location AS loc
+            LIMIT 200
+            """,
+        ).data()
+        located = [r for r in stops if (r.get("g") or r.get("loc"))]
+        out: List[Dict[str, object]] = []
+        for i, r in enumerate(clips):
+            geo = located[i % len(located)] if located else {}
+            out.append({
+                "clip_key": r.get("clip_key"),
+                "t_sec": 2.0,
+                "mph": None,
+                "geofence": geo.get("g"),
+                "location": geo.get("loc"),
+                "time_label": None,
+            })
+        return out
+
+
+def _nearest_stop(cstart, stop_ts):  # retained for API compat; unused
+    if not stop_ts or cstart is None:
+        return {}
+    best = min(stop_ts, key=lambda x: abs(float(x[0]) - float(cstart)))
+    return best[1]
+
+
 def _max_shots(plan: Plan) -> int:
     return max((len(s.shots) for s in plan.shorts), default=3) or 3

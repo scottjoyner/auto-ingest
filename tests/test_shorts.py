@@ -174,6 +174,33 @@ class _FakeSession:
                  "fps": 30.0, "path": f"/data/c{i}"}
                 for i in range(20)
             ])
+        if "trip" in q and "uniquekey" in q and "in_trip" not in q:
+            # _select_trips by uniqueKey
+            return _FakeResult([
+                {"key": "Dashcam_TRIP1", "clips": 50, "tracker": "Dashcam",
+                 "start": None},
+            ])
+        if "trip" in q and "clipcount" in q:
+            # _select_trips longest
+            return _FakeResult([
+                {"key": "Dashcam_TRIP1", "clips": 50, "tracker": "Dashcam"},
+                {"key": "Dashcam_TRIP2", "clips": 30, "tracker": "Dashcam"},
+                {"key": "Dashcam_TRIP3", "clips": 20, "tracker": "Dashcam"},
+            ])
+        if "in_trip" in q:
+            # _trip_clips: DashcamClip-[:IN_TRIP]->Trip (clips only)
+            return _FakeResult([
+                {"clip_key": "2025_0101_120000_F", "path": "/data/t1a",
+                 "fps": 30.0, "cstart": None},
+                {"clip_key": "2025_0101_123000_F", "path": "/data/t1b",
+                 "fps": 30.0, "cstart": None},
+            ])
+        if "stop" in q and "location" in q:
+            # _trip_clips located Stops (round-robin captions)
+            return _FakeResult([
+                {"g": "Scott 6 MI Raleigh house", "loc": "124 S Dawson"},
+                {"g": None, "loc": "I-40 W"},
+            ])
         return _FakeResult([])
     def close(self): pass
 
@@ -334,3 +361,20 @@ def test_plan_highlights_skips_missing_kind(monkeypatch):
     assert plan.shorts, "speed events should be produced"
     for s in plan.shorts:
         assert s.notes.split()[0] == "kind=speed"
+
+def test_plan_trip_story_builds_journey_plan():
+    from auto_ingest.shorts import planner
+
+    plan = planner.plan_trip_story(
+        _FakeDriver(), trip_key="Dashcam_TRIP1", count=1,
+        short_dur=30.0, shots_per_trip=2, clip_dur=6.0, seed=1)
+    assert plan.topic == "trip_story"
+    assert len(plan.shorts) == 1
+    s0 = plan.shorts[0]
+    assert len(s0.shots) == 2
+    # Journey captions are present (kind=trip) and read as real places.
+    kinds = {c.kind for c in s0.cues}
+    assert "trip" in kinds
+    place_cues = [c.text for c in s0.cues if c.text]
+    assert place_cues, "expected place/location captions along the trip"
+    assert s0.notes.startswith("trip=Dashcam_TRIP1")
