@@ -572,7 +572,8 @@ def fetch_speakers_and_segments(drv, min_seg_sec: float, min_prop: float,
                                 max_speakers: int = 0,
                                 skip_already_linked: bool = False,
                                 include_no_audio: bool = False,
-                                exclude_sids: Optional[Set[str]] = None) -> Dict[str, Dict]:
+                                exclude_sids: Optional[Set[str]] = None,
+                                exclude_non_speech: bool = True) -> Dict[str, Dict]:
     """
     Batched, seek-paginated pull using ONE query per page (a Cypher CALL subquery
     caps rows per speaker). Avoids the old N separate per-speaker round-trips that
@@ -587,6 +588,13 @@ def fetch_speakers_and_segments(drv, min_seg_sec: float, min_prop: float,
     linked_pred = "AND NOT (sp)-[:SAME_PERSON]->(:GlobalSpeaker)" if skip_already_linked else ""
     no_audio_pred = "AND coalesce(sp.no_audio, false) = false" if not include_no_audio else ""
     excl_pred = "AND NOT sp.id IN $excl" if exclude_sids else ""
+    # UNIFICATION §3.2: skip segments the classifier flagged as non-speech
+    # (Segment.segment_type written by 02_classify_lyrics). Default ON.
+    nonspeech_pred = (
+        "AND NOT coalesce(s.segment_type, '') IN "
+        "['music_or_media','navigation_or_alert','ambient_noise','unknown_low_confidence']"
+        if exclude_non_speech else ""
+    )
     out: Dict[str, Dict] = {}
     nsp = 0
     after = None
@@ -1330,6 +1338,11 @@ def parse_args():
                  help="Include speakers previously marked no_audio (default skips them so resumed runs make progress).")
     p.add_argument("--state-file", type=str, default="",
                  help="Path to a JSON file recording speaker IDs already processed; enables monotonic progress across chunked/resumed runs (speakers in this file are skipped).")
+    p.add_argument("--exclude-non-speech", dest="exclude_non_speech", action="store_true", default=True,
+                 help="(default ON) Skip Segment rows flagged as non-speech via Segment.segment_type "
+                      "(written by 02_classify_lyrics: 'music_or_media','navigation_or_alert','ambient_noise','unknown_low_confidence').")
+    p.add_argument("--no-exclude-non-speech", dest="exclude_non_speech", action="store_false",
+                 help="Disable the non-speech Segment.segment_type exclusion gate.")
 
     return Args(**vars(p.parse_args()))
 

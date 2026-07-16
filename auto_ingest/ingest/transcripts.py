@@ -3,6 +3,10 @@ try:
     from auto_ingest_config import get_fileserver_path, get_neo4j_env
 except Exception:  # packaged import fallback
     from auto_ingest._config import get_fileserver_path, get_neo4j_env
+try:
+    from auto_ingest.outbox import get_outbox
+except Exception:  # packaged import fallback
+    from auto_ingest.outbox import get_outbox  # noqa: F401
 # -*- coding: utf-8 -*-
 """
 ingest_transcriptsv5_3.py
@@ -884,12 +888,30 @@ def ingest_transcription_header(driver, t_id, key, started_at_iso, ended_at_iso,
         t.started_at=CASE WHEN $started_at IS NULL THEN t.started_at ELSE datetime($started_at) END,
         t.ended_at  =CASE WHEN $ended_at   IS NULL THEN t.ended_at   ELSE datetime($ended_at)   END
     """
-    with driver.session(database=NEO4J_DB) as sess:
-        sess.run(cy, t_id=t_id, key=key, text=text, transcript_emb=transcript_emb,
-                 transcript_emb_v2=transcript_emb_v2, source_json=source_paths.get("json"),
-                 source_csv=source_paths.get("csv"), source_rttm=source_paths.get("rttm"),
-                 source_media=source_paths.get("media"),
-                 started_at=started_at_iso, ended_at=ended_at_iso)
+    # W-48: stage the op in the durable outbox BEFORE touching Neo4j so a
+    # mid-ingest outage cannot lose the write. Only active when the outbox is
+    # enabled (AUTO_INGEST_OUTBOX=1); otherwise this is a no-op.
+    ob = get_outbox()
+    op_id = None
+    if ob is not None:
+        op_id = ob.append(
+            "ingest.transcription.header",
+            {"t_id": t_id, "key": key, "started_at": started_at_iso,
+             "ended_at": ended_at_iso, "text_len": len(text or "")},
+        )
+    try:
+        with driver.session(database=NEO4J_DB) as sess:
+            sess.run(cy, t_id=t_id, key=key, text=text, transcript_emb=transcript_emb,
+                     transcript_emb_v2=transcript_emb_v2, source_json=source_paths.get("json"),
+                     source_csv=source_paths.get("csv"), source_rttm=source_paths.get("rttm"),
+                     source_media=source_paths.get("media"),
+                     started_at=started_at_iso, ended_at=ended_at_iso)
+    except Exception as e:
+        if ob is not None and op_id is not None:
+            ob.mark_failed(op_id, str(e)[:500])
+        raise
+    if ob is not None and op_id is not None:
+        ob.mark_done(op_id)
 
 def ingest_segments_chunked(driver, t_id, segments, batch=200, timeout=120):
     if not segments: return 0
