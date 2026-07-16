@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from auto_ingest.shorts.models import Brief, SourceRef
 
@@ -182,3 +182,49 @@ def curate_brief(driver, topic: str, *, client=None, model: str = DEFAULT_OLLAMA
     """Convenience: curate facts then synthesize a brief in one call."""
     facts = curate_topic(driver, topic, **curate_kwargs)
     return synthesize_brief(facts, client=client, model=model, ollama_url=ollama_url)
+
+
+@dataclass
+class DiscussionClip:
+    """A spoken utterance (with its transcription + time anchor) that MENTIONS a
+    concept belonging to ``topic`` — the basis for 'your own discussion' shorts."""
+
+    utterance_id: str
+    text: str
+    transcription_key: str
+    start_ms: Optional[int]
+    concept: str
+    score: float
+
+
+def discusses_topic(driver, topic: str, *, min_score: float = 0.65,
+                    limit: int = 40) -> List[DiscussionClip]:
+    """Find spoken utterances that discuss a research Topic.
+
+    Uses the Utterance-[:MENTIONS]->Concept edges (populated by
+    scripts/link_utterances_to_concepts.py) joined to the Topic via
+    Paper-[:BELONGS_TO_TOPIC]->Topic so a viewer's *own words* about LLMs/agents
+    can be curated, not just the papers.
+    """
+    with driver.session() as sess:
+        rows = sess.run(
+            """
+            MATCH (t:Topic {name:$topic})<-[:BELONGS_TO_TOPIC]-(p:Paper)
+                  -[:HAS_CONCEPT]->(c:Concept)<-[m:MENTIONS]-(u:Utterance)
+            MATCH (u)<-[:HAS_UTTERANCE]-(tr:Transcription)
+            WHERE m.score >= $min
+            RETURN u.id AS uid, u.text AS text, tr.key AS tkey,
+                   tr.started_at AS started, c.name AS concept, m.score AS score
+            ORDER BY m.score DESC
+            LIMIT $limit
+            """,
+            topic=topic, min=min_score, limit=limit,
+        ).data()
+    return [
+        DiscussionClip(
+            utterance_id=r["uid"], text=r["text"] or "",
+            transcription_key=r["tkey"] or "", start_ms=None,
+            concept=r["concept"], score=float(r["score"]),
+        )
+        for r in rows
+    ]

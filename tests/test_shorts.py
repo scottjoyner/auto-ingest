@@ -125,6 +125,15 @@ class _FakeSession:
         q = (_a[0] if _a else "").lower()
         if "topic {name" in q and "paper" not in q:
             return _FakeResult([{"title": "Large Language Models"}])
+        if "mentions" in q and "topic" in q:
+            return _FakeResult([
+                {"uid": "u1", "text": "I think LLMs will change everything",
+                 "tkey": "2025_0101_120000", "started": None,
+                 "concept": "large language model", "score": 0.81},
+                {"uid": "u2", "text": "agents can call tools",
+                 "tkey": "2025_0101_120030", "started": None,
+                 "concept": "agent", "score": 0.72},
+            ])
         if "has_concept" in q:
             return _FakeResult([{"name": "llm"}, {"name": "agent"}])
         if "belongs_to_topic" in q and "keyword" in q:
@@ -136,6 +145,15 @@ class _FakeSession:
             ])
         if "has_chunk" in q:
             return _FakeResult([{"id": "ch1", "text": "This paper shows that LLMs can reason."}])
+        if "mentions" in q and "topic" in q:
+            return _FakeResult([
+                {"uid": "u1", "text": "I think LLMs will change everything",
+                 "tkey": "2025_0101_120000", "started": None,
+                 "concept": "large language model", "score": 0.81},
+                {"uid": "u2", "text": "agents can call tools",
+                 "tkey": "2025_0101_120030", "started": None,
+                 "concept": "agent", "score": 0.72},
+            ])
         return _FakeResult([])
     def close(self): pass
 
@@ -168,3 +186,11 @@ def test_synthesize_brief_from_facts():
     assert brief.hook == "Hook line"
     assert len(brief.points) == 3
     assert brief.sources and brief.sources[0].ref_id == "2401.xxxx"
+
+
+def test_discusses_topic_returns_spoken_discussions():
+    clips = curator.discusses_topic(_FakeDriver(), "large_language_models", min_score=0.65, limit=10)
+    assert len(clips) == 2
+    assert all(c.score >= 0.65 for c in clips)
+    assert clips[0].concept == "large language model"
+    assert "LLMs" in clips[0].text

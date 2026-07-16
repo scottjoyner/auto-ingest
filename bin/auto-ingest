@@ -264,6 +264,12 @@ def cmd_shorts(args) -> int:
                 extra_env=neo4j_env())
 
 
+def cmd_link_concepts(args) -> int:
+    """Forward to scripts/link_utterances_to_concepts.py (W-56)."""
+    return _run("python3", ["scripts/link_utterances_to_concepts.py"] + args.rest,
+                extra_env=neo4j_env())
+
+
 def cmd_worker(args) -> int:
     return _run("./run_worker.sh", [], extra_env=neo4j_env())
 
@@ -462,6 +468,11 @@ def build_parser() -> argparse.ArgumentParser:
                           add_help=False)
     ps.add_argument("rest", nargs=argparse.REMAINDER, help="Forwarded to auto_ingest.shorts.cli")
     ps.set_defaults(func=cmd_shorts)
+
+    plc = sub.add_parser("link-concepts",
+                         help="Link spoken Utterances to research Concepts (W-56).")
+    plc.add_argument("rest", nargs=argparse.REMAINDER, help="Forwarded to link_utterances_to_concepts.py")
+    plc.set_defaults(func=cmd_link_concepts)
 
     pi = sub.add_parser("ingest", help="Ingest iPhone movies/pictures (Nextcloud/local) -> graph + content.")
     src = pi.add_mutually_exclusive_group()
