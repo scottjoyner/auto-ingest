@@ -11,9 +11,11 @@ This is the missing semantic bridge between the research corpus and the activity
 actually traverse paper->concept. The existing DISCUSSES edges (lexical keyword)
 are kept; this adds the vector ones (method:'vector' distinguishes them).
 
-Idempotent: drops prior method:'vector' DISCUSSES from papers, rebuilds.
+Idempotent & memory-safe: drops prior method:'vector' DISCUSSES in BATCHES (a
+single big DELETE OOMs Neo4j's 2.8 GiB per-tx limit), then streams papers in
+chunks, vector-querying + MERGing per paper. Re-running is safe.
 Usage:
-    .venv/bin/python scripts/bridge_paper_concept_768.py [--k 5] [--threshold 0.70]
+    .venv/bin/python scripts/bridge_paper_concept_768.py [--k 5] [--threshold 0.70] [--batch 400] [--drop-batch 5000]
 """
 from __future__ import annotations
 
@@ -43,46 +45,60 @@ def main():
     ap.add_argument("--k", type=int, default=5)
     ap.add_argument("--threshold", type=float, default=0.70)
     ap.add_argument("--limit", type=int, default=0, help="max papers (0=all)")
+    ap.add_argument("--batch", type=int, default=400, help="papers per processing chunk")
+    ap.add_argument("--drop-batch", type=int, default=5000, help="edges deleted per tx")
     args = ap.parse_args()
 
     drv, db = get_neo4j()
     try:
-        with drv.session(database=db) as s:
-            total = s.run(
-                "MATCH (p:Paper) WHERE p.embedding_768 IS NOT NULL RETURN count(p) AS c"
-            ).single()["c"]
-            if args.limit:
-                total = min(total, args.limit)
-            dropped = s.run(
-                "MATCH (p:Paper)-[r:DISCUSSES]->(c:Concept) WHERE r.method='vector' "
-                "DELETE r RETURN count(r) AS c"
-            ).consume().counters.relationships_deleted
-            log(f"{total} papers w/ embedding_768; dropped {dropped} old vector DISCUSSES")
-            q = "MATCH (p:Paper) WHERE p.embedding_768 IS NOT NULL RETURN p.arxiv_id AS id, p.embedding_768 AS e"
-            if args.limit:
-                q += f" LIMIT {args.limit}"
-            papers = s.run(q).data()
+        # 1. Batched drop of existing vector DISCUSSES (one big DELETE OOMs).
+        total_dropped = 0
+        while True:
+            with drv.session(database=db) as s:
+                rec = s.run(
+                    "MATCH (p:Paper)-[r:DISCUSSES]->(c:Concept) WHERE r.method='vector' "
+                    "WITH r LIMIT $lim DELETE r RETURN count(r) AS c",
+                    {"lim": args.drop_batch},
+                ).single()
+                c = rec["c"] if rec else 0
+            total_dropped += c
+            if c == 0:
+                break
+            log(f"  dropped {total_dropped} vector DISCUSSES so far...")
+        log(f"dropped {total_dropped} old vector DISCUSSES")
 
+        # 2. Stream papers in batches; vector-query + MERGE per paper.
+        skip = 0
         created = 0
         processed = 0
-        for p in papers:
-            aid, emb = p["id"], p["e"]
-            with drv.session(database=db) as ws:
-                neigh = ws.run(
-                    "CALL db.index.vector.queryNodes('concept_embedding_768', $k, $q) "
-                    "YIELD node, score WHERE score >= $t RETURN node.name AS name, score",
-                    {"k": args.k, "q": emb, "t": args.threshold},
-                ).data()
-                for nb in neigh:
-                    ws.run(
-                        "MATCH (p:Paper {arxiv_id:$a}), (c:Concept {name:$n}) "
-                        "MERGE (p)-[:DISCUSSES {method:'vector', score:$s}]->(c)",
-                        {"a": aid, "n": nb["name"], "s": float(nb["score"])},
-                    )
-                    created += 1
-            processed += 1
-            if processed % 500 == 0:
-                log(f"processed {processed}/{total}, created {created} edges")
+        while True:
+            with drv.session(database=db) as rs:
+                q = ("MATCH (p:Paper) WHERE p.embedding_768 IS NOT NULL "
+                     "RETURN p.arxiv_id AS id, p.embedding_768 AS e "
+                     f"SKIP {skip} LIMIT {args.batch}")
+                papers = rs.run(q).data()
+            if not papers:
+                break
+            for p in papers:
+                aid, emb = p["id"], p["e"]
+                with drv.session(database=db) as ws:
+                    neigh = ws.run(
+                        "CALL db.index.vector.queryNodes('concept_embedding_768', $k, $q) "
+                        "YIELD node, score WHERE score >= $t RETURN node.name AS name, score",
+                        {"k": args.k, "q": emb, "t": args.threshold},
+                    ).data()
+                    for nb in neigh:
+                        ws.run(
+                            "MATCH (p:Paper {arxiv_id:$a}), (c:Concept {name:$n}) "
+                            "MERGE (p)-[:DISCUSSES {method:'vector', score:$s}]->(c)",
+                            {"a": aid, "n": nb["name"], "s": float(nb["score"])},
+                        )
+                        created += 1
+                processed += 1
+            skip += args.batch
+            if args.limit and processed >= args.limit:
+                break
+            log(f"processed {processed}, created {created} DISCUSSES edges")
 
         log(f"DONE: {processed} papers, {created} vector DISCUSSES edges")
     finally:
