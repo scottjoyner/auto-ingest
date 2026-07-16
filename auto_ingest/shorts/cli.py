@@ -153,7 +153,8 @@ def _cmd_render(args) -> int:
         out_dir = args.out_dir or DEFAULT_OUT_DIR
         paths = render.render_plan(
             plan, out_dir, only=args.only, tts=args.tts,
-            skip_used_clips=args.skip_used, upsert=args.upsert,
+            skip_used_clips=True, upsert=args.upsert,
+            skip_history=args.skip_history,
         )
         if not args.upsert:
             render.upsert_manifest(driver, plan, out_dir)
@@ -231,6 +232,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Skip shorts whose B-roll was used in a prior rendered short")
     pr.add_argument("--upsert", action="store_true",
                     help="Persist :ShortPlan/:Short manifest (status/published) to Neo4j")
+    pr.add_argument("--skip-history", action="store_true",
+                    help="Also skip clips already rendered in PRIOR batches (off by "
+                         "default so iterations keep producing fresh shorts)")
     pr.set_defaults(func=_cmd_render)
 
     pl = sub.add_parser("list", help="List plans (disk or Neo4j).")

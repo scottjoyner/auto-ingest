@@ -32,8 +32,9 @@ TTS_ENV = {"COQUI_TOS_AGREED": "1"}
 
 
 def _driver():
-    from auto_ingest_config import get_neo4j_password
     from neo4j import GraphDatabase
+
+    from auto_ingest_config import get_neo4j_password
     d = GraphDatabase.driver("bolt://localhost:7687",
                              auth=("neo4j", get_neo4j_password()))
     return d
@@ -60,10 +61,12 @@ def build_plans(drv, anchors, seeds, topics) -> list[Plan]:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--seeds", nargs="+", type=int, default=[7, 11, 23])
+    ap.add_argument("--seeds", nargs="+", type=int, default=[7, 11, 23, 42])
     ap.add_argument("--topics", nargs="+",
-                    default=["large_language_models", "knowledge_graph",
-                             "graph_databases", "machine_learning"])
+                    default=["large_language_models", "multi_agent_systems",
+                             "graph_neural_networks", "reinforcement_learning",
+                             "diffusion_models", "computer_vision",
+                             "retrieval_augmented_generation", "robotics"])
     ap.add_argument("--namespace", default=NAMESPACE)
     args = ap.parse_args(argv)
 
@@ -88,7 +91,8 @@ def main(argv=None) -> int:
     total = 0
     for p in plans:
         rendered = render.render_plan(
-            p, out_root / p.topic, tts=True, skip_used_clips=True, upsert=True)
+            p, out_root / p.topic, tts=True, skip_used_clips=True,
+            skip_history=False, upsert=True)
         total += len(rendered)
         log.info("Rendered %d/%d for %s", len(rendered), len(p.shorts), p.topic)
 

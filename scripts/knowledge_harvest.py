@@ -33,8 +33,17 @@ def check_agent_load(host: str) -> float:
         output = result.stdout.strip()
         print(f"   Linux check: {repr(output)}")  # DEBUG
         if output and not "No such file" in output and "Permission denied" not in output:
-            load_avg = float(output)
-            return load_avg
+            # stdout may contain SSH 'Warning: ...' lines before the number; grab the
+            # last whitespace-delimited token that parses as a float.
+            load_avg = None
+            for tok in reversed(output.replace("\n", " ").split()):
+                try:
+                    load_avg = float(tok)
+                    break
+                except ValueError:
+                    continue
+            if load_avg is not None:
+                return load_avg
     except Exception as e:
         print(f"   Linux check exception: {e}")  # DEBUG
     
@@ -300,10 +309,12 @@ def main():
         agent = insights["agent"]
         print(f"   • {agent}: {insights['total_events']} events, "
               f"{insights['high_confidence_memories']} memories, "
-              f"{insights['action_items']} action items")
+              f"{len(insights['action_items'])} action items")
     
     # Save summary
-    summary_file = Path.home() / ".hermes" / "knowledge-harvest" / "harvest_summary.json"
+    harvest_dir = Path.home() / ".hermes" / "knowledge-harvest"
+    harvest_dir.mkdir(parents=True, exist_ok=True)
+    summary_file = harvest_dir / "harvest_summary.json"
     with open(summary_file, "w") as f:
         json.dump({
             "timestamp": datetime.now().isoformat(),

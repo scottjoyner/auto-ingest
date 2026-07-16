@@ -387,7 +387,6 @@ def test_plan_trip_story_builds_journey_plan():
 # --------------------------------------------------------------------------- #
 
 def test_tts_narrate_graceful_without_reference(monkeypatch, tmp_path):
-    from auto_ingest.shorts import tts
 
     # When TTS synthesis is unavailable, narrate returns None so callers fall
     # back to a silent render. (Owner audio reference may be cached on disk,
@@ -401,7 +400,6 @@ def test_tts_narrate_graceful_without_reference(monkeypatch, tmp_path):
 
 
 def test_tts_synthesize_raises_when_package_missing(monkeypatch, tmp_path):
-    from auto_ingest.shorts import tts
 
     # Force both in-process and venv paths to be unavailable.
     monkeypatch.setattr(tts, "_tts_venv_python", lambda: None)
@@ -428,9 +426,9 @@ def test_tts_synthesize_raises_when_package_missing(monkeypatch, tmp_path):
 # render_plan dedup (skip_used_clips)
 # --------------------------------------------------------------------------- #
 
-def test_render_plan_skip_used_clips(monkeypatch, tmp_path):
-    from auto_ingest.shorts import render
+def test_render_plan_skip_history(monkeypatch, tmp_path):
 
+    # skip_history=True reads prior rendered :Short clip_keys and skips them.
     plan = Plan(
         topic="demo",
         brief=Brief(topic="demo", title="Demo", hook="hi", points=["a", "b"], sources=[]),
@@ -445,8 +443,37 @@ def test_render_plan_skip_used_clips(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(render, "_already_rendered_clips", lambda: {"clip_A"})
     rendered = []
-    monkeypatch.setattr(render, "render_short",
-                        lambda item, out, **kw: rendered.append(item.id) or (out / f"{item.id}.mp4"))
+    def _fake(item, out, **kw):
+        rendered.append(item.id)
+        item.out_path = str(out / f"{item.id}.mp4")
+        return out / f"{item.id}.mp4"
+    monkeypatch.setattr(render, "render_short", _fake)
+    out = render.render_plan(plan, tmp_path, skip_history=True)
+    assert rendered == ["s2"], "s1 should be skipped (clip_A already used in history)"
+    assert len(out) == 1
+
+
+def test_render_plan_in_plan_dedup(monkeypatch, tmp_path):
+
+    # In-plan dedup: a clip reused within the same plan is rendered once.
+    plan = Plan(
+        topic="demo",
+        brief=Brief(topic="demo", title="Demo", hook="hi", points=["a"], sources=[]),
+        shorts=[
+            PlannedShort(id="s1", title="S1", brief_topic="demo",
+                         shots=[Shot(clip_key="clip_A", fr_path="/x.mp4", t_sec=0, dur=6)],
+                         cues=[Cue(text="a", start=0, end=2, kind="narration")]),
+            PlannedShort(id="s2", title="S2", brief_topic="demo",
+                         shots=[Shot(clip_key="clip_A", fr_path="/x.mp4", t_sec=0, dur=6)],
+                         cues=[Cue(text="b", start=0, end=2, kind="narration")]),
+        ],
+    )
+    rendered = []
+    def _fake2(item, out, **kw):
+        rendered.append(item.id)
+        item.out_path = str(out / f"{item.id}.mp4")
+        return out / f"{item.id}.mp4"
+    monkeypatch.setattr(render, "render_short", _fake2)
     out = render.render_plan(plan, tmp_path, skip_used_clips=True)
-    assert rendered == ["s2"], "s1 should be skipped (clip_A already used)"
+    assert rendered == ["s1"], "s2 should be skipped (clip_A reused in-plan)"
     assert len(out) == 1

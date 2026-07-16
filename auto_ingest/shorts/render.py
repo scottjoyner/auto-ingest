@@ -108,19 +108,24 @@ def upsert_manifest(driver, plan: Plan, out_dir: Path) -> None:
 
 def render_plan(plan: Plan, out_dir: Path, *, only: Optional[List[str]] = None,
                 skip_used_clips: bool = False, upsert: bool = False,
-                tts: bool = False, **render_kwargs) -> List[Path]:
+                tts: bool = False, skip_history: bool = False,
+                **render_kwargs) -> List[Path]:
     """Render every (or selected) short in a plan; update statuses in place.
 
-    When ``skip_used_clips`` is set, any short whose B-roll ``clip_key`` was
-    already rendered in a prior ``:Short`` (status 'rendered') is skipped, so
-    re-running a plan doesn't remake shorts from the same footage.
+    Dedup behavior (controls clip reuse across a run):
+    * ``skip_used_clips`` (default True via CLI) dedups *within the plan* so a
+      B-roll clip is not reused across two shorts in the same batch.
+    * ``skip_history`` additionally skips clips already rendered in a *prior*
+      ``:Short`` (status 'rendered') in Neo4j. This is OFF by default so that
+      repeated iterations keep producing fresh shorts from the same highway
+      pool instead of being starved by earlier batches.
 
     When ``upsert`` is set, the plan + rendered shorts are persisted to Neo4j
     as :ShortPlan / :Short (status 'rendered'), giving a publish-aware audit
-    trail and feeding the dedup logic on future runs.
+    trail (and, when ``skip_history`` is set, feeding the dedup logic).
     """
     used: set = set()
-    if skip_used_clips:
+    if skip_history:
         used = _already_rendered_clips()
     out: List[Path] = []
     for item in plan.shorts:
@@ -128,14 +133,19 @@ def render_plan(plan: Plan, out_dir: Path, *, only: Optional[List[str]] = None,
             continue
         if item.status == "rejected":
             continue
-        if skip_used_clips and any(s.clip_key in used for s in item.shots):
-            log.info("Skip %s (clip already used in a prior short)", item.id)
+        # Dedup: skip if any shot's clip was already used earlier in THIS
+        # plan's render loop (skip_used_clips) OR in a prior batch (skip_history).
+        if (skip_used_clips or skip_history) and any(s.clip_key in used for s in item.shots):
+            log.info("Skip %s (clip already used)", item.id)
             continue
         try:
             p = render_short(item, out_dir, tts=tts, **render_kwargs)
             out.append(p)
             if item.out_path:
                 item.status = "rendered"
+                for s in item.shots:
+                    if s.clip_key:
+                        used.add(s.clip_key)
         except Exception as e:  # pragma: no cover - render failures are environment-specific
             log.error("Render failed for %s: %s", item.id, e)
     if upsert and out:

@@ -215,20 +215,45 @@ def discusses_topic(driver, topic: str, *, min_score: float = 0.65,
     with driver.session() as sess:
         rows = sess.run(
             """
+            // First resolve the topic's own concept set so the discussion is
+            // actually ABOUT this topic (not the globally highest-scoring
+            // utterances, which all tend to mention "large language model").
             MATCH (t:Topic {name:$topic})<-[:BELONGS_TO_TOPIC]-(p:Paper)
+                  -[:HAS_CONCEPT]->(tc:Concept)
+            WITH t, collect(DISTINCT tc.name) AS topic_concepts
+            // Now utterances that MENTION one of THIS topic's concepts.
+            MATCH (t2:Topic {name:$topic})<-[:BELONGS_TO_TOPIC]-(p2:Paper)
                   -[:HAS_CONCEPT]->(c:Concept)<-[m:MENTIONS]-(u:Utterance)
-            MATCH (u)<-[:HAS_UTTERANCE]-(tr:Transcription)
-            WHERE m.score >= $min
+            WHERE c.name IN topic_concepts
+              AND m.score >= $min
               AND size(u.text) >= $minlen
-            WITH u, tr, collect(DISTINCT c.name) AS concepts,
-                 max(m.score) AS best_score
+            MATCH (u)<-[:HAS_UTTERANCE]-(tr:Transcription)
+            WITH u, tr, c, m, topic_concepts
+            // Best topic-specific concept + score for this utterance.
+            WITH u, tr,
+                 collect({name:c.name, score:m.score}) AS cms
+            WITH u, tr, cms,
+                 // Prefer the highest-scoring concept that is NOT a generic
+                 // over-shared one (e.g. "large language model" appears in
+                 // almost every topic's paper set and dominates the ranking,
+                 // producing the same narration for every topic).
+                 [x IN cms WHERE NOT x.name IN $generic] AS specific
+            WITH u, tr, cms, specific
+            WITH u, tr,
+                 CASE WHEN size(specific) > 0
+                      THEN reduce(b = specific[0], x IN specific |
+                           CASE WHEN x.score > b.score THEN x ELSE b END)
+                      ELSE reduce(b = cms[0], x IN cms |
+                           CASE WHEN x.score > b.score THEN x ELSE b END)
+                 END AS best
             RETURN u.id AS uid, u.text AS text, tr.key AS tkey,
                    tr.clip_key AS clip_key, u.start AS start_sec,
-                   concepts[0] AS concept, best_score AS score
-            ORDER BY score DESC
+                   best.name AS concept, best.score AS score
+            ORDER BY best.score DESC
             LIMIT $limit
             """,
             topic=topic, min=min_score, minlen=min_text_len, limit=limit,
+            generic=["large language model","llm","language model","attention","reasoning","deep learning","neural network"],
         ).data()
     # Query already groups per utterance (best concept/score), so each row is
     # a distinct utterance.
