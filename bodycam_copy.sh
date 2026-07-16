@@ -12,6 +12,10 @@ from auto_ingest_config import get_audio_root
 print(get_audio_root())
 PY
 )}"       # where audio (and extracted audio) go (dated)
+if { [[ "$DEST_BODYCAM_ROOT" == /media/scott/NAS5* ]] || [[ "$DEST_AUDIO_ROOT" == /media/scott/NAS5* ]]; } && ! findmnt -rn /media/scott/NAS5 >/dev/null; then
+  echo "[media_copy] ❌ NAS5 is required for destination but /media/scott/NAS5 is not mounted. Refusing to copy to an unmounted directory."
+  exit 1
+fi
 TRANS_SUBDIR="transcriptions"                          # under DEST_AUDIO_ROOT for transcripts/diarization
 
 # Source folder names (case-insensitive) expected at device root
@@ -33,13 +37,14 @@ shopt -s nullglob dotglob nocaseglob
 # --- Helpers ---
 
 get_mounts() {
-  # Prefer removable devices
-  lsblk -pnro MOUNTPOINT,RM 2>/dev/null | awk '$1!="" && $2=="1"{print $1}'
-  # Common user media roots
-  [ -d "/media/$USER" ] && find "/media/$USER" -mindepth 1 -maxdepth 1 -type d 2>/dev/null
-  [ -d "/run/media/$USER" ] && find "/run/media/$USER" -mindepth 1 -maxdepth 1 -type d 2>/dev/null
-  # Fallback: all non-system mounts (keep /run so /run/media works)
-  lsblk -pnro MOUNTPOINT 2>/dev/null | grep -Ev '^$|^/proc|^/sys|^/dev($|/)'
+  # Prefer removable media and user-mounted camera/card paths. Exclude swap,
+  # system pseudo-mounts, and our destination storage roots so we never recurse
+  # over NAS/SSD targets while looking for camera source folders.
+  {
+    lsblk -pnro MOUNTPOINT,RM 2>/dev/null | awk '$1 != "" && $1 != "[SWAP]" && $2 == "1" {print $1}'
+    [ -d "/media/$USER" ] && find "/media/$USER" -mindepth 1 -maxdepth 1 -type d 2>/dev/null
+    [ -d "/run/media/$USER" ] && find "/run/media/$USER" -mindepth 1 -maxdepth 1 -type d 2>/dev/null
+  } | awk 'NF && $0 != "[SWAP]" && $0 !~ "^/proc" && $0 !~ "^/sys" && $0 !~ "^/dev($|/)" && $0 !~ "^/media/scott/(NAS[0-9]+|SSD_4TB)$" && $0 !~ "^/mnt/8TB_2025($|/)" {print}'
 }
 
 # Extract Y M D from filename if it starts with 14 digits (YYYYMMDDhhmmss[...]),

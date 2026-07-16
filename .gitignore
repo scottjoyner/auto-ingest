@@ -30,3 +30,13 @@ linker_*.log
 .coverage.*
 htmlcov/
 coverage.xml
+
+# env backups (machine-local, may contain secrets)
+.env.bak
+.env.bak.*
+.env-ssd
+
+# stray diagnostic plots
+lat_deg*_heading.png
+lon_deg*_heading.png
+speed.png

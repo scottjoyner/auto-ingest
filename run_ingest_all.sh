@@ -37,11 +37,23 @@ print(get_fileserver_root())
 PY
 )}"
 
-# Where to scan for transcripts & media
-export SCAN_ROOTS="${SCAN_ROOTS:-${FILESERVER_ROOT}/dashcam/audio,${FILESERVER_ROOT}/dashcam/transcriptions,${FILESERVER_ROOT}/dashcam/metadata,${FILESERVER_ROOT}/dashcam/yolo,${FILESERVER_ROOT}/audio,${FILESERVER_ROOT}/audio/transcriptions,${FILESERVER_ROOT}/bodycam,${FILESERVER_ROOT}/headcam,${FILESERVER_ROOT}/dashcam}"
+# Local first-cache paths for processing. NAS5 is cold/durable storage, not the
+# primary processing path when /mnt/8TB_2025 is available. Roots are resolved
+# via the mount-aware helpers in auto_ingest_config (deathstar merge).
+export DASHCAM_ROOT="${DASHCAM_ROOT:-$($PY - <<'PY'
+from auto_ingest_config import get_dashcam_root
+print(get_dashcam_root())
+PY
+)}"
+export AUDIO_ROOT="${AUDIO_ROOT:-$($PY - <<'PY'
+from auto_ingest_config import get_audio_root
+print(get_audio_root())
+PY
+)}"
 
-# Where to aggressively look for *_metadata.csv
-export DASHCAM_ROOT="${DASHCAM_ROOT:-/media/scott/NAS3/dashcam}"
+# Where to scan for transcripts & media (comprehensive: dashcam + audio + bodycam
+# + headcam sidecars/derived artifacts, under the resolved roots).
+export SCAN_ROOTS="${SCAN_ROOTS:-${DASHCAM_ROOT},${DASHCAM_ROOT}/audio,${DASHCAM_ROOT}/transcriptions,${DASHCAM_ROOT}/metadata,${DASHCAM_ROOT}/yolo,${AUDIO_ROOT},${AUDIO_ROOT}/transcriptions,${FILESERVER_ROOT}/bodycam,${FILESERVER_ROOT}/headcam}"
 
 # Timezone for key→absolute timestamps
 export LOCAL_TZ="${LOCAL_TZ:-America/New_York}"
@@ -51,10 +63,13 @@ export EMBED_MODEL_NAME="${EMBED_MODEL_NAME:-sentence-transformers/all-MiniLM-L6
 export EMBED_DIM="${EMBED_DIM:-384}"
 export EMBED_BATCH="${EMBED_BATCH:-32}"  # tokenizer batch size for GPU/CPU
 
-# Neo4j connection (edit if your credentials differ)
+# Neo4j connection (credentials come from env / .env only — W-45: no committed fallback)
 export NEO4J_URI="${NEO4J_URI:-bolt://100.64.43.123:7687}"
 export NEO4J_USER="${NEO4J_USER:-neo4j}"
-export NEO4J_PASSWORD="${NEO4J_PASSWORD:-knowledge_graph_2026}"
+export NEO4J_PASSWORD="${NEO4J_PASSWORD:-}"
+if [ -z "$NEO4J_PASSWORD" ]; then
+  echo "NEO4J_PASSWORD is not set (export it or add it to .env)" >&2; exit 2
+fi
 export NEO4J_DB="${NEO4J_DB:-neo4j}"
 
 # Model preference ordering (optional override)
