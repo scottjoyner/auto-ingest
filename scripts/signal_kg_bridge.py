@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -34,9 +35,19 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 CURSOR_FILE = REPO / "scripts" / ".signal_kg_cursor.json"
-SIGNAL_ACCOUNT = None  # set from env / signal-cli default device below
+SIGNAL_ACCOUNT = os.environ.get("SIGNAL_ACCOUNT")  # e.g. +170XXXX5781; may be None (default device)
 LM_STUDIO_URL = "http://100.64.43.123:1234/v1/embeddings"  # LM Studio on x1-370 net
 EMBED_MODEL = "text-embedding-nomic-embed-text-v1.5"
+
+
+def ensure_constraints(drv, db):
+    """Idempotency: unique key on SignalMessage(source,ts) prevents dup nodes
+    if signal-cli returns the same envelope on re-run."""
+    with drv.session(database=db) as s:
+        s.run(
+            "CREATE CONSTRAINT signal_msg_key IF NOT EXISTS "
+            "FOR (m:SignalMessage) REQUIRE (m.source, m.ts) IS NODE KEY"
+        )
 
 
 def log(*a):
@@ -116,6 +127,7 @@ def ingest(msgs, dry_run=False):
         log("no new messages")
         return 0
     drv, db = get_neo4j()
+    ensure_constraints(drv, db)
     try:
         with drv.session(database=db) as s:
             n = 0
@@ -127,7 +139,8 @@ def ingest(msgs, dry_run=False):
                     n += 1
                     last_ts = m["ts"] or last_ts
                     continue
-                # MERGE Scott + message; attach embedding if available
+                # MERGE Scott + message; attach embedding if available.
+                # NODE KEY (source,ts) makes this idempotent across re-runs.
                 params = {
                     "src": m["src"],
                     "ts": m["ts"],
@@ -148,16 +161,35 @@ def ingest(msgs, dry_run=False):
                     """,
                     params,
                 )
-                # link to concepts by keyword overlap (cheap, no big scans)
+                # keyword ABOUT links (cheap, token-level; works in any embedding space)
                 s.run(
                     """
                     MATCH (sm:SignalMessage {source:$src, ts:$ts})
                     MATCH (c:Concept)
                     WHERE c.name IS NOT NULL AND toLower(sm.body) CONTAINS toLower(c.name)
-                    MERGE (sm)-[:ABOUT]->(c)
+                    MERGE (sm)-[:ABOUT {method:'keyword'}]->(c)
                     """,
                     {"src": m["src"], "ts": m["ts"]},
                 )
+                # semantic ABOUT links via concept_embedding_768 vector index.
+                # SignalMessages embed in 768-dim (nomic) and Concepts carry embedding_768,
+                # so the spaces MATCH — this is valid semantic linking.
+                if emb:
+                    try:
+                        neigh = s.run(
+                            "CALL db.index.vector.queryNodes('concept_embedding_768', 5, $q) "
+                            "YIELD node, score WHERE score >= 0.6 "
+                            "RETURN node.name AS name, score",
+                            {"q": emb},
+                        ).data()
+                        for nb in neigh:
+                            s.run(
+                                "MATCH (sm:SignalMessage {source:$src, ts:$ts}), (c:Concept {name:$name}) "
+                                "MERGE (sm)-[:ABOUT {method:'semantic', score:$s}]->(c)",
+                                {"src": m["src"], "ts": m["ts"], "name": nb["name"], "s": float(nb.get("score", 0.6))},
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        log(f"semantic ABOUT skipped: {type(e).__name__}: {str(e)[:80]}")
                 n += 1
                 last_ts = m["ts"] or last_ts
             if not dry_run and last_ts:

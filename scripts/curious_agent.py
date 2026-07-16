@@ -111,6 +111,25 @@ def insights(drv, db):
             "MATCH (p:Paper) RETURN count(p) AS c LIMIT 1")[0]["c"]
     except Exception:
         out["papers"] = None
+    # similarity coverage (768-space) + SIMILAR edges
+    try:
+        out["papers_768"] = q(drv, db,
+            "MATCH (p:Paper) WHERE p.embedding_768 IS NOT NULL RETURN count(p) AS c LIMIT 1")[0]["c"]
+    except Exception:
+        out["papers_768"] = None
+    try:
+        out["similar_edges"] = q(drv, db,
+            "MATCH ()-[r:SIMILAR]->() WHERE r.method='vector' RETURN count(r) AS c LIMIT 1")[0]["c"]
+    except Exception:
+        out["similar_edges"] = None
+    # most-connected papers (the "papers like this" insight)
+    try:
+        out["top_connected_papers"] = q(drv, db,
+            "MATCH (p:Paper)-[:SIMILAR]->() WITH p, count(*) AS d "
+            "WHERE p.title IS NOT NULL RETURN p.arxiv_id AS id, p.title AS title, d AS degree "
+            "ORDER BY d DESC LIMIT 5")
+    except Exception as e:
+        out["top_connected_papers"] = [{"error": str(e)[:80]}]
     return out
 
 
@@ -124,6 +143,10 @@ def build_digest(fresh, ins):
         lines.append(f"  ⚠️ STALE: no new ingest in >{STALE_DAYS}d — pipeline may be paused")
     if ins.get("papers"):
         lines.append(f"  arXiv papers in graph: {ins['papers']}")
+    if ins.get("papers_768") is not None:
+        lines.append(f"  Papers in 768-vec space: {ins['papers_768']}")
+    if ins.get("similar_edges") is not None:
+        lines.append(f"  Paper SIMILAR edges: {ins['similar_edges']}")
     if ins.get("signal_messages") is not None:
         lines.append(f"  Signal messages ingested: {ins['signal_messages']}")
     if ins.get("related_concept_edges") is not None:
@@ -132,6 +155,13 @@ def build_digest(fresh, ins):
         lines.append("  Top HOME research themes:")
         for t in ins["home_themes"][:5]:
             lines.append(f"    - {t.get('theme')}: {t.get('w')}")
+    if ins.get("top_connected_papers"):
+        pk = [p for p in ins["top_connected_papers"] if "error" not in p]
+        if pk:
+            lines.append("  Most-connected papers (best paper hubs):")
+            for p in pk[:5]:
+                title = (p.get("title") or "")[:55]
+                lines.append(f"    - [{p.get('degree')}] {title}")
     if ins.get("new_places"):
         lines.append("  Top places by activity:")
         for p in ins["new_places"][:5]:

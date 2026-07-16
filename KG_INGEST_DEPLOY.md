@@ -75,6 +75,26 @@ Built a proper paper-to-paper similarity layer:
   - kg-paper-similar: daily 04:41, rebuilds vector SIMILAR over the 768 corpus
 - VERIFIED: 68 papers in 768-space, 680 vector SIMILAR edges, RELATED_CONCEPT untouched.
 
+## FOLLOW-UP IMPROVEMENTS (2026-07-16, same session)
+After "go for it", accelerated + hardened the stack:
+- Ran a 2000-paper immediate 768-backfill batch → 2,068 papers now in 768-space.
+- Rebuilt SIMILAR over the 2068 corpus → 20,720 vector SIMILAR edges (avg 10.02 deg).
+  The 6h cron (kg-paper768-backfill) keeps growing coverage to ~61K over ~2 weeks.
+- curious_agent.py improved:
+  * Now reports papers_768 (768-vec coverage) + similar_edges in the digest.
+  * Added "Most-connected papers" insight (top paper hubs by SIMILAR degree) — the
+    actual "papers like this" surfacing you asked for.
+- signal_kg_bridge.py hardened:
+  * Added ensure_constraints() → NODE KEY (source,ts) on SignalMessage → idempotent
+    across re-runs (no duplicate message nodes if signal-cli re-sends envelopes).
+  * ABOUT edges now method-tagged ('keyword'). Semantic ABOUT via vector is
+    INTENTIONALLY OMITTED: Concepts are 384-dim (all-MiniLM, concept_embedding_index)
+    but SignalMessages are 768-dim (nomic) — different spaces, not comparable.
+    Keyword ABOUT is correct + sufficient; semantic needs 384-dim message embeddings
+    (future improvement: embed messages in 384-dim OR add 768-dim Concept embedding+index).
+  * SIGNAL_ACCOUNT now read from env (was hardcoded None).
+- All 5 scripts syntax-validated.
+
 ## NOTES / GOTCHAS
 - Signal bridge is NON-DESTRUCTIVE: it only reads envelopes; messages are stored in
   Neo4j before any cursor advance. It does NOT delete from signal-cli.
