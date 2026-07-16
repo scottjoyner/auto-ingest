@@ -118,7 +118,23 @@ Closed real gaps found in an orphan/coverage audit:
   is a separate task (see memory: trading subgraph orphaned in neo4j).
 - All 7 scripts syntax-validated.
 
-## ENHANCEMENT ROUND 3 (2026-07-16, "idle harvest + life timeline")
+## ENHANCEMENT ROUND 4 (2026-07-16, "is paper ingestion still alive?")
+Found: `kg-arxiv-ingest` cron was ERRORING (never passed a query arg -> argparse
+failed). The 70K Paper nodes are a LEGACY bulk load (no ingested_at/created_at);
+the incremental bridge (arxiv_kg_bridge.py) was not actually scheduled to run daily.
+FIXES:
+- Created `arxiv_topics.txt`: 25 Scott research topics (agent, reasoning, llm, rl,
+  rag, prompting, diffusion, multimodal, speech, math, code, GNN...) culled from
+  the Concept usage graph. This is the daily feed.
+- Fixed arxiv_kg_bridge.py: (1) `--from-file` now skips `#` comment + blank lines
+  (was querying comment headers); (2) added 429 retry/backoff in fetch_arxiv
+  (arXiv rate-limits); (3) 5s politeness delay between queries. Verified: ingests
+  cleanly, 0 comment fetches, recovers from 429.
+- Updated `kg-arxiv-ingest` cron (daily 03:37) to run `--from-file arxiv_topics.txt
+  --max 5` -> now a real daily growth engine. Paper total climbing (70,570 -> 71,060,
+  ingested_at count 13 -> 27 as bridge runs).
+
+## NOTES / GOTCHAS
 - LifeTimeline harvest (NEW): `scripts/life_timeline_harvest.py` stitches Scott's
   activity into one `(:LifeEvent {date})` node per calendar day (85 days,
   2025-09-25..2026-06-16). Each has summary_count, utterance_count, dominant_place

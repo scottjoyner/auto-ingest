@@ -1,0 +1,39 @@
+# arXiv daily ingestion topics for Scott's knowledge graph.
+# Each line is one search_query passed to arxiv_kg_bridge.py --from-file.
+# Curated from the Concept graph usage (agent, reasoning, llm, rl, rag, prompting,
+# diffusion, multi-agent, rlhf, multimodal, alignment, ...) — Scott's actual research
+# interests. Edit freely; the bridge ingests recent papers per topic daily and is
+# idempotent (cursor file tracks seen arxiv_ids).
+
+# --- core LLM / agent research ---
+large language model reasoning
+agentic AI planning
+multi-agent collaboration
+reinforcement learning from human feedback
+reward modeling language models
+tool use function calling agents
+retrieval augmented generation
+prompt engineering optimization
+LLM alignment interpretability
+
+# --- architectures / training ---
+transformer architecture attention
+mixture of experts routing
+rotary position embedding rope
+neural architecture search
+model pretraining scaling
+tokenization subword
+
+# --- generative / multimodal ---
+diffusion models image generation
+vision language model
+denoising diffusion
+multimodal instruction tuning
+text to speech synthesis
+speech recognition whisper
+
+# --- math / code ---
+mathematical reasoning LLM
+code generation language model
+graph neural network
+self-supervised learning

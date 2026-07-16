@@ -22,8 +22,10 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 import urllib.request
 import urllib.parse
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -58,11 +60,25 @@ def fetch_arxiv(query: str, max_results: int = 10):
         "sortOrder": "descending",
     })
     url = f"https://export.arxiv.org/api/query?{q}"
-    try:
-        with urllib.request.urlopen(url, timeout=30) as r:
-            xml = r.read().decode()
-    except Exception as e:  # noqa: BLE001
-        log("arxiv fetch failed:", e)
+    # arXiv rate-limits (~1 req / 3s). Retry on 429 with backoff.
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                xml = r.read().decode()
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                wait = 5 * (attempt + 1)
+                log(f"arxiv 429 (rate limit) — backing off {wait}s")
+                time.sleep(wait)
+                continue
+            log("arxiv fetch failed:", e)
+            return []
+        except Exception as e:  # noqa: BLE001
+            log("arxiv fetch failed:", e)
+            return []
+    else:
+        log("arxiv fetch failed: exhausted retries on 429")
         return []
     papers = []
     try:
@@ -236,7 +252,8 @@ def main():
 
     queries = []
     if args.from_file:
-        queries = [l.strip() for l in open(args.from_file) if l.strip()]
+        queries = [l.strip() for l in open(args.from_file)
+                   if l.strip() and not l.strip().startswith("#")]
     elif args.query:
         queries = [args.query]
     if not queries:
@@ -244,7 +261,9 @@ def main():
         return
 
     all_papers = []
-    for q in queries:
+    for i, q in enumerate(queries):
+        if i > 0:
+            time.sleep(5)  # arXiv politeness: avoid 429 burst limits
         log("fetching:", q)
         all_papers += fetch_arxiv(q, args.max)
     # dedupe by arxiv_id
