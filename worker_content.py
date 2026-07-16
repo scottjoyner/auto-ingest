@@ -23,9 +23,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Set
 
-COMPRESSED_ROOT = os.environ.get(
-    "COMPRESSED_ROOT", "/media/scott/NAS5/fileserver/dashcam/compressed"
-)
+from auto_ingest_config import get_fileserver_path
+
+COMPRESSED_ROOT = os.environ.get("COMPRESSED_ROOT") or get_fileserver_path("dashcam/compressed")
 OUT_ROOT = os.environ.get("TIKTOK_OUT_ROOT", "/media/scott/SSD_4TB/tiktok_shorts")
 MUSIC = os.environ.get("CONTENT_MUSIC", "")  # optional background track
 

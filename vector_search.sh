@@ -2,7 +2,7 @@
 
 # Path setup
 PYTHON_EXEC="/home/deathstar/git/video-automation/.venv/bin/python"
-SCRIPT_PATH="/home/deathstar/git/video-automation/ingest_transcriptions.py"
+SCRIPT_PATH="/home/deathstar/git/video-automation/auto_ingest/ingest/transcripts.py"
 
 # Prompt for search query
 read -p "🔍 Enter search query (default: none): " SEARCH

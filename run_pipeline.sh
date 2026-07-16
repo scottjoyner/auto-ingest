@@ -12,18 +12,19 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
-export NEO4J_URI="${NEO4J_URI:-bolt://localhost:7687}"
-export NEO4J_USER="${NEO4J_USER:-neo4j}"
-export NEO4J_PASSWORD="${NEO4J_PASSWORD:-knowledge_graph_2026}"
+export NEO4J_URI="${NEO4J_URI:-$(python3 -c 'import auto_ingest_config as c; print(c.get_neo4j_config()["uri"])')}"
+export NEO4J_USER="${NEO4J_USER:-$(python3 -c 'import auto_ingest_config as c; print(c.get_neo4j_config()["user"])')}"
+export NEO4J_PASSWORD="${NEO4J_PASSWORD:-$(python3 -c 'import auto_ingest_config as c; print(c.get_neo4j_config()["password"])')}"
 export NEO4J_DB="${NEO4J_DB:-neo4j}"
 
+FILESERVER_ROOT="${FILESERVER_ROOT:-$(python3 -c 'import auto_ingest_config as c; print(c.get_fileserver_root())')}"
 OUT_ROOT="${OUT_ROOT:-/media/scott/SSD_4TB/tiktok_shorts}"
 CLIP="${1:-}"
 HOOK="${2:-}"
 MUSIC="${MUSIC:-}"
 
 if [ -z "$CLIP" ]; then
-  CLIP=$(find /media/scott/SSD_4TB/fileserver/dashcam -maxdepth 4 -iname "*_FR.MP4" \
+  CLIP=$(find "$FILESERVER_ROOT/dashcam" -maxdepth 4 -iname "*_FR.MP4" \
           -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
   if [ -z "$CLIP" ]; then
     echo "ERROR: no clip found and none provided." >&2

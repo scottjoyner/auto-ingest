@@ -15,3 +15,12 @@ emb_cache.sqlite
 audio_index.json
 audio_path_cache.json
 linker_state.json
+
+# linker logs
+linker_*.log
+
+# python caches (recursive)
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd

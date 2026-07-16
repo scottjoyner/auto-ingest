@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from auto_ingest_config import get_fileserver_path
+from auto_ingest_config import get_fileserver_path, get_neo4j_config
 """
 Backfill Segment.speaker_* and SPOKEN_BY edges from diarization RTTM.
 
@@ -267,10 +267,11 @@ def reconcile_once(sess,
 
 # ---------- CLI ----------
 def main():
+    _NEO4J_CFG = get_neo4j_config()
     ap = argparse.ArgumentParser(description="Backfill Segment speakers from t.source_rttm, with optional discovery.")
-    ap.add_argument("--neo4j-uri", default=os.getenv("NEO4J_URI", "bolt://localhost:7687"))
-    ap.add_argument("--neo4j-user", default=os.getenv("NEO4J_USER", "neo4j"))
-    ap.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", "password"))
+    ap.add_argument("--neo4j-uri", default=os.getenv("NEO4J_URI", _NEO4J_CFG["uri"]))
+    ap.add_argument("--neo4j-user", default=os.getenv("NEO4J_USER", _NEO4J_CFG["user"]))
+    ap.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", _NEO4J_CFG["password"]))
     ap.add_argument("--db", default=os.getenv("NEO4J_DB", "neo4j"))
 
     ap.add_argument("--batch", type=int, default=25, help="Max Transcriptions per fetch")

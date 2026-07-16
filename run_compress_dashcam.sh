@@ -10,13 +10,15 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
-export NEO4J_URI="${NEO4J_URI:-bolt://localhost:7687}"
-export NEO4J_USER="${NEO4J_USER:-neo4j}"
-export NEO4J_PASSWORD="${NEO4J_PASSWORD:-knowledge_graph_2026}"
+export NEO4J_URI="${NEO4J_URI:-$(python3 -c 'import auto_ingest_config as c; print(c.get_neo4j_config()["uri"])')}"
+export NEO4J_USER="${NEO4J_USER:-$(python3 -c 'import auto_ingest_config as c; print(c.get_neo4j_config()["user"])')}"
+export NEO4J_PASSWORD="${NEO4J_PASSWORD:-$(python3 -c 'import auto_ingest_config as c; print(c.get_neo4j_config()["password"])')}"
 export NEO4J_DB="${NEO4J_DB:-neo4j}"
 
-INPUT_ROOT="${INPUT_ROOT:-/media/scott/SSD_4TB/fileserver/dashcam}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/media/scott/NAS5/fileserver/dashcam/compressed}"
+FILESERVER_ROOT="${FILESERVER_ROOT:-$(python3 -c 'import auto_ingest_config as c; print(c.get_fileserver_root())')}"
+COMPRESSED_ROOT="${COMPRESSED_ROOT:-$FILESERVER_ROOT/dashcam/compressed}"
+INPUT_ROOT="${INPUT_ROOT:-$FILESERVER_ROOT/dashcam}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$COMPRESSED_ROOT}"
 WORKERS="${WORKERS:-$(nproc)}"
 CRF="${CRF:-26}"
 LIMIT="${LIMIT:-0}"   # 0 = no limit (process everything)

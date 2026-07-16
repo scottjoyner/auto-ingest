@@ -45,7 +45,7 @@ echo "▶️ Speaker diarization (dashcam videos + standalone audio)"
 
 # OLD 
 # echo "▶️ Ingest (transcripts + RTTM → Neo4j)"
-# ./.venv/bin/python3 ingest_transcriptions.py || echo "❌ Failed: ingest_transcriptions.py"
+# ./.venv/bin/python3 auto_ingest/ingest/transcripts.py || echo "❌ Failed: auto_ingest/ingest/transcripts.py"
 
 echo "▶️ Ingest (transcripts + RTTM → Neo4j)"
 # ./.venv/bin/python3 ingest_transcriptsv5.py \
@@ -144,13 +144,13 @@ python3 link_global_speakers.py \
 #   --min-utt 0.7 \
 #   --max-snips 8 \
 #   --pad 0.25 \
-#   --thresh 0.74 2> /dev/null || echo "❌ Failed: dashcam_yolo_embeddings.py"
+#   --thresh 0.74 2> /dev/null || echo "❌ Failed: auto_ingest/dashcam/yolo_embeddings.py"
 
 # echo "▶️ YOLO heatmaps"
 # ./.venv/bin/python3 yolo_heatmap_iterator.py || echo "❌ Failed: yolo_heatmap_iterator.py"
 
 echo "▶️ Dashcam YOLO embeddings"
-./.venv/bin/python3 dashcam_yolo_embeddings.py \
+./.venv/bin/python3 auto_ingest/dashcam/yolo_embeddings.py \
   --resume \
   --grid 16x9 \
   --pyramid \
@@ -159,7 +159,7 @@ echo "▶️ Dashcam YOLO embeddings"
   --neo4j-uri bolt://localhost:7687 \
   --neo4j-user neo4j \
   --neo4j-pass knowledge_graph_2026 \
-  --win-mins 10 2> /dev/null || echo "❌ Failed: dashcam_yolo_embeddings.py"
+  --win-mins 10 2> /dev/null || echo "❌ Failed: auto_ingest/dashcam/yolo_embeddings.py"
 
 echo "▶️ Patch Missing Locations in YOLO Embeddings"
 ./.venv/bin/python3 patch_missing_locations.py \

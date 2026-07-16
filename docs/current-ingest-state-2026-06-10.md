@@ -243,7 +243,7 @@ Do not blindly run a huge FORCE ingest. The safe sequence is now:
 4. QA each day with `scripts/qa_audio_day.sh YYYY-MM-DD` before moving to the next day.
    - Check Transcription/Segment/Utterance counts.
    - Critical audio vector check: `segments_missing_embedding` and `utterances_missing_embedding` should be zero or explained.
-5. Dashcam stays separate. Run `dashcam_yolo_embeddings.py` later for `DashcamClip`, `DashcamEmbedding`, and `Frame` coverage; do not mix it into the audio embedding backfill.
+5. Dashcam stays separate. Run `auto_ingest/dashcam/yolo_embeddings.py` later for `DashcamClip`, `DashcamEmbedding`, and `Frame` coverage; do not mix it into the audio embedding backfill.
 6. Backfill the PhoneLog gap separately from raw phone-log/SMS sources; the current media ingest loop does not appear to be the PhoneLog importer.
 7. After any large backfill batch, take a fresh Neo4j backup to NAS1/NAS2.
 

@@ -1,9 +1,9 @@
-# v2 includes the additional system with locations from linxup if they exist
 #!/usr/bin/env python3
 import os, re, csv, math, argparse, logging, datetime
 from typing import Dict, List, Tuple, Optional
 import numpy as np
 from neo4j import GraphDatabase
+from auto_ingest_config import get_neo4j_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -467,9 +467,10 @@ def recompute_minute_for_key(sess, *, key: str, view: str, dry_run: bool):
 # -----------------------
 def main():
     ap = argparse.ArgumentParser(description="Patch DashcamEmbedding seconds missing location using metadata + LocationEvent (±1h) + PhoneLog")
-    ap.add_argument("--neo4j-uri", default="bolt://localhost:7687")
-    ap.add_argument("--neo4j-user", default="neo4j")
-    ap.add_argument("--neo4j-pass", default="password")
+    _NEO4J_CFG = get_neo4j_config()
+    ap.add_argument("--neo4j-uri", default=os.getenv("NEO4J_URI", _NEO4J_CFG["uri"]))
+    ap.add_argument("--neo4j-user", default=os.getenv("NEO4J_USER", _NEO4J_CFG["user"]))
+    ap.add_argument("--neo4j-pass", default=os.getenv("NEO4J_PASSWORD", _NEO4J_CFG["password"]))
     ap.add_argument("--key-limit", type=int, default=1000, help="Max (key,view) groups to process")
     ap.add_argument("--key-prefix", default=None, help="Optional key prefix filter, e.g. 2025_0405")
     ap.add_argument("--win-mins", type=int, default=10, help="± minutes window for nearest event search")

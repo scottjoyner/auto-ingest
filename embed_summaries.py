@@ -2,10 +2,16 @@
 """Embed summaries in chunks using Neo4j APOC batch writes."""
 import sys, os
 sys.path.insert(0, '/home/scott/git/auto-ingest')
-os.environ['NEO4J_PASSWORD'] = 'knowledge_graph_2026'
+os.environ.setdefault('NEO4J_PASSWORD', os.environ.get('NEO4J_PASSWORD', ''))
 
 from neo4j import GraphDatabase
-d = GraphDatabase.driver('bolt://localhost:7687', auth=('neo4j','knowledge_graph_2026'))
+from auto_ingest_config import get_neo4j_config
+
+_NEO4J_CFG = get_neo4j_config()
+_NEO4J_URI = os.environ.get("NEO4J_URI", _NEO4J_CFG["uri"])
+_NEO4J_USER = os.environ.get("NEO4J_USER", _NEO4J_CFG["user"])
+_NEO4J_PASS = os.environ.get("NEO4J_PASSWORD", _NEO4J_CFG["password"])
+d = GraphDatabase.driver(_NEO4J_URI, auth=(_NEO4J_USER, _NEO4J_PASS))
 
 # Phase 1: Get all summaries needing embeddings, batch them  
 with d.session() as s1:

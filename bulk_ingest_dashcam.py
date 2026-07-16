@@ -12,6 +12,8 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
+from auto_ingest_config import get_fileserver_path, get_neo4j_config
+
 # Configure logging
 LOG_DIR = Path("./logs")
 LOG_DIR.mkdir(exist_ok=True)
@@ -29,10 +31,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-DASHCAM_ROOT = os.environ.get("DASHCAM_ROOT", "/media/scott/SSD_4TB/fileserver/dashcam")
-NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://host.docker.internal:7687")
-NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
-NEO4J_PASS = os.environ.get("NEO4J_PASS", "knowledge_graph_2026")
+_NEO4J_CFG = get_neo4j_config()
+DASHCAM_ROOT = os.environ.get("DASHCAM_ROOT", get_fileserver_path("dashcam"))
+NEO4J_URI = os.environ.get("NEO4J_URI", _NEO4J_CFG["uri"])
+NEO4J_USER = os.environ.get("NEO4J_USER", _NEO4J_CFG["user"])
+NEO4J_PASS = os.environ.get("NEO4J_PASSWORD", _NEO4J_CFG["password"])
 
 # Years to process (can be overridden via env var)
 YEARS_TO_PROCESS = os.environ.get("YEARS_TO_PROCESS", "2023 2024 2025 2026").split()
@@ -106,7 +109,7 @@ def process_day(year: str, month: str, day: str, dry_run: bool = False) -> bool:
         "-v", f"{DASHCAM_ROOT}:/dashcam",
         "ingest-service",
         "bash", "-c",
-        f"python /app/dashcam_yolo_embeddings.py "
+        f"python /app/auto_ingest/dashcam/yolo_embeddings.py "
         f"--bases /dashcam/{year}/{month}/{day} "
         f"--neo4j-uri {NEO4J_URI} "
         f"--neo4j-user {NEO4J_USER} "

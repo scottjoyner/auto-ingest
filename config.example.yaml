@@ -1,25 +1,81 @@
-camera_id: feeder-01
-stream_url: rtsp://user:pass@camera/stream1
-storage_root: /mnt/ssd/birdcam
-model_name_or_path: yolov8n.pt
-detection_class: bird
-confidence_threshold: 0.4
-inference_interval_ms: 400
-pre_roll_seconds: 3
-post_roll_seconds: 3
-event_merge_seconds: 8
-cooldown_seconds: 10
-detection_persistence_frames: 2
-sqlite_path: /mnt/ssd/birdcam/birdcam-state.sqlite3
-retention: {max_gb: 20, max_age_days: 30}
-neo4j:
-  enabled: true
-  uri: ${NEO4J_URI}
-  username: ${NEO4J_USERNAME}
-  password: ${NEO4J_PASSWORD}
-  database: neo4j
-  create_schema: true
-  batch_size: 100
-  retry_attempts: 5
-  retry_backoff_seconds: 2
-  use_outbox_on_failure: true
+# auto-ingest configuration (EXAMPLE)
+# Copy to config.yaml and customize per machine.
+# Passwords/secrets are referenced via ${ENV_VAR} placeholders, not hardcoded.
+
+# Nextcloud store (true iPhone images/videos/audio). Separate store, only
+# mounted on some machines. Override with NEXTCLOUD_ROOT env.
+nextcloud_root: /media/scott/SSD_4TB/nextcloud
+
+# Nextcloud WebDAV connection (used by ingest_media.py / run_worker.sh).
+# Password is pulled from the NEXTCLOUD_PASS env (do not hardcode secrets here).
+nextcloud:
+  webdav_url: "https://x1-370.tailcb8954.ts.net/nextcloud"
+  user: admin
+  pass_env: NEXTCLOUD_PASS
+
+machine_paths:
+  # x1-370 (home Tailscale node — Neo4j server lives here)
+  x1-370:
+    fileserver_root: /media/scott/SSD_4TB/fileserver
+    neo4j_uri: bolt://100.64.43.123:7687
+    neo4j_user: neo4j
+    neo4j_password: ${NEO4J_PASSWORD}
+    hostname_pattern: x1-370
+    hot_ssd_root: /media/scott/SSD_4TB/audio
+    nas_mirror_root: /media/scott/NAS4/fileserver
+
+  # Any device on the LAN — uses shared SSD_4TB and NAS4 mounts
+  # Mount points:
+  #   SSD_4TB: /media/scott/SSD_4TB (NFS export from x1-370)
+  #   NAS4:    /media/scott/NAS4 (CIFS //100.64.43.123/nas4)
+  any:
+    fileserver_root: /media/scott/SSD_4TB/fileserver
+    neo4j_uri: bolt://100.64.43.123:7687
+    neo4j_user: neo4j
+    neo4j_password: ${NEO4J_PASSWORD}
+    hostname_pattern: ""
+    hot_ssd_root: /media/scott/SSD_4TB/audio
+    nas_mirror_root: /media/scott/NAS4/fileserver
+
+  # deathstar-XPS-8920 — points to NAS4 via CIFS mount
+  deathstar:
+    fileserver_root: /media/scott/NAS4/fileserver
+    neo4j_uri: bolt://100.64.43.123:7687
+    neo4j_user: neo4j
+    neo4j_password: ${NEO4J_PASSWORD}
+    hostname_pattern: deathstar
+    hot_ssd_root: /mnt/8TB_2025
+    nas_mirror_root: /media/scott/NAS4/fileserver
+
+# Knowledge Map System configuration
+knowledge_map:
+  # Active working vault used by Hermes and knowledge_map.
+  central_vault_path: /home/scott/knowledge
+  # Local working copy for sync tools and scripts.
+  local_vault_path: /home/scott/nas-knowledge
+  # Durable NAS mirror for the vault and derived artifacts.
+  mirror_vault_path: /media/scott/NAS4/fileserver/shared-knowledge
+  git:
+    enabled: true
+    repo_url: "git@github.com:scottjoyner/knowledge-vault.git"
+    branch: "main"
+    auto_commit: true
+  sync:
+    neo4j_to_vault:
+      enabled: true
+      frequency: "30m"
+      node_types:
+        - Device
+        - Service
+        - Project
+        - Infrastructure
+        - Mapping
+      confidence_threshold: 0.7
+      max_nodes_per_sync: 100
+    vault_to_neo4j:
+      enabled: true
+      frequency: "1h"
+      scan_modified_only: true
+
+# Auto-detection: the script will check the hostname and pick the matching config.
+# If no match, it falls back to the first entry in machine_paths.

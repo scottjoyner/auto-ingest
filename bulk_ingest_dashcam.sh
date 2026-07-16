@@ -47,7 +47,7 @@ process_day() {
     
     # Run the ingest script for this day
     docker compose run --rm --no-deps -v /media/scott/NAS2/fileserver/dashcam:/dashcam ingest-service \
-        bash -lc "python /app/dashcam_yolo_embeddings.py \\
+        bash -lc "python /app/auto_ingest/dashcam/yolo_embeddings.py \\
             --bases /dashcam/${year}/${month}/${day} \\
             --neo4j-uri ${NEO4J_URI} \\
             --neo4j-user ${NEO4J_USER} \\
