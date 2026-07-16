@@ -134,6 +134,19 @@ FIXES:
   --max 5` -> now a real daily growth engine. Paper total climbing (70,570 -> 71,060,
   ingested_at count 13 -> 27 as bridge runs).
 
+## ENHANCEMENT ROUND 5 (2026-07-16, "anything else to improve?")
+- Scheduled the MISSING Signal bridge cron `kg-signal-bridge` (daily 04:07) ->
+  Scott's Signal chats now flow into KG (was 0 SignalMessage; bridge existed but
+  no cron). Fixed stale docstring (runs on xwing, not x1-370).
+- Big 768-backfill batch: 10K papers embedded in one run (papers_768 7,068 ->
+  17,082). 6h cron continues the remaining ~54K automatically.
+- OOM FIX: the SIMILAR + DISCUSSES rebuilds did ONE big DELETE of all vector
+  edges, exceeding Neo4j's 2.8 GiB per-tx limit (MemoryPoolOutOfMemoryError).
+  Rewrote backfill_paper_similar.py + bridge_paper_concept_768.py to drop edges
+  in batches (--drop-batch) and stream papers in chunks (--batch). Verified 0 OOM.
+  This also makes the daily kg-paper-similar (04:41) / kg-paper-concept-bridge
+  (04:51) crons safe over the full corpus.
+
 ## NOTES / GOTCHAS
 - LifeTimeline harvest (NEW): `scripts/life_timeline_harvest.py` stitches Scott's
   activity into one `(:LifeEvent {date})` node per calendar day (85 days,
