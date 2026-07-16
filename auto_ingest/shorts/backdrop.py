@@ -41,10 +41,9 @@ def _fr_path_for_key(clip_key: str, root: Path) -> Optional[Path]:
         cand = root / year / month / day / f"{key}.MP4"
         if cand.exists():
             return cand
-    # Fallback: glob under the root for the key.
-    matches = list(root.rglob(f"{key}.MP4"))
-    if matches:
-        return matches[0]
+    # NOTE: no recursive rglob fallback here -- scanning the whole dashcam
+    # tree per clip (millions of files, often on a saturated NAS mount) is a
+    # pathological hang. Callers that need a missing clip resolve it lazily.
     return None
 
 
