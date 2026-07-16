@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """signal_kg_bridge.py — ingest new Signal messages into the Scott knowledge graph.
 
-Runs on x1-370 (where signal-cli is registered + the HTTP/RPC daemon lives).
+Runs on xwing (signal-cli 0.13.24 is installed there; bridge reads envelopes via `signal-cli -o json receive`).
 Writes to Neo4j (bolt://100.64.43.123:7687, db=neo4j) which is the same graph
 the enrichment pipeline uses. Idempotent: messages keyed by envelope timestamp+source.
 
