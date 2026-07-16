@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -47,7 +47,7 @@ class GraphOutbox:
             "INSERT INTO graph_outbox(op_type, correlation_id, payload, created_at, last_error) "
             "VALUES(?,?,?,?,?)",
             (op_type, correlation_id, json.dumps(payload),
-             datetime.utcnow().isoformat(), last_error),
+             datetime.now(timezone.utc).isoformat(), last_error),
         )
         self.conn.commit()
         return cur.lastrowid

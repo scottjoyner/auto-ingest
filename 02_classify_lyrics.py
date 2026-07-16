@@ -255,6 +255,10 @@ def main():
                 "review_needed": bool(needs_review)
             }
             sess.execute_write(_write_back, u.uid, payload)
+            # Flag overlapping Segment nodes as non-speech so the global linker
+            # excludes them from ECAPA/pyannote embedding + linking.
+            if is_lyrics or overlap >= 0.5:
+                sess.execute_write(_mark_overlapping_segments, u.uid, "music_or_media")
 
     driver.close()
 

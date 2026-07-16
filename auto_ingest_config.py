@@ -191,6 +191,37 @@ def get_nextcloud_webdav():
     return (url.rstrip("/"), user, password)
 
 
+def build_artifact_ref(path: str, storage_root: str = "local-ssd",
+                       retention_class: str = "keep",
+                       tailscale_host_hint: str | None = None) -> dict:
+    """Build a UNIFICATION §12.3 artifact provenance reference for a sidecar/artifact.
+
+    Returns keys: storage_root, relative_path, host_path, container_path,
+    tailscale_host_hint, sha256 (None; caller fills), retention_class.
+    Dependency-light: only uses stdlib + this module's own path resolvers.
+    """
+    p = os.path.abspath(os.path.expanduser(str(path)))
+    rel = p
+    container = None
+    # Relative to known roots if under them.
+    for root in (get_fileserver_root(), get_storage_layout()["hot_root"],
+                 get_storage_layout()["cold_root"]):
+        rp = os.path.relpath(p, root)
+        if not rp.startswith(".."):
+            rel = rp
+            container = "/nas/" + os.path.relpath(p, "/").lstrip("/")
+            break
+    return {
+        "storage_root": storage_root,
+        "relative_path": rel,
+        "host_path": p,
+        "container_path": container,
+        "tailscale_host_hint": tailscale_host_hint,
+        "sha256": None,
+        "retention_class": retention_class,
+    }
+
+
 def get_fileserver_path(*parts):
     """Get a full fileserver path for the given sub-paths."""
     root = get_fileserver_root()

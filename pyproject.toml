@@ -3,19 +3,77 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "content-os"
+name = "auto-ingest"
 version = "0.1.0"
-description = "Local-first, approval-gated content operating system CLI"
+description = "Unified auto-ingest pipeline: transcript/media/dashcam ingestion, speaker linking, content summaries"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+# Minimal runtime deps shared by the lightweight, CI-testable surface. The heavy
+# ML stack (torch, transformers, ultralytics, ...) is split into optional
+# extras below (W-51) so CI / packaging does not pull CUDA/ML by default.
+dependencies = [
+    "pydantic>=2.6",
+    "PyYAML>=6.0",
+    "neo4j>=5.24",
+    "requests>=2.32",
+]
 
 [project.optional-dependencies]
-full = ["pydantic>=2.6", "PyYAML>=6.0"]
-dev = ["pytest>=8.0"]
+# API / job trigger server (deploy/job_trigger_api.py)
+api = ["Flask>=3.0", "pydantic>=2.6", "PyYAML>=6.0"]
+# Audio / transcript ingestion (auto_ingest.ingest, diarize)
+ingest = [
+    "torch==2.6.0+cpu",
+    "torchaudio==2.6.0+cpu",
+    "transformers>=4.49",
+    "sentence-transformers>=2.0",
+    "speechbrain>=1.0",
+    "faster-whisper>=1.2",
+    "pyannote.audio>=3.1",
+    "faiss-cpu>=1.12",
+    "librosa>=0.11",
+    "soundfile>=0.13",
+]
+# Dashcam (auto_ingest.dashcam): YOLO + embeddings
+dashcam = [
+    "torch==2.6.0+cpu",
+    "torchvision==0.21.0+cpu",
+    "ultralytics>=8.3",
+    "opencv-python>=4.10",
+    "pandas>=2.2",
+    "moviepy>=1.0",
+]
+# Content summaries (auto_ingest.content): Ollama client
+content = ["requests>=2.32"]
+# Dev / test
+dev = ["pytest>=8.0", "pytest-cov>=6.0", "ruff>=0.5"]
 
 [project.scripts]
 content-os = "content_os.cli:main"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "auto_ingest"]
+# Keep the suite green without the ML stack: only the lightweight, dependency-free
+# modules under auto_ingest (outbox, events, _config) are collected by default.
+# ML-heavy subpackages (ingest/diarize/dashcam/content) are excluded — they require
+# torch/transformers/ultralytics at import time.
+addopts = "--ignore=auto_ingest/ingest --ignore=auto_ingest/diarize --ignore=auto_ingest/dashcam --ignore=auto_ingest/content"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# The legacy flat scripts are excluded from lint; focus lint on the new package.
+exclude = [
+    ".git",
+    "__pycache__",
+    "archive",
+    "quality_api_pyc_only",
+    "auto_ingest/ingest",
+    "auto_ingest/diarize",
+    "auto_ingest/dashcam",
+    "auto_ingest/content",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501", "F403", "F405"]
