@@ -16,6 +16,12 @@ Global speaker linking with:
   - FAISS prefilter for local clustering (optional)
   - **NEW: Neo4j→FAISS Global prefilter** — assign locals directly to existing GlobalSpeakers before local clustering
 
+OWNERSHIP / AUTH (W-50): Sophia owns voice AUTH. auto-ingest only LINKS local
+Speaker nodes to global identities (GlobalSpeaker). It MUST NOT make any
+authentication decision (authenticated_scott / unknown_speaker / rejected). The
+linking score here is a similarity heuristic, not an auth verdict. See LLD
+§3.4 / HLD §4 "Identity / auth".
+
 Requires: neo4j, torch, torchaudio, soundfile, numpy, speechbrain (or pyannote)
 Optional: faiss (faiss-cpu)
 """
@@ -612,6 +618,7 @@ def fetch_speakers_and_segments(drv, min_seg_sec: float, min_prop: float,
                 MATCH (sp)<-[r:SPOKEN_BY]-(s:Segment)<-[:HAS_SEGMENT]-(t:Transcription)
                 WHERE coalesce(s.end,0) - coalesce(s.start,0) >= $min_seg
                   AND coalesce(r.proportion,1.0) >= $min_prop
+                  {nonspeech_pred}
                 RETURN t.key AS file_key, s.start AS start, s.end AS end,
                        s.text AS text, coalesce(r.proportion,1.0) AS prop
                 ORDER BY prop DESC, (coalesce(s.end,0) - coalesce(s.start,0)) DESC
@@ -639,6 +646,9 @@ def fetch_speakers_and_segments(drv, min_seg_sec: float, min_prop: float,
                     after=after, batch=speaker_batch,
                     excl=list(exclude_sids) if exclude_sids else [],
                 ).data()
+                # NOTE: this cursor query only advances the speaker cursor; the
+                # non-speech gate is applied per-Segment inside the CALL subquery
+                # above, so no segment-level predicate is needed here.
                 if not nxt:
                     break
                 after = nxt[-1]["sid"]
@@ -1380,6 +1390,7 @@ def main():
         skip_already_linked=args.skip_already_linked,
         include_no_audio=args.include_no_audio,
         exclude_sids=done or None,
+        exclude_non_speech=args.exclude_non_speech,
     )
     logging.info(f"Found {len(speakers)} speakers with qualifying items.")
 

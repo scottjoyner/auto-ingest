@@ -15,6 +15,9 @@ Pipeline:
 Notes:
   - Requires: neo4j, torchaudio, soundfile, numpy, torch, speechbrain OR pyannote.audio
   - Audio discovery is heuristic; adjust AUDIO_BASE/EXTS if needed.
+  - OWNERSHIP / AUTH (W-50): Sophia owns voice AUTH. This script only LINKS
+    local Speaker nodes to global identities; it never makes an authentication
+    decision. The SAME_PERSON score is a similarity heuristic, not an auth verdict.
 """
 
 import os, sys, re, math, json, random, logging, hashlib

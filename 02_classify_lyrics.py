@@ -74,6 +74,23 @@ def _write_back(tx, uid: str, payload: Dict[str, Any]):
            music_overlap=payload["music_overlap"],
            review_needed=payload["review_needed"])
 
+# UNIFICATION §3.2: propagate a non-speech label onto the Segment nodes that the
+# linker embeds. The linker (auto_ingest.diarize.link_global_speakers) gates on
+# Segment.segment_type, so we map any flagged Utterance -> overlapping Segment on
+# the same Transcription and tag it music_or_media. This is the only new property
+# we add; it requires no schema change and piggybacks on the flags above.
+def _mark_overlapping_segments(tx, uid: str, segment_type: str):
+    q = """
+    MATCH (t:Transcription)-[:HAS_UTTERANCE]->(u:Utterance {id:$uid})
+    MATCH (t)-[:HAS_SEGMENT]->(s:Segment)
+    WHERE u.start IS NOT NULL AND u.end IS NOT NULL
+      AND s.start IS NOT NULL AND s.end IS NOT NULL
+      AND coalesce(s.end,0) > coalesce(u.start,0)
+      AND coalesce(u.end,0) > coalesce(s.start,0)
+    SET s.segment_type = $st
+    """
+    tx.run(q, uid=uid, st=segment_type)
+
 # Load all music segments for a given audio_key (from Neo4j or sidecar JSON)
 def _load_segments_from_neo4j(tx, key: str) -> List[Tuple[float,float]]:
     q = """
