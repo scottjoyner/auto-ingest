@@ -44,7 +44,7 @@ export QA_AUDIO_DAY_QUERY="$QUERY"
 echo
 echo "==== Neo4j audio embedding coverage for key prefix $KEY_PREFIX ===="
 if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -qx neo4j; then
-  docker exec -i neo4j cypher-shell -u "${NEO4J_USER:-neo4j}" -p "${NEO4J_PASSWORD:-knowledge_graph_2026}" -d "${NEO4J_DB:-neo4j}" "$QUERY"
+  docker exec -i neo4j cypher-shell -u "${NEO4J_USER:-neo4j}" -p "${NEO4J_PASSWORD:-${NEO4J_PASSWORD_DEFAULT:-knowledge_graph_2026}}" -d "${NEO4J_DB:-neo4j}" "$QUERY"
 else
   python3 - <<'PY'
 from neo4j import GraphDatabase
@@ -52,7 +52,7 @@ import os
 query = os.environ['QA_AUDIO_DAY_QUERY']
 uri = os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
 user = os.environ.get('NEO4J_USER', 'neo4j')
-pw = os.environ.get('NEO4J_PASSWORD', 'knowledge_graph_2026')
+pw = os.environ.get('NEO4J_PASSWORD') or os.environ.get('NEO4J_PASSWORD_DEFAULT') or 'knowledge_graph_2026'
 db = os.environ.get('NEO4J_DB', 'neo4j')
 with GraphDatabase.driver(uri, auth=(user, pw)) as driver:
     with driver.session(database=db) as session:

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Test Neo4j connection with different passwords."""
+"""Test Neo4j connection with the configured password."""
+import os
+
 from neo4j import GraphDatabase
 
-passwords = [
-    "knowle...2026",
-    "knowledge_graph_2026",
-    "knowledge_graph_2026",
-]
+_default = os.environ.get("NEO4J_PASSWORD") or os.environ.get("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
+passwords = [_default]
 
 for pw in passwords:
     try:

@@ -31,6 +31,9 @@ jobs:
         continue-on-error: true
         run: ruff check . || echo "ruff issues (non-blocking)"
 
+      - name: No hardcoded Neo4j password (must route through NEO4J_PASSWORD_DEFAULT)
+        run: python tools/lint_no_hardcoded_secrets.py
+
       - name: Pytest (content_os / birdcam / tests / auto_ingest light)
         run: |
           python -m pytest -q

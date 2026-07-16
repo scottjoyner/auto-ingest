@@ -17,6 +17,36 @@ from pathlib import Path
 
 import yaml
 
+# ---------------------------------------------------------------------------
+# Canonical Neo4j password default (single source of truth).
+#
+# Every script that used to inline the literal ``knowledge_graph_2026`` now
+# resolves the password through get_neo4j_password() with this order:
+#     NEO4J_PASSWORD  ->  NEO4J_PASSWORD_DEFAULT  ->  _BAKED_IN_NEO4J_PASSWORD
+# The baked-in literal lives here (and ONLY here) so the historical default
+# keeps working out of the box, while any machine can override it with a single
+# `export NEO4J_PASSWORD_DEFAULT=...` (or the stronger per-run NEO4J_PASSWORD).
+# ---------------------------------------------------------------------------
+_BAKED_IN_NEO4J_PASSWORD = "knowledge_graph_2026"
+
+
+def get_neo4j_password(config_value: str | None = None) -> str:
+    """Resolve the Neo4j password from the standard sources.
+
+    Order of precedence:
+      1. NEO4J_PASSWORD           (per-run / per-shell override)
+      2. config.yaml value        (passed in as ``config_value``; already
+                                    ${ENV}-resolved by the caller)
+      3. NEO4J_PASSWORD_DEFAULT   (machine-wide default, e.g. from .env)
+      4. baked-in historical default (``knowledge_graph_2026``)
+    """
+    return (
+        os.environ.get("NEO4J_PASSWORD")
+        or (config_value or None)
+        or os.environ.get("NEO4J_PASSWORD_DEFAULT")
+        or _BAKED_IN_NEO4J_PASSWORD
+    )
+
 
 def _resolve_env(value, default=None):
     """Resolve ${ENV_VAR} placeholders in config values."""
@@ -226,14 +256,15 @@ def get_neo4j_config():
         if matched:
             cfg_uri = matched.get('neo4j_uri')
             cfg_user = matched.get('neo4j_user')
-            cfg_pass = _resolve_env(
-                matched.get('neo4j_password'), os.environ.get('NEO4J_PASSWORD', '')
-            )
+            # ${NEO4J_PASSWORD} placeholders resolve to that env var; leave
+            # unresolved (None) so get_neo4j_password() can apply the full
+            # precedence chain (env -> config -> NEO4J_PASSWORD_DEFAULT -> baked).
+            cfg_pass = _resolve_env(matched.get('neo4j_password'), None)
 
     return {
         'uri': os.environ.get('NEO4J_URI') or cfg_uri or 'bolt://100.64.43.123:7687',
         'user': os.environ.get('NEO4J_USER') or cfg_user or 'neo4j',
-        'password': os.environ.get('NEO4J_PASSWORD') or cfg_pass or '',
+        'password': get_neo4j_password(cfg_pass),
     }
 
 

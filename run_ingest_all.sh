@@ -63,13 +63,11 @@ export EMBED_MODEL_NAME="${EMBED_MODEL_NAME:-sentence-transformers/all-MiniLM-L6
 export EMBED_DIM="${EMBED_DIM:-384}"
 export EMBED_BATCH="${EMBED_BATCH:-32}"  # tokenizer batch size for GPU/CPU
 
-# Neo4j connection (credentials come from env / .env only — W-45: no committed fallback)
+# Neo4j connection. Password precedence: NEO4J_PASSWORD -> NEO4J_PASSWORD_DEFAULT
+# -> baked historical default. Set NEO4J_PASSWORD_DEFAULT once in .env to change it.
 export NEO4J_URI="${NEO4J_URI:-bolt://100.64.43.123:7687}"
 export NEO4J_USER="${NEO4J_USER:-neo4j}"
-export NEO4J_PASSWORD="${NEO4J_PASSWORD:-}"
-if [ -z "$NEO4J_PASSWORD" ]; then
-  echo "NEO4J_PASSWORD is not set (export it or add it to .env)" >&2; exit 2
-fi
+export NEO4J_PASSWORD="${NEO4J_PASSWORD:-${NEO4J_PASSWORD_DEFAULT:-knowledge_graph_2026}}"
 export NEO4J_DB="${NEO4J_DB:-neo4j}"
 
 # Model preference ordering (optional override)

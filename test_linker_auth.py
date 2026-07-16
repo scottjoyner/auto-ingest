@@ -4,8 +4,9 @@ import os, sys
 
 os.environ['NEO4J_URI'] = 'bolt://100.64.43.123:7687'
 os.environ['NEO4J_USER'] = 'neo4j'
-os.environ['NEO4J_PASSWORD'] = '***'  # will be set by env
-os.environ['NEO4J_DB'] = 'knowledge_graph_2026'
+os.environ.setdefault('NEO4J_PASSWORD',
+                      os.environ.get('NEO4J_PASSWORD_DEFAULT', 'knowledge_graph_2026'))
+os.environ.setdefault('NEO4J_DB', 'neo4j')
 
 from neo4j import GraphDatabase
 

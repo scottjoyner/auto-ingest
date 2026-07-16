@@ -88,7 +88,7 @@ export EMBED_DIM="${EMBED_DIM:-384}"
 export EMBED_BATCH="${EMBED_BATCH:-32}"
 export NEO4J_URI="${NEO4J_URI:-bolt://localhost:7687}"
 export NEO4J_USER="${NEO4J_USER:-neo4j}"
-export NEO4J_PASSWORD="${NEO4J_PASSWORD:-knowledge_graph_2026}"
+export NEO4J_PASSWORD="${NEO4J_PASSWORD:-${NEO4J_PASSWORD_DEFAULT:-knowledge_graph_2026}}"
 export NEO4J_DB="${NEO4J_DB:-neo4j}"
 export LOG_LEVEL="${LOG_LEVEL:-INFO}"
 

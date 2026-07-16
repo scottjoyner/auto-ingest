@@ -5,11 +5,12 @@ sys.path.insert(0, '/home/scott/git/auto-ingest')
 
 ENDPOINT = "http://scotts-macbook-air.tailcb8954.ts.net:1234/v1"
 BATCH = 2000
+_NEO4J_PW = os.environ.get("NEO4J_PASSWORD") or os.environ.get("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
 
 def run_cypher(query):
     """Run cypher-shell via docker exec, return parsed rows."""
     result = subprocess.run(['docker', 'exec', '-i', 'neo4j', 
-        'cypher-shell', '--format=plain', '-u', 'neo4j', '-p', 'knowledge_graph_2026'],
+        'cypher-shell', '--format=plain', '-u', 'neo4j', '-p', _NEO4J_PW],
         input=query, capture_output=True, text=True)
     if result.returncode != 0:
         return None
@@ -58,7 +59,7 @@ embedding_arrays = []
 for j, sid in enumerate(all_ids):
     query = "MATCH (s:Summary {{id:'{}'}}) RETURN s.embedding".format(sid.replace("'", "\\'"))
     result = subprocess.run(['docker', 'exec', '-i', 'neo4j', 
-        'cypher-shell', '--format=plain', '-u', 'neo4j', '-p', 'knowledge_graph_2026'],
+        'cypher-shell', '--format=plain', '-u', 'neo4j', '-p', _NEO4J_PW],
         input=query, capture_output=True, text=True)
     
     if result.returncode != 0:

@@ -16,7 +16,7 @@ echo "Logging to: $LOG_FILE" | tee -a "$LOG_FILE"
 DASHCAM_ROOT="${DASHCAM_ROOT:-/media/scott/NAS2/fileserver/dashcam}"
 NEO4J_URI="${NEO4J_URI:-bolt://host.docker.internal:7687}"
 NEO4J_USER="${NEO4J_USER:-neo4j}"
-NEO4J_PASS="${NEO4J_PASS:-knowledge_graph_2026}"
+NEO4J_PASS="${NEO4J_PASS:-${NEO4J_PASSWORD:-${NEO4J_PASSWORD_DEFAULT:-knowledge_graph_2026}}}"
 
 # Years and months to process (can be overridden)
 YEARS_TO_PROCESS="${YEARS_TO_PROCESS:-2023 2024 2025 2026}"

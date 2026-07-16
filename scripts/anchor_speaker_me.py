@@ -19,7 +19,7 @@ from neo4j import GraphDatabase
 
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
 NEO4J_DB = os.getenv("NEO4J_DB", "neo4j")
 SCOTT_UID = os.getenv("SCOTT_USER_ID", "scott")
 ME_LABEL = os.getenv("ME_LABEL", "Scott")

@@ -55,7 +55,7 @@ except Exception:
 
 NEO4J_URI = os.environ.get("NEO4J_URI") or _NC.get("uri") or "bolt://localhost:7687"
 NEO4J_USER = os.environ.get("NEO4J_USER") or _NC.get("user") or "neo4j"
-NEO4J_PASS = os.environ.get("NEO4J_PASSWORD") or _NC.get("password") or "knowledge_graph_2026"
+NEO4J_PASS = os.environ.get("NEO4J_PASSWORD") or _NC.get("password") or os.environ.get("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
 NEO4J_DB = os.environ.get("NEO4J_DB") or "neo4j"
 
 THUMB_ROOT = os.environ.get("MEDIA_THUMB_ROOT", "/media/scott/SSD_4TB/media_thumbs")

@@ -3,7 +3,7 @@
 
 Prefer `bin/auto-ingest link-speakers` for production runs; this is a thin
 debug wrapper that execs the package linker the same way. Creds come from
-NEO4J_* env (defaults: localhost:7687 / neo4j / knowledge_graph_2026 / neo4j).
+NEO4J_* env; the password resolves through NEO4J_PASSWORD -> NEO4J_PASSWORD_DEFAULT.
 """
 import os
 import subprocess
@@ -11,10 +11,11 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+_pw = os.environ.get("NEO4J_PASSWORD") or os.environ.get("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
 env = {**os.environ,
        "NEO4J_URI": os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
        "NEO4J_USER": os.environ.get("NEO4J_USER", "neo4j"),
-       "NEO4J_PASSWORD": os.environ.get("NEO4J_PASSWORD", "knowledge_graph_2026"),
+       "NEO4J_PASSWORD": _pw,
        "NEO4J_DB": os.environ.get("NEO4J_DB", "neo4j")}
 
 # Mirror bin/auto-ingest link-speakers: exec the package module as a module so

@@ -98,6 +98,7 @@ def _clear_override_env(monkeypatch):
         "NEO4J_URI",
         "NEO4J_USER",
         "NEO4J_PASSWORD",
+        "NEO4J_PASSWORD_DEFAULT",
         "NEXTCLOUD_ROOT",
         "NEXTCLOUD_URL",
         "NEXTCLOUD_USER",
@@ -416,6 +417,58 @@ def test_neo4j_env_tuple(config_in_tmp, monkeypatch):
     assert user == "neo4j"
     assert password == "pw"
     assert db == "neo4j"
+
+
+# --------------------------------------------------------------------------- #
+# get_neo4j_password — the standardized precedence chain:
+#   NEO4J_PASSWORD -> config value -> NEO4J_PASSWORD_DEFAULT -> baked default
+# --------------------------------------------------------------------------- #
+def test_password_baked_default(monkeypatch):
+    import auto_ingest_config as cfg
+
+    _clear_override_env(monkeypatch)
+    # nothing set -> the historical baked-in default still works out of the box
+    assert cfg.get_neo4j_password() == "knowledge_graph_2026"
+    assert cfg.get_neo4j_password() == cfg._BAKED_IN_NEO4J_PASSWORD
+
+
+def test_password_default_env_overrides_baked(monkeypatch):
+    import auto_ingest_config as cfg
+
+    _clear_override_env(monkeypatch)
+    monkeypatch.setenv("NEO4J_PASSWORD_DEFAULT", "machine_default")
+    assert cfg.get_neo4j_password() == "machine_default"
+
+
+def test_password_env_beats_default_and_config(monkeypatch):
+    import auto_ingest_config as cfg
+
+    _clear_override_env(monkeypatch)
+    monkeypatch.setenv("NEO4J_PASSWORD_DEFAULT", "machine_default")
+    monkeypatch.setenv("NEO4J_PASSWORD", "per_run")
+    # per-run NEO4J_PASSWORD wins over everything, incl. a config value
+    assert cfg.get_neo4j_password("from_yaml") == "per_run"
+
+
+def test_password_config_value_beats_default(monkeypatch):
+    import auto_ingest_config as cfg
+
+    _clear_override_env(monkeypatch)
+    monkeypatch.setenv("NEO4J_PASSWORD_DEFAULT", "machine_default")
+    # config.yaml value beats NEO4J_PASSWORD_DEFAULT when NEO4J_PASSWORD is unset
+    assert cfg.get_neo4j_password("from_yaml") == "from_yaml"
+
+
+def test_get_neo4j_config_uses_password_default(config_in_tmp, monkeypatch):
+    import auto_ingest_config as cfg
+
+    _clear_override_env(monkeypatch)
+    # config.yaml password is ${NEO4J_PASSWORD} (unresolved) -> falls to DEFAULT
+    monkeypatch.setenv("NEO4J_PASSWORD_DEFAULT", "cfg_default")
+    assert cfg.get_neo4j_config()["password"] == "cfg_default"
+    # and per-run env still wins
+    monkeypatch.setenv("NEO4J_PASSWORD", "per_run")
+    assert cfg.get_neo4j_config()["password"] == "per_run"
 
 
 # --------------------------------------------------------------------------- #

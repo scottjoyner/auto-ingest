@@ -5,9 +5,11 @@ sys.path.insert(0, '/home/scott/git/auto-ingest')
 
 ENDPOINT = "http://scotts-macbook-air.tailcb8954.ts.net:1234/v1"
 
+_NEO4J_PW = os.environ.get("NEO4J_PASSWORD") or os.environ.get("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
+
 def run_cypher(query):
     result = subprocess.run(['docker', 'exec', '-i', 'neo4j', 
-        'cypher-shell', '-u', 'neo4j', '-p', 'knowledge_graph_2026'],
+        'cypher-shell', '-u', 'neo4j', '-p', _NEO4J_PW],
         input=query.encode(), capture_output=True, text=True)
     if result.returncode != 0:
         print("CYPHER ERROR:", query[:80], "...", result.stderr[:300])

@@ -65,10 +65,11 @@ def query_neo4j_from_x1_370(query: str) -> list[dict]:
     # Write Python script to temporary file instead of inline -c to avoid quoting issues
     python_script = f'''from neo4j import GraphDatabase
 import json
+import os
 
-uri = 'bolt://localhost:7687'
-user = 'neo4j'
-passwd = 'knowledge_graph_2026'  # From config.yaml
+uri = os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
+user = os.environ.get('NEO4J_USER', 'neo4j')
+passwd = os.environ.get('NEO4J_PASSWORD') or os.environ.get('NEO4J_PASSWORD_DEFAULT') or 'knowledge_graph_2026'
 
 driver = GraphDatabase.driver(uri, auth=(user, passwd))
 with driver.session() as session:

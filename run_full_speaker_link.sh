@@ -11,7 +11,7 @@ cd "$(dirname "$0")"
 STATE_FILE="${STATE_FILE:-./linker_state.json}"
 export NEO4J_URI="${NEO4J_URI:-bolt://localhost:7687}"
 export NEO4J_USER="${NEO4J_USER:-neo4j}"
-export NEO4J_PASSWORD="${NEO4J_PASSWORD:-knowledge_graph_2026}"
+export NEO4J_PASSWORD="${NEO4J_PASSWORD:-${NEO4J_PASSWORD_DEFAULT:-knowledge_graph_2026}}"
 export NEO4J_DB="${NEO4J_DB:-neo4j}"
 
 echo "=== pausing live ingest containers ==="

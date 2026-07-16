@@ -5,7 +5,7 @@ import os, sys, datetime
 from pathlib import Path
 
 NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
-NEO4J_PASS = os.environ.get("NEO4J_PASSWORD", "knowledge_graph_2026")
+NEO4J_PASS = os.environ.get("NEO4J_PASSWORD") or os.environ.get("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", str(Path.home() / ".hermes/mcp/"))
 
 def cypher(query):

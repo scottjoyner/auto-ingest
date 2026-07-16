@@ -18,7 +18,7 @@ from neo4j.exceptions import TransientError
 
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
 NEO4J_DB = os.getenv("NEO4J_DB", "neo4j")
 MAX_SEGS = int(os.getenv("MAX_SEGS", "3000"))
 

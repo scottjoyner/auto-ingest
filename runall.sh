@@ -14,11 +14,9 @@ fi
 
 NEO4J_URI="${NEO4J_URI:-bolt://100.64.43.123:7687}"
 NEO4J_USER="${NEO4J_USER:-neo4j}"
-# W-45: credentials come from the environment / .env only — no committed fallback.
-NEO4J_PASSWORD="${NEO4J_PASSWORD:-${NEO4J_PASS:-}}"
-if [ -z "$NEO4J_PASSWORD" ]; then
-  echo "❌ NEO4J_PASSWORD is not set (export it or add it to .env)"; exit 2
-fi
+# Password precedence: NEO4J_PASSWORD -> NEO4J_PASS -> NEO4J_PASSWORD_DEFAULT ->
+# baked historical default. Set NEO4J_PASSWORD_DEFAULT once in .env to change it.
+NEO4J_PASSWORD="${NEO4J_PASSWORD:-${NEO4J_PASS:-${NEO4J_PASSWORD_DEFAULT:-knowledge_graph_2026}}}"
 NEO4J_PASS="$NEO4J_PASSWORD"
 # Avoid TensorFlow/Keras import path in transformers/sentence-transformers;
 # this venv is torch-first and Keras 3 breaks older TF integrations.

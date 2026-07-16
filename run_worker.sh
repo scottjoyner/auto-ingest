@@ -18,7 +18,7 @@ cd "$(dirname "$0")"
 
 export NEO4J_URI="${NEO4J_URI:-bolt://localhost:7687}"
 export NEO4J_USER="${NEO4J_USER:-neo4j}"
-export NEO4J_PASSWORD="${NEO4J_PASSWORD:-knowledge_graph_2026}"
+export NEO4J_PASSWORD="${NEO4J_PASSWORD:-${NEO4J_PASSWORD_DEFAULT:-knowledge_graph_2026}}"
 export NEO4J_DB="${NEO4J_DB:-neo4j}"
 
 IDLE_LOAD="${IDLE_LOAD:-$(awk "BEGIN{printf \"%.2f\", $(nproc)*0.6}")}"  # loadavg(1m) ceiling
