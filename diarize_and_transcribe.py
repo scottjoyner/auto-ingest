@@ -36,14 +36,22 @@ from faster_whisper import WhisperModel
 def pick_device(prefer_gpu: bool = True) -> torch.device:
     """
     Choose the best-available Torch device.
-    Notes:
-      - pyannote pipelines support CUDA/ROCm (torch.cuda.is_available()) and Apple MPS.
-      - Vulkan backend is not supported by pyannote; use ROCm for AMD or CUDA for NVIDIA.
+
+    Delegates to auto_ingest.backend (single source of truth) so CUDA/ROCm/
+    Apple MPS are all detected consistently across the pipeline. Falls back to
+    a local CPU choice if the package backend is unavailable.
     """
-    if prefer_gpu and torch.cuda.is_available():
+    if not prefer_gpu:
+        return torch.device("cpu")
+    try:
+        from auto_ingest.backend import torch_device
+        return torch.device(torch_device())
+    except Exception:
+        pass
+    if torch.cuda.is_available():
         return torch.device("cuda")
     try:
-        if prefer_gpu and torch.backends.mps.is_available():  # Apple Silicon
+        if torch.backends.mps.is_available():  # Apple Silicon
             return torch.device("mps")
     except Exception:
         pass

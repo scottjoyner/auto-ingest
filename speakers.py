@@ -14,6 +14,18 @@ except Exception:
 import torch  # noqa: F401
 from pyannote.audio import Pipeline
 
+# Best-available compute backend (CUDA / ROCm / Apple MPS / ONNX-CPU), detected
+# once via auto_ingest.backend. Falls back to a local probe if the package
+# backend isn't importable.
+try:
+    from auto_ingest.backend import detect_backend, torch_device
+    _BACKEND = detect_backend()
+    DEVICE = torch_device()
+except Exception:
+    _BACKEND = "cuda" if torch.cuda.is_available() else "onnx"
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+COMPUTE_TYPE = "float16" if DEVICE in ("cuda", "mps") else "int8"
+
 # ========= Config =========
 DASHCAM_BASE           = Path(get_fileserver_path("dashcam"))
 DASHCAM_AUDIO_BASE     = Path(get_fileserver_path("dashcam/audio"))           # legacy source (read-only)
@@ -271,8 +283,8 @@ def transcribe_faster_whisper(audio_path: Path, key: str, suffix: Optional[str])
     with TimedStage(st_trans, detail=detail):
         model = WhisperModel(
             WHISPER_MODEL_SIZE,
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            compute_type="float16" if torch.cuda.is_available() else "int8",
+            device=DEVICE,
+            compute_type=COMPUTE_TYPE,
         )
 
         segments, _ = model.transcribe(str(audio_path), language=WHISPER_LANGUAGE)
