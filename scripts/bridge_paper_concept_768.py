@@ -71,6 +71,7 @@ def main():
         skip = 0
         created = 0
         processed = 0
+        skipped = 0
         while True:
             with drv.session(database=db) as rs:
                 q = ("MATCH (p:Paper) WHERE p.embedding_768 IS NOT NULL "
@@ -81,26 +82,30 @@ def main():
                 break
             for p in papers:
                 aid, emb = p["id"], p["e"]
-                with drv.session(database=db) as ws:
-                    neigh = ws.run(
-                        "CALL db.index.vector.queryNodes('concept_embedding_768', $k, $q) "
-                        "YIELD node, score WHERE score >= $t RETURN node.name AS name, score",
-                        {"k": args.k, "q": emb, "t": args.threshold},
-                    ).data()
-                    for nb in neigh:
-                        ws.run(
-                            "MATCH (p:Paper {arxiv_id:$a}), (c:Concept {name:$n}) "
-                            "MERGE (p)-[:DISCUSSES {method:'vector', score:$s}]->(c)",
-                            {"a": aid, "n": nb["name"], "s": float(nb["score"])},
-                        )
-                        created += 1
+                try:
+                    with drv.session(database=db) as ws:
+                        neigh = ws.run(
+                            "CALL db.index.vector.queryNodes('concept_embedding_768', $k, $q) "
+                            "YIELD node, score WHERE score >= $t RETURN node.name AS name, score",
+                            {"k": args.k, "q": emb, "t": args.threshold},
+                        ).data()
+                        for nb in neigh:
+                            ws.run(
+                                "MATCH (p:Paper {arxiv_id:$a}), (c:Concept {name:$n}) "
+                                "MERGE (p)-[:DISCUSSES {method:'vector', score:$s}]->(c)",
+                                {"a": aid, "n": nb["name"], "s": float(nb["score"])},
+                            )
+                            created += 1
+                except Exception as e:  # noqa: BLE001 - one paper's vector query OOMs; skip & continue
+                    log(f"  skip {aid}: {type(e).__name__}: {str(e)[:80]}")
+                    skipped += 1
                 processed += 1
             skip += args.batch
             if args.limit and processed >= args.limit:
                 break
-            log(f"processed {processed}, created {created} DISCUSSES edges")
+            log(f"processed {processed}, created {created} DISCUSSES edges (skipped {skipped})")
 
-        log(f"DONE: {processed} papers, {created} vector DISCUSSES edges")
+        log(f"DONE: {processed} papers, {created} vector DISCUSSES edges (skipped {skipped})")
     finally:
         drv.close()
 
