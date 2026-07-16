@@ -146,7 +146,12 @@ DEFAULT_THRESH = 0.72     # cosine threshold to cluster new groups
 DEFAULT_MIN_PROP = 0.5    # min SPOKEN_BY proportion to accept a segment
 DEFAULT_SNIP_LEN = 1.6    # fixed snip length (s)
 TEXT_ALPHA_MIN = 2        # text heuristic (ignore music/noise)
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Canonical backend source: auto_ingest.backend.detect_backend() is the single
+# source of truth for compute routing. torch_device() maps it to a torch device
+# string ("cuda" for both NVIDIA and AMD ROCm, "mps" for Apple Silicon, "cpu"
+# for the ONNX/CPU fallback) so the embedding model lands on the best accelerator.
+from auto_ingest.backend import torch_device
+DEVICE = torch_device()
 
 # Hold-out validation
 DEFAULT_HOLDOUT = True

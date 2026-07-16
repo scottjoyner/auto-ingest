@@ -92,6 +92,16 @@ def cmd_caps(_args) -> int:
         be = "ONNX (CPU)"
     print(f"GPU backend: {be}")
     print(f"  nvidia-smi: {nvidia or 'absent'}  rocminfo: {rocm or 'absent'}")
+    # Single source of truth for compute routing (auto_ingest.backend).
+    try:
+        from auto_ingest.backend import backend_info
+        info = backend_info()
+        print(f"  auto_ingest.backend: backend={info['backend']} torch_device={info['torch_device']}"
+              f" gpu={info.get('gpu_name') or 'n/a'}"
+              f" (cuda={info['cuda_available']} rocm={info['rocm_available']}"
+              f" mps={info['mps_available']} mlx={info['mlx_available']} onnx={info['onnx_available']})")
+    except Exception as e:
+        print(f"  auto_ingest.backend: unavailable ({e})")
     for mod, label in [("torch", "torch"), ("torchaudio", "torchaudio"),
                        ("speechbrain", "speechbrain"), ("pyannote.audio", "pyannote"),
                        ("faiss", "faiss"), ("neo4j", "neo4j")]:

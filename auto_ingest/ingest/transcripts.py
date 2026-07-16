@@ -145,7 +145,11 @@ GLOBAL_START = time.perf_counter()
 # =========================
 # Model load (once)
 # =========================
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Canonical backend source: auto_ingest.backend.detect_backend(). Use torch_device()
+# (not a hardcoded "cpu"/"cuda") so we also leverage ROCm (-> "cuda" API) and
+# Apple Silicon MPS (-> "mps") automatically.
+from auto_ingest.backend import torch_device
+DEVICE = torch_device()
 if DEVICE == "cuda":
     try: torch.backends.cuda.matmul.allow_tf32 = True
     except Exception: pass
