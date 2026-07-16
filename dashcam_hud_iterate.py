@@ -27,6 +27,7 @@ import os
 import re
 import sys
 import math
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -298,6 +299,14 @@ def write_csv(folder: Path, key: str, rows: List[FrameRecord]) -> Path:
         } for r in rows]
     )
     df.to_csv(out, index=False)
+    try:
+        from auto_ingest_config import build_artifact_ref
+        prov = folder / f"{key}_metadata.provenance.json"
+        ref = build_artifact_ref(str(out), storage_root="local-ssd",
+                                 retention_class="keep")
+        prov.write_text(json.dumps(ref, indent=2), encoding="utf-8")
+    except Exception as e:
+        log.warning("Provenance write failed for %s: %s", key, e)
     return out
 
 

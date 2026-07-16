@@ -355,6 +355,14 @@ def summarize_one(transcript: Transcript, client: OllamaClient, model: str,
             "schema": "summary.sidecar.v1",
         }
 
+        try:
+            from auto_ingest_config import build_artifact_ref
+            ref = build_artifact_ref(str(out_path), storage_root="local-ssd",
+                                     retention_class="keep")
+            payload["artifact"] = ref
+        except Exception:
+            pass
+
         tmp = Path(str(out_path) + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(out_path)

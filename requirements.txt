@@ -1,3 +1,20 @@
+# ============================================================================
+# auto-ingest requirements.txt  (W-51)
+#
+# DEPENDENCY NOTE — torch CPU vs CUDA CONFLICT:
+#   This file pins `torch==2.6.0+cpu` (CPU-only). The previous file ALSO pinned
+#   ~15 `nvidia-*` CUDA wheel packages, which CONFLICT with the CPU torch build
+#   (pip will error or install a broken mix). Those nvidia-* lines have been
+#   REMOVED below. Pinned extras now live in pyproject.toml:
+#       pip install -e ".[ingest]"      # CPU torch + whisper + speechbrain + faiss
+#       pip install -e ".[dashcam]"     # CPU torchvision + ultralytics + opencv
+#       pip install -e ".[content]"     # Ollama client (requests)
+#       pip install -e ".[api]"         # job_trigger_api (Flask)
+#   For a CUDA build, install the matching `+cu12x` torch wheels INSTEAD of the
+#   cpu ones — do NOT mix nvidia-* CUDA packages with the +cpu torch build.
+#   The Dockerfile currently builds CPU (parity with this file); see Dockerfile.
+# ============================================================================
+
 absl-py==2.3.1
 aiofiles==24.1.0
 aiohappyeyeballs==2.6.1
@@ -91,22 +108,6 @@ networkx==3.3
 ninja==1.11.1.1
 numba==0.61.0
 numpy==1.26.4
-nvidia-cublas-cu12==12.8.4.1
-nvidia-cuda-cupti-cu12==12.8.90
-nvidia-cuda-nvcc-cu12==12.9.86
-nvidia-cuda-nvrtc-cu12==12.8.93
-nvidia-cuda-runtime-cu12==12.8.90
-nvidia-cudnn-cu12==9.10.2.21
-nvidia-cufft-cu12==11.3.3.83
-nvidia-cufile-cu12==1.13.1.3
-nvidia-curand-cu12==10.3.9.90
-nvidia-cusolver-cu12==11.7.3.90
-nvidia-cusparse-cu12==12.5.8.93
-nvidia-cusparselt-cu12==0.7.1
-nvidia-nccl-cu12==2.27.3
-nvidia-nvjitlink-cu12==12.8.93
-nvidia-nvtx-cu12==12.8.90
-omegaconf==2.3.0
 onnxruntime==1.21.0
 onnxruntime-gpu==1.22.0
 openai-whisper==20240930

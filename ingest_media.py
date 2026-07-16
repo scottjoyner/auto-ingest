@@ -558,7 +558,10 @@ def upsert_media(drv, rec: Dict) -> None:
         m.date=$date, m.year=$year, m.month=$month, m.day=$day,
         m.width=$width, m.height=$height, m.duration=$duration,
         m.has_audio=$has_audio, m.gps_lat=$gps_lat, m.gps_lon=$gps_lon,
-        m.size=$size, m.thumb=$thumb, m.ingested_at=$now
+        m.size=$size, m.thumb=$thumb, m.ingested_at=$now,
+        m.storage_root=$storage_root, m.relative_path=$relative_path,
+        m.host_path=$host_path, m.tailscale_host_hint=$tailscale_host_hint,
+        m.retention_class=$retention_class
     """
     params = {
         "sha": rec["sha"], "path": rec["path"], "source": rec["source"],
@@ -571,6 +574,11 @@ def upsert_media(drv, rec: Dict) -> None:
         "gps_lat": rec.get("gps_lat"), "gps_lon": rec.get("gps_lon"),
         "size": rec["size"], "thumb": rec.get("thumb"),
         "now": datetime.now(tz=timezone.utc).isoformat(),
+        "storage_root": rec.get("storage_root"),
+        "relative_path": rec.get("relative_path"),
+        "host_path": rec.get("host_path"),
+        "tailscale_host_hint": rec.get("tailscale_host_hint"),
+        "retention_class": rec.get("retention_class"),
     }
     with drv.session(database=NEO4J_DB) as s:
         s.run(q, **params)
@@ -617,6 +625,15 @@ def process_file(drv, path: Path, source: str, kind: str, state: dict,
         "mime": path.suffix.lstrip(".").lower(), "date": date,
         "size": path.stat().st_size, **meta,
     }
+    try:
+        from auto_ingest_config import build_artifact_ref
+        ref = build_artifact_ref(str(path), storage_root="local-ssd",
+                                 retention_class="keep")
+        rec.update({k: ref[k] for k in ("storage_root", "relative_path",
+                                        "host_path", "tailscale_host_hint",
+                                        "retention_class")})
+    except Exception:
+        pass
     rec["thumb"] = make_thumbnail(path, kind, sha)
     upsert_media(drv, rec)
     _log(f"  upserted {kind} {path.name} ({date})")
