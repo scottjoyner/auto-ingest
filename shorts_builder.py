@@ -846,11 +846,17 @@ def compose_scripted_short(
     src_clips = []
     for i, sh in enumerate(shots):
         frp = Path(sh["fr_path"])
-        t0 = float(sh.get("t_sec", 0.0))
-        t1 = t0 + float(sh.get("dur", 6.0))
+        dur = float(sh.get("dur", 6.0))
         v = VideoFileClip(str(frp)).without_audio()
         src_clips.append(v)
-        t1 = min(float(v.duration or 0.0), t1)
+        clip_dur = float(v.duration or 0.0)
+        # Clamp the start so the [t0, t0+dur] window always fits inside the
+        # source clip (highlights/discussion shots can carry a t_sec that
+        # exceeds a short dashcam clip's length).
+        t0 = float(sh.get("t_sec", 0.0))
+        if clip_dur and t0 + dur > clip_dur:
+            t0 = max(0.0, clip_dur - dur)
+        t1 = min(clip_dur, t0 + dur) if clip_dur else t0 + dur
         sub = v.subclip(max(0.0, t0), t1)
         # Center-crop to the target 9:16 window *that fits inside the source*,
         # then resize. Works whether the source is landscape or portrait and
