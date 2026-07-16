@@ -14,8 +14,14 @@ KEY_PREFIX="${YEAR}_${MONTH}${DD}"
 
 cd "$(dirname "$0")/.."
 
+FILES_BASE="${FILES_BASE:-$(python3 - <<'PY'
+from auto_ingest_config import get_fileserver_root
+print(get_fileserver_root())
+PY
+)}"
+
 echo "==== Filesystem coverage for $DAY ===="
-for base in /media/scott/NAS4/fileserver; do
+for base in "$FILES_BASE" /media/scott/NAS4/fileserver; do
   for sub in "audio/$REL" "audio/transcriptions/$REL"; do
     p="$base/$sub"
     if [[ -d "$p" ]]; then

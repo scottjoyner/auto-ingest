@@ -3,8 +3,9 @@ set -euo pipefail
 
 cd ~/git/auto-ingest || { echo "❌ Failed to cd into ~/git/auto-ingest"; exit 1; }
 
-# Load host-specific roots and service endpoints. Several scripts still default
-# to localhost/NAS3-era values when these are not exported.
+# Load host-specific roots and service endpoints from .env. These resolve via the
+# mount-aware helpers in auto_ingest_config (get_dashcam_root/get_audio_root/
+# get_bodycam_root/get_fileserver_root), so no machine-specific paths are hardcoded here.
 if [ -f .env ]; then
   set -a
   # shellcheck disable=SC1091

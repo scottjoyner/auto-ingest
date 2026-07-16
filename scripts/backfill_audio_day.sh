@@ -53,11 +53,19 @@ REL="$YEAR/$MONTH/$DD"
 cd "$(dirname "$0")/.."
 
 # If running inside Compose, prefer the stable dual-NAS container mounts.
-# If running on the host, use host paths directly.
+# If running on the host, resolve the fileserver root from config (mount-aware),
+# falling back to the legacy NAS4 path for backward compatibility.
 if [[ -d /nas1 || -d /nas2 ]]; then
   CANDIDATE_BASES=(/nas1 /nas2)
 else
-  CANDIDATE_BASES=(/media/scott/NAS4/fileserver)
+  CANDIDATE_BASES=(
+    "$(python3 - <<'PY'
+from auto_ingest_config import get_fileserver_root
+print(get_fileserver_root())
+PY
+)"
+    /media/scott/NAS4/fileserver
+  )
 fi
 
 roots=()

@@ -12,10 +12,13 @@ of known-Scott audio clips; prints the nearest GlobalSpeaker so you can sanity-c
 Idempotent and safe: nearest other GlobalSpeakers sit at cosine ~0.55 (linker uses 0.78),
 so no false merges occur.
 """
-import os
 import argparse
 import logging
+import os
+
 from neo4j import GraphDatabase
+
+from auto_ingest_config import get_audio_root, get_fileserver_root
 
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
@@ -47,7 +50,7 @@ def find_seed(sess):
     return rec["id"] if rec else None
 
 
-def corpus_centroid(corpus_dir):
+def corpus_centroid(corpus_dir=None):
     import numpy as np
     import torch
     import torchaudio
@@ -56,10 +59,15 @@ def corpus_centroid(corpus_dir):
     base = next(iter([
         p for p in [
             os.getenv("AUDIO_BASE"),
+            get_audio_root(),
+            os.path.join(get_fileserver_root(), "audio"),
             "/media/scott/SSD_4TB/audio",
             "/media/scott/NAS4/fileserver/audio",
         ] if p
     ]), None)
+    corpus_dir = corpus_dir or base
+    if not corpus_dir:
+        raise SystemExit("No --corpus dir and no AUDIO_BASE/fileserver audio root available.")
     exts = {".wav", ".mp3", ".m4a", ".flac"}
     files = []
     root = os.path.expanduser(corpus_dir)
