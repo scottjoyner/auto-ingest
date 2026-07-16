@@ -842,22 +842,41 @@ def compose_scripted_short(
 
     # Build the B-roll piece(s) from highway shots.
     pieces = []
+    src_clips = []
     for i, sh in enumerate(shots):
         frp = Path(sh["fr_path"])
         t0 = float(sh.get("t_sec", 0.0))
         t1 = t0 + float(sh.get("dur", 6.0))
-        with VideoFileClip(str(frp)) as v:
-            t1 = min(float(v.duration or 0.0), t1)
-            sub = v.subclip(max(0.0, t0), t1)
-            vcrop = sub.crop(
-                x1=(sub.w - target_w) // 2, y1=(sub.h - target_h) // 2,
-                width=min(target_w, sub.w), height=min(target_h, sub.h),
-            )
-            vcrop = vcrop.resize((width, height))
+        v = VideoFileClip(str(frp)).without_audio()
+        src_clips.append(v)
+        t1 = min(float(v.duration or 0.0), t1)
+        sub = v.subclip(max(0.0, t0), t1)
+        # Center-crop to the target 9:16 window *that fits inside the source*,
+        # then resize. Works whether the source is landscape or portrait and
+        # whether it is larger or smaller than the target in either dimension
+        # (the old crop math produced a 0-height clip for short/landscape
+        # sources, e.g. 2560x1440 -> 1080x1920).
+        src_w, src_h = sub.w, sub.h
+        tgt_aspect = float(width) / float(height)
+        if src_w / float(src_h) > tgt_aspect:
+            cw = int(src_h * tgt_aspect)
+            ch = src_h
+        else:
+            cw = src_w
+            ch = int(src_w / tgt_aspect)
+        x1 = max(0, (src_w - cw) // 2)
+        y1 = max(0, (src_h - ch) // 2)
+        vcrop = sub.crop(x1=x1, y1=y1, width=cw, height=ch)
+        vcrop = vcrop.resize((width, height))
         if i > 0 and fade:
             vcrop = vcrop.crossfadein(fade)
         pieces.append(vcrop)
 
+    for sc in src_clips:
+        try:
+            sc.close()
+        except Exception:
+            pass
     if not pieces:
         raise SystemExit("No highway shots to render (shot list empty).")
     broll = concatenate_videoclips(pieces, method="compose") if len(pieces) > 1 else pieces[0]
@@ -877,15 +896,20 @@ def compose_scripted_short(
         text = (c.get("text") or "").strip()
         if not text:
             continue
-        arr = _draw_sentence(text, width, profile, None, empty_smap)
-        ic = ImageClip(arr).set_start(start).set_duration(end - start)
+        img = _draw_sentence(text, width, profile, None, empty_smap)
+        ic = ImageClip(np.array(img.convert("RGBA"))).set_start(start).set_duration(end - start)
         ic = ic.set_position(("center", base_y))
         caption_clips.append(ic)
 
     comp = CompositeVideoClip([broll] + caption_clips)
+    # Dashcam B-roll is often video-only; skip the audio codec (and any
+    # missing audio reader) when there is no audio track to mux.
+    has_audio = bool(getattr(broll, "audio", None))
     _write_videofile_safely(
         comp, out_path, fps=float(broll.fps or 30.0),
-        codec="libx264", audio_codec="aac", bitrate=bitrate,
+        codec="libx264",
+        audio_codec="aac" if has_audio else None,
+        bitrate=bitrate,
     )
     try:
         comp.close()

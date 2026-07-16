@@ -40,3 +40,7 @@ coverage.xml
 lat_deg*_heading.png
 lon_deg*_heading.png
 speed.png
+
+# smoke-test render output
+shorts_out_smoke/
+*__tmp__TEMP_MPY*
