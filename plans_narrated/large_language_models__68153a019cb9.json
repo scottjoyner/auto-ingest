@@ -1,0 +1,178 @@
+{
+  "plan_id": "68153a019cb9",
+  "topic": "large_language_models",
+  "iteration": 1,
+  "created_at": 1784232724.3808203,
+  "updated_at": 1784232724.3808203,
+  "brief": {
+    "topic": "large_language_models",
+    "title": "large language models",
+    "hook": "for the large language models and other models",
+    "points": [
+      "for the large language models and other models",
+      "Training large languages, large language models",
+      "and how large we can train a large language model",
+      "We can't do quantum error correction because it",
+      "We've got all these large language models.",
+      "multi-agent but even to get to that point where you're having agents hand"
+    ],
+    "sources": [
+      {
+        "kind": "utterance",
+        "ref_id": "83a740f76422a6819253de1eada8639a",
+        "title": "large language model (0.96)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "4922adbe0489950a366b82824f3bdec8",
+        "title": "large language model (0.94)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "f23405fd437d16038643eb06df19f036",
+        "title": "large language model (0.93)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "4392ee16707740ffda4065f2779a425e",
+        "title": "quantum (0.93)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "dacdd73c729f6cfad2dd70727b47ee36",
+        "title": "large language model (0.91)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "ff631439d894a0651c137a49c593efcc",
+        "title": "agent (0.91)",
+        "url": null,
+        "year": null
+      }
+    ],
+    "tags": [
+      "agent",
+      "algorithms",
+      "compilers",
+      "data structures",
+      "image-text",
+      "instruction tuning",
+      "large language model",
+      "long context",
+      "multi-agent",
+      "neural architecture search",
+      "orchestration",
+      "physics",
+      "quantum",
+      "quantum information",
+      "reasoning",
+      "retrieval",
+      "rope"
+    ]
+  },
+  "shorts": [
+    {
+      "id": "d10a452328",
+      "brief_topic": "large_language_models",
+      "title": "large language models",
+      "cues": [
+        {
+          "start": 0.0,
+          "end": 2.4,
+          "text": "large language models",
+          "kind": "hook"
+        },
+        {
+          "start": 2.4,
+          "end": 10.4,
+          "text": "Large language models are incredibly powerful.",
+          "kind": "point"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2025_1002_175545_R",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2025/10/02/2025_1002_175545_R.MP4",
+          "t_sec": 301.5,
+          "dur": 8.0,
+          "mph": null
+        }
+      ],
+      "notes": "utter=b1b8583b778d6ea1e67b6c4461145f62 clip=2025_1002_175545_R t=301.5s (time-aligned) concept=large language model",
+      "status": "planned",
+      "out_path": null
+    },
+    {
+      "id": "430d8aae1a",
+      "brief_topic": "large_language_models",
+      "title": "large language models",
+      "cues": [
+        {
+          "start": 0.0,
+          "end": 2.4,
+          "text": "large language models",
+          "kind": "hook"
+        },
+        {
+          "start": 2.4,
+          "end": 10.4,
+          "text": "But it's what you feed into large language model.",
+          "kind": "point"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2025_1002_175545_R",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2025/10/02/2025_1002_175545_R.MP4",
+          "t_sec": 1090.5,
+          "dur": 8.0,
+          "mph": null
+        }
+      ],
+      "notes": "utter=86b504311ce338406f03f0507c9930bf clip=2025_1002_175545_R t=1090.5s (time-aligned) concept=large language model",
+      "status": "planned",
+      "out_path": null
+    },
+    {
+      "id": "0371875f79",
+      "brief_topic": "large_language_models",
+      "title": "large language models",
+      "cues": [
+        {
+          "start": 0.0,
+          "end": 2.4,
+          "text": "large language models",
+          "kind": "hook"
+        },
+        {
+          "start": 2.4,
+          "end": 10.4,
+          "text": "We need to get the vector search close enough.",
+          "kind": "point"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2025_0921_113253_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2025/09/21/2025_0921_113253_F.MP4",
+          "t_sec": 5.5,
+          "dur": 8.0,
+          "mph": null
+        }
+      ],
+      "notes": "utter=3a039d3191e742cc5c128ed1f9441044 clip=2025_0921_113253_F t=5.5s (time-aligned) concept=neural architecture search",
+      "status": "planned",
+      "out_path": null
+    }
+  ]
+}

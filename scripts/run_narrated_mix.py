@@ -1,11 +1,18 @@
-"""Narrated mix driver: plan montage + highlights + discussion, render all
-with owner-voice TTS into NAS5, deduped + manifest-upserted.
+"""Narrated mix driver (iteration-aware).
 
-Run via: .venv/bin/python scripts/run_narrated_mix.py
-(Detached/low-priority from the shell wrapper.)
+Plans montage + highlights + discussion(s) across several seeds/topics, renders
+all with owner-voice TTS into NAS5, deduped (by clip_key) + manifest-upserted.
+
+Run via:
+    .venv/bin/python scripts/run_narrated_mix.py \
+        --seeds 7 11 23 --topics large_language_models knowledge_graph
+
+Detach with: setsid bash -c '.venv/bin/python -u scripts/run_narrated_mix.py ... \
+        > log 2>&1' < /dev/null & disown
 """
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import sys
@@ -32,9 +39,36 @@ def _driver():
     return d
 
 
-def main() -> int:
+def build_plans(drv, anchors, seeds, topics) -> list[Plan]:
+    plans: list[Plan] = []
+    for seed in seeds:
+        plans.append(planner.plan_montage(drv, count=3, dur=30.0, seed=seed, limit=400))
+        plans.append(planner.plan_highlights(
+            drv, kinds=("music", "review", "speed"),
+            per_kind=2, dur=20.0, seed=seed, limit=400))
+        for topic in topics:
+            clips = curator.discusses_topic(
+                drv, topic, min_score=0.6, min_text_len=40, limit=40)
+            if clips:
+                plans.append(planner.plan_discussion(
+                    drv, clips, topic=topic, short_count=3,
+                    short_dur=30.0, seed=seed))
+            else:
+                log.warning("No discussion clips for %s (seed %s); skipping", topic, seed)
+    return plans
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seeds", nargs="+", type=int, default=[7, 11, 23])
+    ap.add_argument("--topics", nargs="+",
+                    default=["large_language_models", "knowledge_graph",
+                             "graph_databases", "machine_learning"])
+    ap.add_argument("--namespace", default=NAMESPACE)
+    args = ap.parse_args(argv)
+
     PLANS_DIR.mkdir(parents=True, exist_ok=True)
-    out_root = Path(NAMESPACE)
+    out_root = Path(args.namespace)
     out_root.mkdir(parents=True, exist_ok=True)
     os.environ.update(TTS_ENV)
 
@@ -42,44 +76,19 @@ def main() -> int:
     try:
         anchors = backdrop.select_highway_pool(drv, limit=400)
         log.info("Resolved %d highway anchors", len(anchors))
-
-        plans: list[Plan] = []
-
-        # Montage (ambient, owner-narrated hook)
-        m = planner.plan_montage(drv, count=3, dur=30.0, seed=7, limit=400)
-        plans.append(m)
-
-        # Highlights (music / review / speed events)
-        h = planner.plan_highlights(drv, kinds=("music", "review", "speed"),
-                                    per_kind=2, dur=20.0, seed=7, limit=400)
-        plans.append(h)
-
-        # Discussion (your own words, time-aligned) -- no LLM needed
-        clips = curator.discusses_topic(
-            drv, "large_language_models", min_score=0.65,
-            min_text_len=40, limit=40,
-        )
-        if clips:
-            d = planner.plan_discussion(
-                drv, clips, topic="large_language_models",
-                short_count=3, short_dur=30.0, seed=7,
-            )
-            plans.append(d)
-        else:
-            log.warning("No discussion clips for large_language_models; skipping")
+        plans = build_plans(drv, anchors, args.seeds, args.topics)
     finally:
         drv.close()
 
     for p in plans:
         path = PLANS_DIR / f"{p.topic}__{p.plan_id}.json"
         p.save(path)
-        log.info("Planned %s -> %s (%d shorts)", p.topic, path, len(p.shorts))
+        log.info("Planned %s (seed-derived) -> %s (%d shorts)", p.topic, path, len(p.shorts))
 
     total = 0
     for p in plans:
         rendered = render.render_plan(
-            p, out_root / p.topic, tts=True, skip_used_clips=True, upsert=True,
-        )
+            p, out_root / p.topic, tts=True, skip_used_clips=True, upsert=True)
         total += len(rendered)
         log.info("Rendered %d/%d for %s", len(rendered), len(p.shorts), p.topic)
 
