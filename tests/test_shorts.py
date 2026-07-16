@@ -9,7 +9,9 @@ Covers the parts that do NOT need moviepy or a live LLM:
 """
 from pathlib import Path
 
-from auto_ingest.shorts import backdrop, curator, planner
+import pytest
+
+from auto_ingest.shorts import backdrop, curator, planner, render, tts
 from auto_ingest.shorts.models import Brief, Cue, Plan, PlannedShort, Shot, SourceRef
 
 
@@ -378,3 +380,68 @@ def test_plan_trip_story_builds_journey_plan():
     place_cues = [c.text for c in s0.cues if c.text]
     assert place_cues, "expected place/location captions along the trip"
     assert s0.notes.startswith("trip=Dashcam_TRIP1")
+
+
+# --------------------------------------------------------------------------- #
+# TTS (owner-voice) lazy import + graceful fallback
+# --------------------------------------------------------------------------- #
+
+def test_tts_narrate_graceful_without_reference(monkeypatch, tmp_path):
+    from auto_ingest.shorts import tts
+
+    # No owner audio resolvable -> narrate returns None (silent render path).
+    monkeypatch.setattr(tts, "owner_audio_captures", lambda: [])
+    out = tts.narrate("demo", [{"text": "hello world", "start": 0, "end": 2}])
+    assert out is None
+
+
+def test_tts_synthesize_raises_when_package_missing(monkeypatch, tmp_path):
+    from auto_ingest.shorts import tts
+
+    # Force both in-process and venv paths to be unavailable.
+    monkeypatch.setattr(tts, "_tts_venv_python", lambda: None)
+
+    def _boom(*a, **k):
+        raise ImportError("no TTS")
+    monkeypatch.setattr(tts, "TTS", _boom, raising=False)
+    import builtins
+    real_import = builtins.__import__
+
+    def _fake_import(name, *a, **k):
+        if name.startswith("TTS"):
+            raise ImportError("TTS not installed")
+        return real_import(name, *a, **k)
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+    try:
+        with pytest.raises(tts.TTSUnavailable):
+            tts.synthesize("hi", tmp_path / "ref.wav", tmp_path / "out.wav")
+    finally:
+        monkeypatch.setattr(builtins, "__import__", real_import)
+
+
+# --------------------------------------------------------------------------- #
+# render_plan dedup (skip_used_clips)
+# --------------------------------------------------------------------------- #
+
+def test_render_plan_skip_used_clips(monkeypatch, tmp_path):
+    from auto_ingest.shorts import render
+
+    plan = Plan(
+        topic="demo",
+        brief=Brief(topic="demo", title="Demo", hook="hi", points=["a", "b"], sources=[]),
+        shorts=[
+            PlannedShort(id="s1", title="S1", brief_topic="demo",
+                         shots=[Shot(clip_key="clip_A", fr_path="/x.mp4", t_sec=0, dur=6)],
+                         cues=[Cue(text="a", start=0, end=2, kind="narration")]),
+            PlannedShort(id="s2", title="S2", brief_topic="demo",
+                         shots=[Shot(clip_key="clip_B", fr_path="/y.mp4", t_sec=0, dur=6)],
+                         cues=[Cue(text="b", start=0, end=2, kind="narration")]),
+        ],
+    )
+    monkeypatch.setattr(render, "_already_rendered_clips", lambda: {"clip_A"})
+    rendered = []
+    monkeypatch.setattr(render, "render_short",
+                        lambda item, out, **kw: rendered.append(item.id) or (out / f"{item.id}.mp4"))
+    out = render.render_plan(plan, tmp_path, skip_used_clips=True)
+    assert rendered == ["s2"], "s1 should be skipped (clip_A already used)"
+    assert len(out) == 1

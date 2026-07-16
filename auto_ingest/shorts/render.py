@@ -33,8 +33,13 @@ def _neo4j_creds():
 def render_short(item: PlannedShort, out_dir: Path, *,
                  profile_name: str = PROFILE_NAME, width: int = WIDTH,
                  height: int = HEIGHT, bitrate: str = "6M",
-                 overwrite: bool = False) -> Path:
-    """Render one :class:`PlannedShort` to a 9:16 MP4. Returns the output path."""
+                 overwrite: bool = False, tts: bool = False) -> Path:
+    """Render one :class:`PlannedShort` to a 9:16 MP4. Returns the output path.
+
+    When ``tts`` is set, the short's scripted cues are synthesized in the
+    owner's voice (XTTS-v2 voice-clone) and muxed as the narration track. If
+    TTS is unavailable the short is rendered silently rather than failing.
+    """
     from shorts_builder import compose_scripted_short
 
     out_dir = Path(out_dir)
@@ -48,9 +53,18 @@ def render_short(item: PlannedShort, out_dir: Path, *,
 
     shots = [s.to_dict() for s in item.shots]
     cues = [c.to_dict() for c in item.cues]
+    narration_audio = None
+    if tts:
+        try:
+            from auto_ingest.shorts.tts import narrate
+            narration_audio = narrate(item.title, cues)
+        except Exception as e:  # pragma: no cover - TTS is environment-dependent
+            log.info("TTS narration skipped for %s: %s", item.id, e)
+            narration_audio = None
     compose_scripted_short(
         shots, cues, out_path,
         profile_name=profile_name, width=width, height=height, bitrate=bitrate,
+        narration_audio=narration_audio,
     )
     item.status = "rendered"
     item.out_path = str(out_path)
@@ -74,33 +88,81 @@ def upsert_manifest(driver, plan: Plan, out_dir: Path) -> None:
             title=plan.brief.title,
         )
         for s in plan.shorts:
+            clip_keys = [sh.clip_key for sh in s.shots if sh.clip_key]
             sess.run(
                 """
                 MERGE (sh:Short {key:$key})
                 SET sh.title=$title, sh.topic=$topic, sh.status=$status,
-                    sh.plan_id=$pid, sh.out_path=$out, sh.updated_at=timestamp()
+                    sh.plan_id=$pid, sh.out_path=$out, sh.updated_at=timestamp(),
+                    sh.clip_keys=$cks, sh.published=false
                 WITH sh
                 MATCH (sp:ShortPlan {plan_id:$pid})
                 MERGE (sp)-[:PLANS]->(sh)
                 """,
                 key=s.id, title=s.title, topic=s.brief_topic,
                 status=s.status, pid=plan.plan_id, out=s.out_path,
+                cks=clip_keys,
             )
     log.info("Upserted manifest for plan %s (%d shorts)", plan.plan_id, len(plan.shorts))
 
 
 def render_plan(plan: Plan, out_dir: Path, *, only: Optional[List[str]] = None,
-                **render_kwargs) -> List[Path]:
-    """Render every (or selected) short in a plan; update statuses in place."""
+                skip_used_clips: bool = False, upsert: bool = False,
+                tts: bool = False, **render_kwargs) -> List[Path]:
+    """Render every (or selected) short in a plan; update statuses in place.
+
+    When ``skip_used_clips`` is set, any short whose B-roll ``clip_key`` was
+    already rendered in a prior ``:Short`` (status 'rendered') is skipped, so
+    re-running a plan doesn't remake shorts from the same footage.
+
+    When ``upsert`` is set, the plan + rendered shorts are persisted to Neo4j
+    as :ShortPlan / :Short (status 'rendered'), giving a publish-aware audit
+    trail and feeding the dedup logic on future runs.
+    """
+    used: set = set()
+    if skip_used_clips:
+        used = _already_rendered_clips()
     out: List[Path] = []
     for item in plan.shorts:
         if only and item.id not in only:
             continue
         if item.status == "rejected":
             continue
+        if skip_used_clips and any(s.clip_key in used for s in item.shots):
+            log.info("Skip %s (clip already used in a prior short)", item.id)
+            continue
         try:
-            p = render_short(item, out_dir, **render_kwargs)
+            p = render_short(item, out_dir, tts=tts, **render_kwargs)
             out.append(p)
+            if item.out_path:
+                item.status = "rendered"
         except Exception as e:  # pragma: no cover - render failures are environment-specific
             log.error("Render failed for %s: %s", item.id, e)
+    if upsert and out:
+        try:
+            from neo4j import GraphDatabase
+            uri, user, pw, db = _neo4j_creds()
+            with GraphDatabase.driver(uri, auth=(user, pw)) as drv:
+                upsert_manifest(drv, plan, out_dir)
+        except Exception as e:  # pragma: no cover
+            log.warning("Manifest upsert failed: %s", e)
+    return out
+
+
+def _already_rendered_clips() -> set:
+    """Clip keys already used by a rendered ``:Short`` (dedup source)."""
+    from neo4j import GraphDatabase
+    uri, user, pw, db = _neo4j_creds()
+    out: set = set()
+    try:
+        with GraphDatabase.driver(uri, auth=(user, pw), database=db) as drv:
+            with drv.session(database=db) as sess:
+                for r in sess.run(
+                    "MATCH (sh:Short {status:'rendered'}) "
+                    "RETURN sh.clip_keys AS ks"
+                ).data():
+                    ks = r.get("ks") or []
+                    out.update(ks)
+    except Exception as e:  # graph optional for rendering
+        log.warning("Could not read rendered-clip history: %s", e)
     return out

@@ -151,8 +151,12 @@ def _cmd_render(args) -> int:
         if any(not s.shots for s in plan.shorts):
             plan = planner.iterate_plan(plan, anchors, short_count=len(plan.shorts))
         out_dir = args.out_dir or DEFAULT_OUT_DIR
-        paths = render.render_plan(plan, out_dir, only=args.only)
-        render.upsert_manifest(driver, plan, out_dir)
+        paths = render.render_plan(
+            plan, out_dir, only=args.only, tts=args.tts,
+            skip_used_clips=args.skip_used, upsert=args.upsert,
+        )
+        if not args.upsert:
+            render.upsert_manifest(driver, plan, out_dir)
     finally:
         driver.close()
     print(f"Rendered {len(paths)} short(s) -> {out_dir}")
@@ -221,6 +225,12 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--only", nargs="*", default=None, help="Render only these short ids")
     pr.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     pr.add_argument("--pool", type=int, default=400)
+    pr.add_argument("--tts", action="store_true",
+                    help="Narrate shorts in the owner's voice (XTTS-v2 clone)")
+    pr.add_argument("--skip-used", action="store_true",
+                    help="Skip shorts whose B-roll was used in a prior rendered short")
+    pr.add_argument("--upsert", action="store_true",
+                    help="Persist :ShortPlan/:Short manifest (status/published) to Neo4j")
     pr.set_defaults(func=_cmd_render)
 
     pl = sub.add_parser("list", help="List plans (disk or Neo4j).")

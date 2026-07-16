@@ -564,29 +564,32 @@ def _trip_clips(driver, trip_key: str, *, limit: int) -> List[Dict[str, object]]
             k=trip_key, lim=limit,
         ).data()
         # Dashcam Trips (footage) are DISJOINT from the phone-tracker
-        # Trips that carry located Stops, so a clip's place comes from the
-        # DashcamClips have NULL startTime in this graph, so we can't
-        # time-align clips to Stops. Instead, layer the day's real
-        # places (phone-tracker Stops, which DO carry location) across
-        # the drive's clips round-robin: the short reads as a journey
-        # ("left Raleigh house -> on I-40 -> arrived Charlotte ...").
-        stops = sess.run(
+        # Trips that carry located Stops, and DashcamClips have NULL
+        # startTime, so true time-alignment isn't possible. Instead layer
+        # the real named places (SummaryPlace: home/work/other, with lat/
+        # lon) across the drive's clips round-robin so the short reads as a
+        # journey ("left Home (South End) -> on the road -> arrived Kure
+        # Beach ...").
+        places = sess.run(
             """
-            MATCH (s:Stop) WHERE s.location IS NOT NULL
-            RETURN s.geofence AS g, s.location AS loc
+            MATCH (p:SummaryPlace)
+            RETURN p.name AS name, p.place_role AS role
             LIMIT 200
             """,
         ).data()
-        located = [r for r in stops if (r.get("g") or r.get("loc"))]
+        named = [r for r in places if r.get("name")]
         out: List[Dict[str, object]] = []
         for i, r in enumerate(clips):
-            geo = located[i % len(located)] if located else {}
+            pl = named[i % len(named)] if named else {}
+            label = f"{pl.get('name', '')}"
+            if pl.get("role") and pl["role"] not in ("other", None):
+                label = f"{pl['role'].title()} · {pl['name']}"
             out.append({
                 "clip_key": r.get("clip_key"),
                 "t_sec": 2.0,
                 "mph": None,
-                "geofence": geo.get("g"),
-                "location": geo.get("loc"),
+                "geofence": label,
+                "location": pl.get("name"),
                 "time_label": None,
             })
         return out

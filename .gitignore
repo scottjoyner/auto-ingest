@@ -44,3 +44,4 @@ speed.png
 # smoke-test render output
 shorts_out_smoke/
 *__tmp__TEMP_MPY*
+.venv-tts/

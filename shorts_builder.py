@@ -814,6 +814,7 @@ def compose_scripted_short(
     target_h: int = 1920,
     bitrate: str = "6M",
     fade: float = 0.12,
+    narration_audio: Optional[Path] = None,
 ) -> None:
     """Compose a research-scripted short from highway B-roll + a cue track.
 
@@ -902,9 +903,27 @@ def compose_scripted_short(
         caption_clips.append(ic)
 
     comp = CompositeVideoClip([broll] + caption_clips)
+    # A synthesized narration track (e.g. owner-voice TTS) takes precedence
+    # over any ambient B-roll audio. It is trimmed/padded to the video length
+    # so the short is fully narrated even if the voice clip is shorter/longer.
+    narration_clip = None
+    if narration_audio and Path(narration_audio).exists():
+        try:
+            from moviepy.editor import AudioFileClip
+            a = AudioFileClip(str(narration_audio))
+            if float(a.duration or 0.0) > total:
+                a = a.subclip(0.0, total)
+            elif total > float(a.duration or 0.0):
+                a = a.fx(__import__("moviepy.video.fx").video.fx.audio_loop,
+                         n=max(1, int(total // max(float(a.duration or 1.0), 0.1))))
+                a = a.subclip(0.0, total)
+            comp = comp.set_audio(a)
+            narration_clip = a
+        except Exception as e:  # pragma: no cover - environment dependent
+            logging.warning("Narration audio unavailable, rendering silent: %s", e)
     # Dashcam B-roll is often video-only; skip the audio codec (and any
     # missing audio reader) when there is no audio track to mux.
-    has_audio = bool(getattr(broll, "audio", None))
+    has_audio = bool(getattr(comp, "audio", None))
     _write_videofile_safely(
         comp, out_path, fps=float(broll.fps or 30.0),
         codec="libx264",
