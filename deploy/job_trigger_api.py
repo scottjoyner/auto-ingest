@@ -26,8 +26,14 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+# Path configuration — single source of truth is `.env` (NAS_ROOT / DROP_ROOT),
+# which docker-compose.yml injects into the container environment. The defaults
+# below MUST match `.env` + `docker-compose.yml` (W-46). The host mount
+# `${NAS_ROOT}` (= NAS4) is bound into the container at `/nas`, so DROP_ROOT
+# resolves to `/nas/drop` inside the container. Do NOT reintroduce the old
+# `/media/scott/NAS1` default — that was a stale path (NAS1 no longer exists).
 DROP_ROOT = os.environ.get("DROP_ROOT", "/nas/drop")
-NAS_ROOT = os.environ.get("NAS_ROOT", "/media/scott/NAS1")
+NAS_ROOT = os.environ.get("NAS_ROOT", "/media/scott/NAS4")
 APP_DIR = "/app"  # mounted as /app in container
 
 class JobTriggerHandler(http.server.BaseHTTPRequestHandler):
