@@ -24,3 +24,9 @@ linker_*.log
 *.pyc
 *.pyo
 *.pyd
+
+# coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml

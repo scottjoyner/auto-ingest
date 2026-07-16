@@ -37,10 +37,9 @@ is guarded so this module imports cleanly even when the ML stack is absent
 """
 from __future__ import annotations
 
-import shutil
 import platform
+import shutil
 from typing import Dict
-
 
 # ---------------------------------------------------------------------------
 # Cached detection result
@@ -104,7 +103,6 @@ def faiss_backend() -> str:
 
     faiss = None
     try:
-        import faiss  # type: ignore
         faiss = __import__("faiss")
         _FAISS_AVAILABLE = True
     except Exception:

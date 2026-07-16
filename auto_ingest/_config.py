@@ -15,15 +15,14 @@ try:  # preferred: repo-root module (full implementation)
     from auto_ingest_config import (  # type: ignore
         get_fileserver_path,
         get_fileserver_root,
+        get_hot_root,
         get_neo4j_config,
         get_nextcloud_root,
         get_nextcloud_webdav,
         get_storage_layout,
-        get_hot_root,
     )
 except Exception:  # pragma: no cover - CI / out-of-repo import fallback
     import os
-    import socket
 
     def get_fileserver_root() -> str:
         return os.environ.get("FILESERVER_ROOT", "/media/scott/SSD_4TB/fileserver")

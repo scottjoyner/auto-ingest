@@ -59,6 +59,40 @@ testpaths = ["tests", "auto_ingest"]
 # torch/transformers/ultralytics at import time.
 addopts = "--ignore=auto_ingest/ingest --ignore=auto_ingest/diarize --ignore=auto_ingest/dashcam --ignore=auto_ingest/content"
 
+# Coverage scope (W-52): measure the TESTABLE surface only — the dependency-free
+# modules + the pure, mockable logic that runs in CI without the ML stack or a
+# live Neo4j. The heavy subpackages (ingest/diarize/dashcam/content) require
+# torch/whisper/pyannote/GPU at import/inference time and are excluded from the
+# denominator so 80% means "80% of runnable logic is covered", not "80% of torch
+# model code". Their mockable helpers are imported under mock where feasible.
+[tool.coverage.run]
+branch = true
+source = [
+    "auto_ingest",
+    "auto_ingest_config",
+]
+omit = [
+    "auto_ingest/ingest/*",
+    "auto_ingest/diarize/*",
+    "auto_ingest/dashcam/*",
+    "auto_ingest/content/*",
+    "auto_ingest/tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "def main",
+    "import torch",
+    "import pyannote",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

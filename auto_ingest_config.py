@@ -13,8 +13,9 @@ Usage:
 
 import os
 import socket
-import yaml
 from pathlib import Path
+
+import yaml
 
 
 def _resolve_env(value, default=None):
@@ -71,12 +72,12 @@ def get_storage_layout():
 
     return {
         'hot_root': os.environ.get('HOT_STORAGE_ROOT')
-        or knowledge_map.get('hot_layer_path')
         or (matched_machine or {}).get('hot_ssd_root')
+        or knowledge_map.get('hot_layer_path')
         or '/media/scott/SSD_4TB/audio',
         'cold_root': os.environ.get('COLD_STORAGE_ROOT')
-        or knowledge_map.get('mirror_vault_path')
         or (matched_machine or {}).get('nas_mirror_root')
+        or knowledge_map.get('mirror_vault_path')
         or '/media/scott/SSD_4TB/fileserver',
         'fileserver_root': os.environ.get('FILESERVER_ROOT')
         or (matched_machine or {}).get('fileserver_root')
@@ -101,33 +102,40 @@ def get_fileserver_root():
 
 
 def get_neo4j_config():
-    """Get Neo4j connection settings for the current machine."""
+    """Get Neo4j connection settings for the current machine.
+
+    Priority for each field: environment variable -> config.yaml (machine match,
+    then first entry) -> built-in default. Env always wins so a single export
+    can retarget every script regardless of the committed config.
+    """
+    cfg_uri = cfg_user = cfg_pass = None
+
     config_path = _find_config_path()
     if config_path:
         with open(config_path) as f:
-            cfg = yaml.safe_load(f)
-        
+            cfg = yaml.safe_load(f) or {}
+
         hostname = socket.gethostname()
-        for key, vals in cfg.get('machine_paths', {}).items():
+        matched = None
+        for vals in cfg.get('machine_paths', {}).values():
             if vals.get('hostname_pattern') and vals['hostname_pattern'] in hostname:
-                return {
-                    'uri': vals['neo4j_uri'],
-                    'user': vals['neo4j_user'],
-                    'password': _resolve_env(vals.get('neo4j_password'), os.environ.get('NEO4J_PASSWORD', '')),
-                }
-        
-        vals_list = list(cfg.get('machine_paths', {}).values())
-        if vals_list:
-            return {
-                'uri': vals_list[0]['neo4j_uri'],
-                'user': vals_list[0]['neo4j_user'],
-                'password': _resolve_env(vals_list[0].get('neo4j_password'), os.environ.get('NEO4J_PASSWORD', '')),
-            }
-    
+                matched = vals
+                break
+        if matched is None:
+            vals_list = list(cfg.get('machine_paths', {}).values())
+            matched = vals_list[0] if vals_list else None
+
+        if matched:
+            cfg_uri = matched.get('neo4j_uri')
+            cfg_user = matched.get('neo4j_user')
+            cfg_pass = _resolve_env(
+                matched.get('neo4j_password'), os.environ.get('NEO4J_PASSWORD', '')
+            )
+
     return {
-        'uri': os.environ.get('NEO4J_URI', 'bolt://100.64.43.123:7687'),
-        'user': os.environ.get('NEO4J_USER', 'neo4j'),
-        'password': os.environ.get('NEO4J_PASSWORD', ''),
+        'uri': os.environ.get('NEO4J_URI') or cfg_uri or 'bolt://100.64.43.123:7687',
+        'user': os.environ.get('NEO4J_USER') or cfg_user or 'neo4j',
+        'password': os.environ.get('NEO4J_PASSWORD') or cfg_pass or '',
     }
 
 
@@ -159,6 +167,8 @@ def get_neo4j_env():
         get_neo4j_db(),
     )
 
+
+def get_nextcloud_root():
     """Path to the Nextcloud store (true iPhone images/videos/audio).
 
     The Nextcloud data is on a separate store and is only mounted on some
