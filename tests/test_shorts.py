@@ -9,8 +9,8 @@ Covers the parts that do NOT need moviepy or a live LLM:
 """
 from pathlib import Path
 
-from auto_ingest.shorts import models, planner, backdrop, curator
-from auto_ingest.shorts.models import Brief, SourceRef, Plan, PlannedShort, Cue, Shot
+from auto_ingest.shorts import backdrop, curator, planner
+from auto_ingest.shorts.models import Brief, Cue, Plan, PlannedShort, Shot, SourceRef
 
 
 # --------------------------------------------------------------------------- #
@@ -154,6 +154,26 @@ class _FakeSession:
                  "tkey": "2025_0101_120030", "started": None,
                  "concept": "agent", "score": 0.72},
             ])
+        if "is_lyrics" in q or "review_needed" in q or "music_overlap" in q:
+            if "review_needed" in q:
+                return _FakeResult([
+                    {"clip_key": "segclip_rev1", "idx": 1, "start": 12.0,
+                     "text": "uncertain utterance here", "speaker": "Driver"},
+                    {"clip_key": "segclip_rev2", "idx": 4, "start": 55.0,
+                     "text": "another flagged segment", "speaker": "Passenger"},
+                ])
+            return _FakeResult([
+                {"clip_key": "segclip_mus1", "idx": 2, "start": 20.0,
+                 "text": "la la la singing along", "score": 0.91, "music_overlap": True},
+                {"clip_key": "segclip_mus2", "idx": 7, "start": 88.0,
+                 "text": "lyrics in the background", "score": 0.74, "music_overlap": False},
+            ])
+        if "belongs_to" in q and "mph" in q:
+            return _FakeResult([
+                {"clip_key": f"c{i}", "frame": i * 210, "mph": 55.0 + (i % 20),
+                 "fps": 30.0, "path": f"/data/c{i}"}
+                for i in range(20)
+            ])
         return _FakeResult([])
     def close(self): pass
 
@@ -197,27 +217,50 @@ def test_discusses_topic_returns_spoken_discussions():
 
 
 def test_brief_from_discussions_no_llm():
-    clips = [
-        curator.DiscussionClip("u1", "I think LLMs will change everything",
-                               "k1", None, "large language model", 0.81),
-        curator.DiscussionClip("u2", "agents can call tools",
-                               "k2", None, "agent", 0.72),
-        curator.DiscussionClip("u1", "I think LLMs will change everything",  # dup
-                               "k1", None, "large language model", 0.81),
-    ]
-    brief = curator.brief_from_discussions("large_language_models", clips,
-                                           topic_title="Large Language Models")
-    assert brief.hook == "I think LLMs will change everything"
-    assert len(brief.points) == 2  # de-duped
-    assert brief.sources[0].kind == "utterance"
-    assert brief.sources[0].ref_id == "u1"
-    assert "large language model" in brief.tags
+        clips = [
+            curator.DiscussionClip("u1", "I think LLMs will change everything",
+                                   "k1", "large language model", 0.81),
+            curator.DiscussionClip("u2", "agents can call tools",
+                                   "k2", "agent", 0.72),
+            curator.DiscussionClip("u1", "I think LLMs will change everything",  # dup
+                                   "k1", "large language model", 0.81),
+        ]
+        brief = curator.brief_from_discussions("large_language_models", clips,
+                                            topic_title="Large Language Models")
+        assert brief.hook == "I think LLMs will change everything"
+        assert len(brief.points) == 2  # de-duped
+        assert brief.sources[0].kind == "utterance"
+        assert brief.sources[0].ref_id == "u1"
+        assert "large language model" in brief.tags
 
 
 def test_brief_from_discussions_empty_raises():
     import pytest
     with pytest.raises(ValueError):
         curator.brief_from_discussions("x", [])
+
+
+def test_plan_montage_builds_ambient_plan(monkeypatch, tmp_path):
+    monkeypatch.setattr(backdrop, "_fr_path_for_key",
+                        lambda key, root: Path(f"/mnt/{key}.MP4"))
+
+    plan = planner.plan_montage(
+        _FakeDriver(), count=3, dur=30.0, mood="calm", limit=400, seed=7,
+    )
+    assert len(plan.shorts) == 3
+    for s in plan.shorts:
+        assert s.shots, "montage short must have highway shots"
+        for sh in s.shots:
+            assert sh.fr_path
+        assert s.cues, "montage cues must be non-empty"
+        assert all(c.kind == "mood" for c in s.cues)
+        assert all(c.text for c in s.cues)
+
+    out = tmp_path / "montage.json"
+    plan.save(out)
+    loaded = Plan.load(out)
+    assert loaded.topic == "montage"
+    assert len(loaded.shorts) == 3
 
 
 def test_plan_discusses_flag_wires_through(monkeypatch, tmp_path):
@@ -232,7 +275,7 @@ def test_plan_discusses_flag_wires_through(monkeypatch, tmp_path):
         caught["limit"] = limit
         return [
             curator.DiscussionClip("u1", "spoken point about the topic here",
-                                   "k1", None, "concept_a", 0.7),
+                                   "k1", "concept_a", 0.7),
         ]
 
     monkeypatch.setattr(curator, "discusses_topic", _fake_discusses)
@@ -248,3 +291,46 @@ def test_plan_discusses_flag_wires_through(monkeypatch, tmp_path):
     assert caught == {"topic": "large_language_models", "min": 0.7, "minlen": 30, "limit": 5}
     written = list(tmp_path.glob("*.json"))
     assert written and "large_language_models" in written[0].name
+
+
+def test_plan_highlights_builds_event_shorts(monkeypatch, tmp_path):
+    import auto_ingest.shorts.planner as pl
+
+    monkeypatch.setattr(pl.backdrop, "_fr_path_for_key",
+                        lambda key, root: Path(f"/mnt/{key}.MP4"))
+
+    plan = pl.plan_highlights(
+        _FakeDriver(), kinds=("music", "review", "speed"),
+        per_kind=2, dur=20.0, limit=400, seed=3,
+    )
+    assert plan.topic == "highlights"
+    assert plan.brief.topic == "highlights"
+    kinds = {s.notes.split()[0].split("=")[1] for s in plan.shorts}
+    assert "music" in kinds
+    assert "review" in kinds
+    assert "speed" in kinds
+    for s in plan.shorts:
+        assert s.shots, "highlight short must have a shot"
+        assert s.shots[0].fr_path
+        assert s.cues, "highlight cues must be non-empty"
+        assert all(c.text for c in s.cues)
+
+    out = tmp_path / "highlights.json"
+    plan.save(out)
+    loaded = Plan.load(out)
+    assert loaded.topic == "highlights"
+    assert len(loaded.shorts) >= 3
+
+
+def test_plan_highlights_skips_missing_kind(monkeypatch):
+    import auto_ingest.shorts.planner as pl
+
+    monkeypatch.setattr(pl.backdrop, "_fr_path_for_key",
+                        lambda key, root: Path(f"/mnt/{key}.MP4"))
+
+    plan = pl.plan_highlights(
+        _FakeDriver(), kinds=("speed",), per_kind=2, dur=20.0, limit=400, seed=1,
+    )
+    assert plan.shorts, "speed events should be produced"
+    for s in plan.shorts:
+        assert s.notes.split()[0] == "kind=speed"

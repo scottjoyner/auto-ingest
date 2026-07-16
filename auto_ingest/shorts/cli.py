@@ -49,9 +49,17 @@ def _cmd_plan(args) -> int:
                 print(f"No spoken discussion found for topic {args.topic!r} "
                       f"(min_score={args.min_score}). Run link-concepts first.")
                 return 1
-            brief = curator.brief_from_discussions(args.topic, clips)
-            print(f"Curated {len(clips)} spoken clip(s) about {args.topic!r} "
-                  f"-> {len(brief.points)} points")
+            # Time-aligned: B-roll is the dashcam clip AT the moment each
+            # utterance was spoken, not a random highway anchor.
+            plan = planner.plan_discussion(
+                driver, clips, topic=args.topic,
+                short_count=args.shorts, short_dur=args.dur, seed=args.seed)
+            out = args.plans_dir or DEFAULT_PLANS_DIR
+            path = Path(out) / f"{args.topic}__{plan.plan_id}.json"
+            plan.save(path)
+            print(f"Planned {len(plan.shorts)} time-aligned discussion short(s) "
+                  f"-> {path}")
+            return 0
         else:
             brief = curator.curate_brief(driver, args.topic, top_papers=args.top_papers)
         anchors = backdrop.select_highway_pool(driver, limit=args.pool)
@@ -65,6 +73,38 @@ def _cmd_plan(args) -> int:
     path = Path(out) / f"{args.topic}__{plan.plan_id}.json"
     plan.save(path)
     print(f"Planned {len(plan.shorts)} shorts -> {path}")
+    return 0
+
+
+def _cmd_montage(args) -> int:
+    driver, _ = _driver()
+    try:
+        plan = planner.plan_montage(
+            driver, count=args.shorts, dur=args.dur, mood=args.mood,
+            limit=args.pool, seed=args.seed,
+        )
+    finally:
+        driver.close()
+    out = args.plans_dir or DEFAULT_PLANS_DIR
+    path = Path(out) / f"montage__{plan.plan_id}.json"
+    plan.save(path)
+    print(f"Planned {len(plan.shorts)} montage short(s) -> {path}")
+    return 0
+
+
+def _cmd_highlights(args) -> int:
+    driver, _ = _driver()
+    try:
+        plan = planner.plan_highlights(
+            driver, kinds=tuple(args.kinds), per_kind=args.per_kind,
+            dur=args.dur, limit=args.pool, seed=args.seed,
+        )
+    finally:
+        driver.close()
+    out = args.plans_dir or DEFAULT_PLANS_DIR
+    path = Path(out) / f"highlights__{plan.plan_id}.json"
+    plan.save(path)
+    print(f"Planned {len(plan.shorts)} highlight short(s) -> {path}")
     return 0
 
 
@@ -170,6 +210,28 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--plans-dir", type=Path, default=DEFAULT_PLANS_DIR)
     pl.add_argument("--neo4j", action="store_true")
     pl.set_defaults(func=_cmd_list)
+
+    pm = sub.add_parser("montage", help="Plan a Day-in-the-Drive ambient montage (no narration).")
+    pm.add_argument("--shorts", type=int, default=3)
+    pm.add_argument("--dur", type=float, default=30.0, help="Seconds per short")
+    pm.add_argument("--mood", type=str, default=None,
+                    help="calm | focused | night (drives caption mood/road)")
+    pm.add_argument("--pool", type=int, default=400, help="Highway anchor pool size")
+    pm.add_argument("--seed", type=int, default=None)
+    pm.add_argument("--plans-dir", type=Path, default=DEFAULT_PLANS_DIR)
+    pm.set_defaults(func=_cmd_montage)
+
+    ph = sub.add_parser("highlights", help="Plan event-highlight shorts (music/review/speed).")
+    ph.add_argument("--kinds", nargs="*", default=["music", "review", "speed"],
+                    choices=["music", "review", "speed"],
+                    help="Event kinds to mine")
+    ph.add_argument("--per-kind", type=int, default=2, help="Shorts per event kind")
+    ph.add_argument("--dur", type=float, default=20.0, help="Seconds per short")
+    ph.add_argument("--pool", type=int, default=400, help="Highway anchor pool size")
+    ph.add_argument("--seed", type=int, default=None)
+    ph.add_argument("--plans-dir", type=Path, default=DEFAULT_PLANS_DIR)
+    ph.set_defaults(func=_cmd_highlights)
+
     return p
 
 

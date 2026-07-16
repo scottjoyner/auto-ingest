@@ -192,8 +192,10 @@ class DiscussionClip:
     utterance_id: str
     text: str
     transcription_key: str
-    start_ms: Optional[int]
     concept: str
+    score: float
+    clip_key: str = ""
+    start_sec: Optional[float] = None
     score: float
 
 
@@ -221,8 +223,8 @@ def discusses_topic(driver, topic: str, *, min_score: float = 0.65,
             WITH u, tr, collect(DISTINCT c.name) AS concepts,
                  max(m.score) AS best_score
             RETURN u.id AS uid, u.text AS text, tr.key AS tkey,
-                   tr.started_at AS started, concepts[0] AS concept,
-                   best_score AS score
+                   tr.clip_key AS clip_key, u.start AS start_sec,
+                   concepts[0] AS concept, best_score AS score
             ORDER BY score DESC
             LIMIT $limit
             """,
@@ -233,7 +235,9 @@ def discusses_topic(driver, topic: str, *, min_score: float = 0.65,
     return [
         DiscussionClip(
             utterance_id=r["uid"], text=r["text"] or "",
-            transcription_key=r["tkey"] or "", start_ms=None,
+            transcription_key=r["tkey"] or "",
+            clip_key=r.get("clip_key") or "",
+            start_sec=(float(r["start_sec"]) if r.get("start_sec") is not None else None),
             concept=r["concept"], score=float(r["score"]),
         )
         for r in rows

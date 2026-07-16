@@ -12,12 +12,23 @@ explore variations. Nothing here touches moviepy — it is pure scheduling.
 from __future__ import annotations
 
 import logging
+import random
 import uuid
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
+from auto_ingest.shorts import backdrop
 from auto_ingest.shorts.models import Brief, Cue, Plan, PlannedShort, Shot
 
 log = logging.getLogger("shorts.planner")
+
+MONTAGE_KIND = "mood"
+MOOD_PRESETS = {
+    "calm": ("I-15", "cruising"),
+    "focused": ("I-80", "in the zone"),
+    "night": ("US-101", "night drive"),
+    None: ("I-15", "on the road"),
+}
 
 SECS_PER_CUE = 3.2          # approx on-screen time per caption line
 HOOK_KIND = "hook"
@@ -103,12 +114,317 @@ def plan_shorts(brief: Brief, anchors: List[Dict[str, object]], *,
     return plan
 
 
+def plan_montage(driver, *, count: int = 3, dur: float = 30.0,
+                 mood: Optional[str] = None, limit: int = 400,
+                 seed: Optional[int] = None, shots_per_short: int = 3,
+                 clip_dur: float = 6.0, min_gap_sec: float = 8.0) -> Plan:
+    """Plan ``count`` pure-footage ambient montages (no research narration).
+
+    Picks highway clips via :func:`backdrop.select_highway_pool` +
+    :func:`backdrop.pick_shots`, then builds light mood/metadata captions
+    (e.g. "72 mph • I-15 • 2:14 PM") from each shot's ``mph``/time. Uses the
+    same Plan/PlannedShort/Cue model so the normal renderer handles output.
+    """
+    rnd = random.Random(seed)
+    anchors = backdrop.select_highway_pool(driver, limit=limit)
+    if not anchors:
+        raise ValueError("No highway footage anchors available for montage")
+
+    road, vibe = MOOD_PRESETS.get(mood, MOOD_PRESETS[None])
+    base_clock = datetime(2025, 1, 1, 12, 0, 0) + timedelta(minutes=int(rnd.random() * 600))
+
+    shorts: List[PlannedShort] = []
+    for s_idx in range(count):
+        seed_i = int(rnd.random() * 1e9)
+        picked = backdrop.pick_shots(
+            anchors, count=shots_per_short, min_gap_sec=min_gap_sec,
+            clip_dur=clip_dur, rng_seed=seed_i,
+        )
+        if not picked:
+            picked = backdrop.pick_shots(
+                anchors, count=shots_per_short, min_gap_sec=0.0,
+                clip_dur=clip_dur, rng_seed=seed_i,
+            )
+        shots = [Shot(**s) for s in picked]
+        cues = _montage_cues(shots, dur, road=road, vibe=vibe,
+                             base_clock=base_clock, idx=s_idx)
+        shorts.append(PlannedShort(
+            id=uuid.uuid5(uuid.NAMESPACE_URL, f"montage:{mood}:{seed}:{s_idx}").hex[:10],
+            brief_topic="montage",
+            title=f"Day in the Drive — {road} #{s_idx + 1}",
+            cues=cues,
+            shots=shots,
+            notes=f"mood={mood or 'default'} road={road} vibe={vibe}",
+            status="planned",
+        ))
+
+    plan = Plan(
+        topic="montage",
+        brief=Brief(topic="montage", title="Day in the Drive", hook="", points=[]),
+        shorts=shorts,
+        iteration=1,
+    )
+    log.info("Planned %d montage short(s) (mood=%s, dur=%.0fs, seed=%s)",
+             count, mood, dur, seed)
+    return plan
+
+
+def _montage_cues(shots: List[Shot], dur: float, *, road: str, vibe: str,
+                  base_clock: datetime, idx: int) -> List[Cue]:
+    if not shots:
+        return []
+    lead = 0.4
+    span = max(dur - lead, 1.0)
+    step = span / len(shots)
+    cues: List[Cue] = []
+    for i, sh in enumerate(shots):
+        start = lead + i * step
+        end = start + min(step, 3.2)
+        clock = (base_clock + timedelta(minutes=idx * 7 + i * 3)).strftime("%I:%M %p")
+        mph = f"{sh.mph:.0f} mph" if sh.mph is not None else "— mph"
+        text = f"{mph} • {road} • {clock}"
+        cues.append(Cue(start=round(start, 2), end=round(end, 2),
+                        text=text, kind=MONTAGE_KIND))
+    return cues
+
+
+def plan_highlights(driver, *, kinds: tuple = ("music", "review", "speed"),
+                    per_kind: int = 2, dur: float = 20.0, limit: int = 400,
+                    seed: Optional[int] = None) -> Plan:
+    """Plan punchy event-highlight shorts mined from graph event flags.
+
+    Three event kinds are mined:
+      * ``music``  — Segment WHERE is_lyrics=true OR music_overlap=true
+      * ``review`` — Segment WHERE review_needed=true
+      * ``speed``  — highway DashcamClip frames with mph > SPEED_MPH_MIN
+
+    Each found event becomes one :class:`PlannedShort` backed by highway B-roll
+    (resolved via :func:`backdrop._fr_path_for_key`) with a short auto-caption.
+    Kinds with no events are silently skipped.
+    """
+    root = __import__("auto_ingest.shorts.backdrop", fromlist=["_dashcam_root"])._dashcam_root()
+
+    events: List[Dict[str, object]] = []
+    if "music" in kinds:
+        events += _mine_segment_events(driver, "music", limit, _MUSIC_QUERY)
+    if "review" in kinds:
+        events += _mine_segment_events(driver, "review", limit, _REVIEW_QUERY)
+    if "speed" in kinds:
+        events += _mine_speed_events(driver, per_kind, limit)
+
+    shorts: List[PlannedShort] = []
+    used: Dict[str, int] = {}
+    for ev in events:
+        k = ev["kind"]
+        if used.get(k, 0) >= per_kind:
+            continue
+        used[k] = used.get(k, 0) + 1
+
+        clip_key = ev["clip_key"]
+        fr = backdrop._fr_path_for_key(clip_key, root)
+        shot = Shot(
+            clip_key=clip_key,
+            fr_path=str(fr) if fr else "",
+            t_sec=float(ev.get("t_sec", 0.0)),
+            dur=min(dur * 0.8, 6.0),
+            mph=ev.get("mph"),
+        )
+        cues = _highlight_cues(ev, dur)
+        shorts.append(PlannedShort(
+            id=uuid.uuid5(uuid.NAMESPACE_URL, f"highlight:{k}:{clip_key}:{ev.get('idx', 0)}").hex[:10],
+            brief_topic="highlights",
+            title=f"{ev['label']}",
+            cues=cues,
+            shots=[shot],
+            notes=f"kind={k} clip={clip_key} seg_idx={ev.get('idx')}",
+            status="planned",
+        ))
+
+    plan = Plan(
+        topic="highlights",
+        brief=Brief(topic="highlights", title="Event Highlights", hook="", points=[]),
+        shorts=shorts,
+        iteration=1,
+    )
+    log.info("Planned %d highlight short(s) (kinds=%s, dur=%.0fs, seed=%s)",
+             len(shorts), kinds, dur, seed)
+    return plan
+
+
+SPEED_MPH_MIN = 80.0
+
+_MUSIC_QUERY = """
+MATCH (s:Segment)
+WHERE s.is_lyrics = true OR s.music_overlap = true
+RETURN s.clip_key AS clip_key, s.idx AS idx, s.start AS start,
+       s.text AS text, s.lyrics_score AS score, s.music_overlap AS music_overlap
+ORDER BY coalesce(s.lyrics_score, 0) DESC
+LIMIT $limit
+"""
+
+_REVIEW_QUERY = """
+MATCH (s:Segment)
+WHERE s.review_needed = true
+RETURN s.clip_key AS clip_key, s.idx AS idx, s.start AS start,
+       s.text AS text, s.speaker_label AS speaker
+LIMIT $limit
+"""
+
+
+def _kind_present(events: List[Dict[str, object]], kind: str) -> bool:
+    return any(e["kind"] == kind for e in events)
+
+
+def _mine_segment_events(driver, kind: str, limit: int, query: str) -> List[Dict[str, object]]:
+    with driver.session() as sess:
+        rows = sess.run(query, limit=limit).data()
+    events: List[Dict[str, object]] = []
+    for r in rows:
+        clip_key = r.get("clip_key")
+        start = r.get("start") or 0.0
+        if kind == "music":
+            label = "🎵 Music detected"
+            if r.get("music_overlap"):
+                label = "🎶 Song playing"
+        else:
+            label = "⚠️ Flagged for review"
+        events.append({
+            "kind": kind,
+            "clip_key": clip_key,
+            "idx": r.get("idx", 0),
+            "t_sec": float(start) if isinstance(start, (int, float)) else 0.0,
+            "mph": None,
+            "label": label,
+            "text": (r.get("text") or "")[:60],
+        })
+    return events
+
+
+def _mine_speed_events(driver, per_kind: int, limit: int) -> List[Dict[str, object]]:
+    with driver.session() as sess:
+        rows = sess.run(
+            """
+            MATCH (f:Frame)-[:BELONGS_TO]->(c:DashcamClip)
+            WHERE c.view = 'F' AND f.mph >= $mph
+            RETURN c.key AS clip_key, f.mph AS mph, f.frame AS frame, c.fps AS fps
+            ORDER BY f.mph DESC
+            LIMIT $limit
+            """,
+            mph=SPEED_MPH_MIN, limit=limit,
+        ).data()
+    events: List[Dict[str, object]] = []
+    for r in rows:
+        fps = r.get("fps") or 30.0
+        frame = r.get("frame") or 0
+        events.append({
+            "kind": "speed",
+            "clip_key": r.get("clip_key"),
+            "idx": frame,
+            "t_sec": float(frame) / float(fps) if fps else 0.0,
+            "mph": r.get("mph"),
+            "label": f"🚀 {r.get('mph'):.0f} mph",
+            "text": "",
+        })
+    return events
+
+
+def _highlight_cues(ev: Dict[str, object], dur: float) -> List[Cue]:
+    lead = 0.4
+    text = ev.get("text") or ""
+    lines: List[tuple] = [(ev["kind"], str(ev.get("label", "")))]
+    if text:
+        lines.append(("detail", text))
+    span = max(dur - lead, 1.0)
+    step = span / len(lines)
+    cues: List[Cue] = []
+    for i, (kind, txt) in enumerate(lines):
+        start = lead + i * step
+        end = start + min(step, SECS_PER_CUE)
+        cues.append(Cue(start=round(start, 2), end=round(end, 2), text=txt, kind=kind))
+    return cues
+
+
 def _pick_shots_deterministic(anchors, *, count, min_gap_sec, clip_dur, rng) -> List[Dict]:
     from auto_ingest.shorts.backdrop import pick_shots
     seed = int(rng.random() * 1e9)
     return pick_shots(anchors, count=count, min_gap_sec=min_gap_sec,
                       clip_dur=clip_dur, rng_seed=seed)
 
+
+
+def plan_discussion(driver, clips, *, topic: str = "discussion",
+                    short_count: int = 3, short_dur: float = 12.0,
+                    clip_dur: float = 8.0, seed: Optional[int] = None) -> Plan:
+    """Plan shorts from real spoken DiscussionClips, time-aligned to the dashcam
+    moment each line was said.
+
+    Each clip carries ``clip_key`` (-> DashcamClip) and ``start_sec`` (offset
+    within that clip), so the B-roll shot is taken AT the utterance, not a random
+    highway anchor. Captions are the viewer's own words. Falls back to the
+    highway pool for any clip whose source footage is not resolvable here.
+    """
+    from auto_ingest.shorts import backdrop, curator
+    from auto_ingest.shorts.curator import DiscussionClip
+
+    root = backdrop._dashcam_root()
+    brief = curator.brief_from_discussions(topic, list(clips))
+
+    # Resolve each clip's source footage; keep only those we can show
+    # time-aligned. Audio-sourced utterances (no clip_key) fall back to the
+    # highway pool below.
+    resolvable: List[DiscussionClip] = []
+    for c in clips:
+        if not c.clip_key:
+            continue
+        fr = backdrop._fr_path_for_key(c.clip_key, root)
+        if fr and __import__("os").path.exists(str(fr)):
+            resolvable.append(c)
+
+    shorts: List[PlannedShort] = []
+    pool = backdrop.select_highway_pool(driver, limit=200)
+    pool_shots = backdrop.pick_shots(pool, count=1, min_gap_sec=0.0,
+                                     clip_dur=clip_dur, rng_seed=seed or 1)
+    n = min(short_count, max(len(resolvable), 1))
+    for s_idx in range(n):
+        if s_idx < len(resolvable):
+            c = resolvable[s_idx]
+            fr = backdrop._fr_path_for_key(c.clip_key, root)
+            t0 = max(0.0, float(c.start_sec or 0.0))
+            src = f"clip={c.clip_key} t={t0:.1f}s (time-aligned)"
+            shot = Shot(clip_key=c.clip_key, fr_path=str(fr),
+                        t_sec=t0, dur=clip_dur, mph=None)
+        else:
+            # Audio-sourced utterance (no dashcam clip): use a generic
+            # highway anchor as B-roll instead of the exact moment.
+            a = pool_shots[0] if pool_shots else {}
+            src = "highway-pool (audio source, no clip_key)"
+            shot = Shot(clip_key=str(a.get("clip_key", "")),
+                        fr_path=str(a.get("fr_path") or ""),
+                        t_sec=float(a.get("t_sec", 0.0)),
+                        dur=clip_dur, mph=a.get("mph"))
+            c = clips[s_idx % len(clips)]
+        cues = [
+            Cue(0.0, 2.4, brief.title, kind="hook"),
+            Cue(2.4, min(short_dur, 2.4 + clip_dur), c.text.strip()[:90], kind="point"),
+        ]
+        shorts.append(PlannedShort(
+            id=uuid.uuid5(uuid.NAMESPACE_URL, f"discussion:{topic}:{c.utterance_id}").hex[:10],
+            brief_topic=topic,
+            title=brief.title,
+            cues=cues,
+            shots=[shot] if shot.fr_path else [],
+            notes=f"utter={c.utterance_id} {src} concept={c.concept}",
+            status="planned",
+        ))
+
+    plan = Plan(
+        topic=topic,
+        brief=brief,
+        shorts=shorts,
+        iteration=1,
+    )
+    log.info("Planned %d discussion short(s) for %s (time-aligned)", len(shorts), topic)
+    return plan
 
 def iterate_plan(prev: Plan, anchors: List[Dict[str, object]], *,
                  short_count: Optional[int] = None, short_dur: Optional[float] = None,
