@@ -39,6 +39,20 @@ or the `auto_ingest` package and are not part of the supported pipeline.
 - Misspelled duplicate of `metadata_scraper_iterator.py`. Archived; the correctly
   spelled module remains at repo root.
 
-## Recovery
-All files are intact here. If any is later needed, `git mv` it back to the repo
-root (or into the appropriate `auto_ingest/` subpackage) and update references.
+## `quality_api/` — source lost (UNRECOVERABLE)
+
+The `quality_api/` directory was committed (and present) with **only** `.pyc`
+bytecode — no `.py` source for `__init__`, `config`, `app`, `embeddings`,
+`neo4j_client`, or `services/transcript_service`. Python 3.12 `.pyc` files embed
+a hash of the source path + size and cannot be reliably decompiled to working
+source. No script in the repo imports `quality_api` (grep found zero references),
+so it is not on any import path.
+
+- Moved to `archive/quality_api_pyc_only/` for preservation.
+- **Resolution:** treated as unrecoverable. If the source resurfaces, restore it
+  under `auto_ingest/` (or a new `quality/` subpackage) and add tests; do not
+  re-add a `.pyc`-only package.
+
+_See LLD §3.4 W-44._
+
+
