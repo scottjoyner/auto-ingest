@@ -13,10 +13,15 @@ import neo4j
 import sklearn.cluster
 from sklearn.metrics import silhouette_score
 
+from auto_ingest_config import get_storage_layout, get_neo4j_config
 
-AUDIO_ROOT = os.environ.get("AUDIO_ROOT", "/media/scott/SSD_4TB/audio")
-NEO_URI    = "bolt://localhost:7687"
-NEO_AUTH=("neo4j", "knowledge_graph_2026")
+
+_LAYOUT = get_storage_layout()
+AUDIO_ROOT = os.environ.get("AUDIO_ROOT", _LAYOUT["hot_root"])
+_NEO4J_CFG = get_neo4j_config()
+NEO_URI    = os.environ.get("NEO4J_URI", _NEO4J_CFG["uri"])
+NEO_AUTH   = (os.environ.get("NEO4J_USER", _NEO4J_CFG["user"]),
+              os.environ.get("NEO4J_PASSWORD", _NEO4J_CFG["password"]))
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"

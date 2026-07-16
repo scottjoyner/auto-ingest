@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from auto_ingest_config import get_fileserver_path
+from auto_ingest_config import get_fileserver_path, get_neo4j_config
 """
 Global speaker linking with:
   - Segment-level diarization selection (SPOKEN_BY proportion) with auto fallback to Utterances
@@ -57,9 +57,10 @@ ALT_AUDIO_BASES = [
 AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".flac", ".aac", ".ogg"}
 
 # Neo4j
-NEO4J_URI      = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_USER     = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026")
+_NEO4J_CFG = get_neo4j_config()
+NEO4J_URI      = os.getenv("NEO4J_URI", _NEO4J_CFG["uri"])
+NEO4J_USER     = os.getenv("NEO4J_USER", _NEO4J_CFG["user"])
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", _NEO4J_CFG["password"])
 NEO4J_DB       = os.getenv("NEO4J_DB", "neo4j")
 
 # Embedding backend

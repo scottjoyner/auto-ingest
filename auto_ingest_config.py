@@ -168,3 +168,40 @@ def get_fileserver_path(*parts):
     """Get a full fileserver path for the given sub-paths."""
     root = get_fileserver_root()
     return os.path.join(root, *parts)
+
+
+def get_neo4j_driver(database=None):
+    """Return a connected Neo4j driver using get_neo4j_config().
+
+    This is the single import point for leaf scripts that need a live
+    connection. Credentials are resolved from config.yaml / env
+    (never hardcoded here). If neo4j is not importable, returns None
+    so standalone scripts can fall back to their own argparse handling.
+
+    Args:
+        database: optional database name override.
+
+    Returns:
+        neo4j.Driver instance, or None if the neo4j driver is unavailable.
+    """
+    try:
+        from neo4j import GraphDatabase
+    except Exception:
+        return None
+    cfg = get_neo4j_config()
+    uri = cfg.get('uri') or os.environ.get('NEO4J_URI', 'bolt://100.64.43.123:7687')
+    user = cfg.get('user') or os.environ.get('NEO4J_USER', 'neo4j')
+    password = cfg.get('password') or os.environ.get('NEO4J_PASSWORD', '')
+    return GraphDatabase.driver(uri, auth=(user, password))
+
+
+def neo4j_session(database=None):
+    """Return a connected Neo4j session using get_neo4j_config().
+
+    Convenience wrapper around get_neo4j_driver() for scripts that just
+    want a session. Returns None if the driver is unavailable.
+    """
+    drv = get_neo4j_driver(database=database)
+    if drv is None:
+        return None
+    return drv.session(database=database or os.environ.get('NEO4J_DB', 'neo4j'))

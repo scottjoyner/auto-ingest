@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from auto_ingest_config import get_fileserver_path
+from auto_ingest_config import get_fileserver_path, get_neo4j_config
 import os, re, json, math, argparse
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple
@@ -11,9 +11,10 @@ from transformers import pipeline
 from tqdm import tqdm
 
 # --------------- Config ----------------
-NEO4J_URI  = "bolt://localhost:7687"
-NEO4J_USER = "neo4j"
-NEO4J_PASS = os.getenv("NEO4J_PASS") or "knowledge_graph_2026"
+_NEO4J_CFG = get_neo4j_config()
+NEO4J_URI  = os.getenv("NEO4J_URI", _NEO4J_CFG["uri"])
+NEO4J_USER = os.getenv("NEO4J_USER", _NEO4J_CFG["user"])
+NEO4J_PASS = os.getenv("NEO4J_PASSWORD", _NEO4J_CFG["password"])
 
 BATCH_LIMIT   = 1000             # per run; tune for your box
 MODEL_DIR     = os.getenv("ZS_MODEL_DIR") or "models/roberta-large-mnli"  # or models/deberta-mnli

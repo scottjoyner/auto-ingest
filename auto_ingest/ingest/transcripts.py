@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-from auto_ingest_config import get_fileserver_path
+try:
+    from auto_ingest_config import get_fileserver_path
+except Exception:  # packaged import fallback
+    from auto_ingest._config import get_fileserver_path
 # -*- coding: utf-8 -*-
 """
 ingest_transcriptsv5_3.py

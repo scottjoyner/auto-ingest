@@ -26,7 +26,9 @@ from pathlib import Path
 from typing import Dict
 
 REPO = Path(__file__).resolve().parent.parent
-DEFAULT_LINKER = "link_global_speakers_2.py"
+# Canonical linker now lives in the package (W-42). Run it as a module so the
+# relative config import resolves from the repo root.
+DEFAULT_LINKER_MODULE = "auto_ingest.diarize.link_global_speakers"
 
 # ---------------------------------------------------------------------------
 # Neo4j connection (env first, then config.yaml; never hardcoded here)
@@ -48,8 +50,8 @@ def neo4j_env() -> Dict[str, str]:
     return env
 
 
-def _run(py_script: str, args: list, extra_env: Dict[str, str] | None = None) -> int:
-    cmd = [sys.executable, "-u", py_script, *args]
+def _run_module(mod: str, args: list, extra_env: Dict[str, str] | None = None) -> int:
+    cmd = [sys.executable, "-u", "-m", mod, *args]
     env = extra_env or neo4j_env()
     print(f"[auto-ingest] $ {' '.join(cmd)}", flush=True)
     return subprocess.call(cmd, cwd=str(REPO), env=env)
@@ -170,7 +172,7 @@ def cmd_link_speakers(args) -> int:
     cli = list(flags)
     for k, v in opts.items():
         cli += [k, v]
-    return _run(DEFAULT_LINKER, cli, extra_env=neo4j_env())
+    return _run_module(DEFAULT_LINKER_MODULE, cli, extra_env=neo4j_env())
 
 
 # ---------------------------------------------------------------------------
