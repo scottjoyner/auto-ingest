@@ -551,48 +551,103 @@ def _select_trips(driver, *, trip_key: Optional[str], count: int) -> List[Dict[s
         return rows
 
 
+def _clip_start_from_key(key: str) -> Optional[float]:
+    """Best-effort absolute start time (epoch seconds) parsed from a clip key.
+
+    Dashcam clip keys look like ``2025_0710_204641_F`` (YYYY_MMDD_HHMMSS),
+    which embeds the true start instant even though ``DashcamClip.startTime``
+    is NULL in this graph. Returns None if it can't be parsed.
+    """
+    import datetime as _dt
+    parts = key.replace("_F", "").replace("_R", "").split("_")
+    if len(parts) >= 3:
+        try:
+            y, mmdd, hhmmss = parts[0], parts[1], parts[2]
+            mm, dd = mmdd[:2], mmdd[2:]
+            hh, mi, ss = hhmmss[:2], hhmmss[2:4], hhmmss[4:6]
+            dt = _dt.datetime(int(y), int(mm), int(dd), int(hh), int(mi), int(ss))
+            return dt.timestamp()
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def _nearest_place(lat: float, lon: float, places: List[Dict[str, object]],
+                   max_miles: float = 25.0) -> Optional[Dict[str, object]]:
+    """Return the SummaryPlace nearest to (lat,lon), or None if far away."""
+    import math
+    best = None
+    best_d = None
+    for p in places:
+        plat, plon = p.get("lat"), p.get("lon")
+        if plat is None or plon is None:
+            continue
+        # Haversine-ish great-circle distance in miles (good enough for labels).
+        r = 3959.0
+        phi1, phi2 = math.radians(lat), math.radians(plat)
+        dphi = math.radians(plat - lat)
+        dl = math.radians(plon - lon)
+        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dl / 2) ** 2
+        d = 2 * r * math.asin(min(1.0, math.sqrt(a)))
+        if best_d is None or d < best_d:
+            best_d, best = d, p
+    if best is not None and best_d is not None and best_d <= max_miles:
+        return best
+    return None
+
+
 def _trip_clips(driver, trip_key: str, *, limit: int) -> List[Dict[str, object]]:
     with driver.session() as sess:
+        # Clips carry their geo-trace as Frames (lat/lon/mph). DashcamClip
+        # startTime is NULL, but the clip KEY embeds the true start instant,
+        # so we order chronologically and pull each clip's averaged position.
         clips = sess.run(
             """
             MATCH (c:DashcamClip)-[:IN_TRIP]->(t:Trip {uniqueKey:$k})
+            OPTIONAL MATCH (f:Frame)-[:BELONGS_TO]->(c)
+            WITH c, avg(f.lat) AS lat, avg(f.lon) AS lon,
+                 max(f.mph) AS mph, count(f) AS nframes
             RETURN c.key AS clip_key, c.path AS path, c.fps AS fps,
-                   c.startTime AS cstart
-            ORDER BY c.startTime ASC
-            LIMIT $lim
+                   lat AS lat, lon AS lon, mph AS mph, nframes AS nframes
             """,
-            k=trip_key, lim=limit,
+            k=trip_key,
         ).data()
-        # Dashcam Trips (footage) are DISJOINT from the phone-tracker
-        # Trips that carry located Stops, and DashcamClips have NULL
-        # startTime, so true time-alignment isn't possible. Instead layer
-        # the real named places (SummaryPlace: home/work/other, with lat/
-        # lon) across the drive's clips round-robin so the short reads as a
-        # journey ("left Home (South End) -> on the road -> arrived Kure
-        # Beach ...").
         places = sess.run(
-            """
-            MATCH (p:SummaryPlace)
-            RETURN p.name AS name, p.place_role AS role
-            LIMIT 200
-            """,
+            "MATCH (p:SummaryPlace) RETURN p.name AS name, p.place_role AS role, "
+            "p.lat AS lat, p.lon AS lon",
         ).data()
-        named = [r for r in places if r.get("name")]
-        out: List[Dict[str, object]] = []
-        for i, r in enumerate(clips):
-            pl = named[i % len(named)] if named else {}
-            label = f"{pl.get('name', '')}"
-            if pl.get("role") and pl["role"] not in ("other", None):
-                label = f"{pl['role'].title()} · {pl['name']}"
-            out.append({
-                "clip_key": r.get("clip_key"),
-                "t_sec": 2.0,
-                "mph": None,
-                "geofence": label,
-                "location": pl.get("name"),
-                "time_label": None,
-            })
-        return out
+
+    # Order chronologically by the clip key's embedded timestamp.
+    def _start(r):
+        return _clip_start_from_key(r.get("clip_key") or "")
+    clips.sort(key=lambda r: _start(r) or 0.0)
+
+    out: List[Dict[str, object]] = []
+    total = len(clips)
+    for i, r in enumerate(clips[:limit]):
+        lat, lon = r.get("lat"), r.get("lon")
+        label = ""
+        if lat is not None and lon is not None:
+            pl = _nearest_place(lat, lon, places)
+            if pl and pl.get("name"):
+                if pl.get("role") and pl["role"] not in ("other", None):
+                    label = f"{pl['role'].title()} · {pl['name']}"
+                else:
+                    label = pl["name"]
+            else:
+                label = f"{lat:.2f}, {lon:.2f}"
+        seq = f"{i + 1}/{total}"
+        if not label:
+            label = f"on the road ({seq})"
+        out.append({
+            "clip_key": r.get("clip_key"),
+            "t_sec": 2.0,
+            "mph": r.get("mph"),
+            "geofence": label,
+            "location": label,
+            "time_label": seq,
+        })
+    return out
 
 
 def _nearest_stop(cstart, stop_ts):  # retained for API compat; unused

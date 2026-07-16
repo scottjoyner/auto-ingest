@@ -920,9 +920,9 @@ def compose_scripted_short(
             if float(a.duration or 0.0) > total:
                 a = a.subclip(0.0, total)
             elif total > float(a.duration or 0.0):
-                a = a.fx(__import__("moviepy.video.fx").video.fx.audio_loop,
-                         n=max(1, int(total // max(float(a.duration or 1.0), 0.1))))
-                a = a.subclip(0.0, total)
+                from moviepy.audio.fx.all import audio_loop
+                n = max(1, int(total // max(float(a.duration or 1.0), 0.1)))
+                a = a.fx(audio_loop, nloops=n).subclip(0.0, total)
             comp = comp.set_audio(a)
             narration_clip = a
         except Exception as e:  # pragma: no cover - environment dependent

@@ -1,0 +1,177 @@
+{
+  "plan_id": "057d142f98eb",
+  "topic": "graph_neural_networks",
+  "iteration": 1,
+  "created_at": 1784234147.0407052,
+  "updated_at": 1784234147.0407054,
+  "brief": {
+    "topic": "graph_neural_networks",
+    "title": "graph neural networks",
+    "hook": "for the large language models and other models",
+    "points": [
+      "for the large language models and other models",
+      "Training large languages, large language models",
+      "multi-agent but even to get to that point where you're having agents hand",
+      "given the level of complexity associated with it",
+      "you're looking to build. What does orchestra",
+      "how do we get the benefit of these large language models"
+    ],
+    "sources": [
+      {
+        "kind": "utterance",
+        "ref_id": "83a740f76422a6819253de1eada8639a",
+        "title": "large language model (0.96)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "4922adbe0489950a366b82824f3bdec8",
+        "title": "large language model (0.94)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "ff631439d894a0651c137a49c593efcc",
+        "title": "multi-agent (0.91)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "d3018989e41078307e9ff4b036416c6f",
+        "title": "computational complexity (0.91)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "b7f38ffb1041034dd468f8cbfb769c39",
+        "title": "orchestration (0.91)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "01cd6f73b8ea225f3e0016aa6af9aed4",
+        "title": "large language model (0.91)",
+        "url": null,
+        "year": null
+      }
+    ],
+    "tags": [
+      "agent",
+      "alignment",
+      "computational complexity",
+      "control",
+      "data structures",
+      "databases",
+      "entanglement",
+      "image generation",
+      "instruction tuning",
+      "large language model",
+      "materials science",
+      "multi-agent",
+      "orchestration",
+      "phase transition",
+      "quantum computing",
+      "vision transformer"
+    ]
+  },
+  "shorts": [
+    {
+      "id": "7f904f42e3",
+      "brief_topic": "graph_neural_networks",
+      "title": "graph neural networks",
+      "cues": [
+        {
+          "start": 0.0,
+          "end": 2.4,
+          "text": "graph neural networks",
+          "kind": "hook"
+        },
+        {
+          "start": 2.4,
+          "end": 10.4,
+          "text": "Large language models are incredibly powerful.",
+          "kind": "point"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2025_1002_175545_R",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2025/10/02/2025_1002_175545_R.MP4",
+          "t_sec": 301.5,
+          "dur": 8.0,
+          "mph": null
+        }
+      ],
+      "notes": "utter=b1b8583b778d6ea1e67b6c4461145f62 clip=2025_1002_175545_R t=301.5s (time-aligned) concept=large language model",
+      "status": "planned",
+      "out_path": null
+    },
+    {
+      "id": "e7c9425448",
+      "brief_topic": "graph_neural_networks",
+      "title": "graph neural networks",
+      "cues": [
+        {
+          "start": 0.0,
+          "end": 2.4,
+          "text": "graph neural networks",
+          "kind": "hook"
+        },
+        {
+          "start": 2.4,
+          "end": 10.4,
+          "text": "controlled. I'm a control freak. And we're",
+          "kind": "point"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2024_1227_151347_R",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/12/27/2024_1227_151347_R.MP4",
+          "t_sec": 35.46,
+          "dur": 8.0,
+          "mph": null
+        }
+      ],
+      "notes": "utter=b89c888fbab6bd30807d70249217160e clip=2024_1227_151347_R t=35.5s (time-aligned) concept=control",
+      "status": "planned",
+      "out_path": null
+    },
+    {
+      "id": "e7c9425448",
+      "brief_topic": "graph_neural_networks",
+      "title": "graph neural networks",
+      "cues": [
+        {
+          "start": 0.0,
+          "end": 2.4,
+          "text": "graph neural networks",
+          "kind": "hook"
+        },
+        {
+          "start": 2.4,
+          "end": 10.4,
+          "text": "controlled. I'm a control freak. And we're",
+          "kind": "point"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2024_1227_151347_R",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/12/27/2024_1227_151347_R.MP4",
+          "t_sec": 35.46,
+          "dur": 8.0,
+          "mph": null
+        }
+      ],
+      "notes": "utter=b89c888fbab6bd30807d70249217160e clip=2024_1227_151347_R t=35.5s (time-aligned) concept=control",
+      "status": "planned",
+      "out_path": null
+    }
+  ]
+}

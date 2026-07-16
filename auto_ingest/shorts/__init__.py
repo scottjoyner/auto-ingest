@@ -15,4 +15,4 @@ Or via the CLI: ``auto-ingest shorts plan <topic>``.
 """
 from __future__ import annotations
 
-__all__ = ["curator", "backdrop", "planner", "render", "models", "cli"]
+__all__ = ["curator", "backdrop", "planner", "render", "models", "cli", "publish", "tts"]

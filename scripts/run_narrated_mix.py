@@ -40,7 +40,7 @@ def _driver():
     return d
 
 
-def build_plans(drv, anchors, seeds, topics) -> list[Plan]:
+def build_plans(drv, anchors, seeds, topics, trips: int = 0) -> list[Plan]:
     plans: list[Plan] = []
     for seed in seeds:
         plans.append(planner.plan_montage(drv, count=3, dur=30.0, seed=seed, limit=400))
@@ -56,6 +56,11 @@ def build_plans(drv, anchors, seeds, topics) -> list[Plan]:
                     short_dur=30.0, seed=seed))
             else:
                 log.warning("No discussion clips for %s (seed %s); skipping", topic, seed)
+        if trips:
+            # A few real "Trip Story" journeys (chronological, geo-labeled).
+            plans.append(planner.plan_trip_story(
+                drv, count=trips, short_dur=30.0,
+                shots_per_trip=5, clip_dur=6.0, seed=seed))
     return plans
 
 
@@ -67,6 +72,8 @@ def main(argv=None) -> int:
                              "graph_neural_networks", "reinforcement_learning",
                              "diffusion_models", "computer_vision",
                              "retrieval_augmented_generation", "robotics"])
+    ap.add_argument("--trips", type=int, default=1,
+                    help="Number of real 'Trip Story' journeys to plan per seed")
     ap.add_argument("--namespace", default=NAMESPACE)
     args = ap.parse_args(argv)
 
@@ -79,7 +86,7 @@ def main(argv=None) -> int:
     try:
         anchors = backdrop.select_highway_pool(drv, limit=400)
         log.info("Resolved %d highway anchors", len(anchors))
-        plans = build_plans(drv, anchors, args.seeds, args.topics)
+        plans = build_plans(drv, anchors, args.seeds, args.topics, trips=args.trips)
     finally:
         drv.close()
 

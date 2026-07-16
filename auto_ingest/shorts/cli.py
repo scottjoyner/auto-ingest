@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import List
 
-from auto_ingest.shorts import backdrop, curator, planner, render
+from auto_ingest.shorts import backdrop, curator, planner, publish, render
 from auto_ingest.shorts.models import Plan
 
 log = logging.getLogger("shorts.cli")
@@ -274,7 +274,28 @@ def build_parser() -> argparse.ArgumentParser:
     pt.add_argument("--plans-dir", type=Path, default=DEFAULT_PLANS_DIR)
     pt.set_defaults(func=_cmd_trip)
 
+
+    ppv = sub.add_parser("publish", help="Publish workflow: queue/inspect rendered shorts.")
+    ppv.add_argument("action", choices=["queue", "list"],
+                     help="queue = stage all unpublished shorts; list = show them")
+    ppv.add_argument("--platform", default="youtube_shorts")
+    ppv.add_argument("--limit", type=int, default=50)
+    ppv.set_defaults(func=_cmd_publish)
+
     return p
+
+
+def _cmd_publish(args) -> int:
+    if args.action == "list":
+        items = publish.list_unpublished(limit=args.limit)
+        for it in items:
+            print(f"{it.key}  {it.topic}  {it.title}  -> {it.out_path}")
+        print(f"{len(items)} unpublished short(s)")
+        return 0
+    # queue
+    n = publish.queue_all_unpublished(platform=args.platform, limit=args.limit)
+    print(f"Queued {n} short(s) for {args.platform}")
+    return 0
 
 
 def main(argv: List[str] | None = None) -> int:

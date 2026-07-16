@@ -453,6 +453,28 @@ def test_render_plan_skip_history(monkeypatch, tmp_path):
     assert len(out) == 1
 
 
+def test_publish_queue_dedup_idempotent(tmp_path, monkeypatch):
+    from auto_ingest.shorts import publish
+
+    # Point the queue at a temp file and avoid any live DB calls.
+    monkeypatch.setattr(publish, "QUEUE_PATH", tmp_path / "queue.jsonl")
+
+    class _S:
+        key = "abc123"
+        topic = "x"
+        title = "t"
+        out_path = "/tmp/x.mp4"
+
+    publish.queue_for_publish(_S(), platform="youtube_shorts")
+    publish.queue_for_publish(_S(), platform="youtube_shorts")  # dup
+    publish.queue_for_publish(_S(), platform="tiktok")          # different platform
+    qlines = [ln for ln in publish.QUEUE_PATH.read_text().splitlines() if ln.strip()]
+    # 2 distinct (key,platform) pairs -> 2 lines, not 3.
+    assert len(qlines) == 2, qlines
+    keys = [__import__("json").loads(ln)["platform"] for ln in qlines]
+    assert keys == ["youtube_shorts", "tiktok"]
+
+
 def test_render_plan_in_plan_dedup(monkeypatch, tmp_path):
 
     # In-plan dedup: a clip reused within the same plan is rendered once.

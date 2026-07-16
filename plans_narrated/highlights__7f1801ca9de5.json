@@ -1,0 +1,191 @@
+{
+  "plan_id": "7f1801ca9de5",
+  "topic": "highlights",
+  "iteration": 1,
+  "created_at": 1784234145.6687598,
+  "updated_at": 1784234145.6687603,
+  "brief": {
+    "topic": "highlights",
+    "title": "Event Highlights",
+    "hook": "",
+    "points": [],
+    "sources": [],
+    "tags": []
+  },
+  "shorts": [
+    {
+      "id": "9253ba5ed4",
+      "brief_topic": "highlights",
+      "title": "\ud83c\udfb6 Song playing",
+      "cues": [
+        {
+          "start": 0.4,
+          "end": 3.6,
+          "text": "\ud83c\udfb6 Song playing",
+          "kind": "music"
+        },
+        {
+          "start": 10.2,
+          "end": 13.4,
+          "text": " Ooh, I know, sad songs, sad songs.",
+          "kind": "detail"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2024_0130_053434_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/01/30/2024_0130_053434_F.MP4",
+          "t_sec": 27.9,
+          "dur": 6.0,
+          "mph": null
+        }
+      ],
+      "notes": "kind=music clip=2024_0130_053434_F seg_idx=3",
+      "status": "planned",
+      "out_path": null
+    },
+    {
+      "id": "6c5512f9d9",
+      "brief_topic": "highlights",
+      "title": "\ud83c\udfb6 Song playing",
+      "cues": [
+        {
+          "start": 0.4,
+          "end": 3.6,
+          "text": "\ud83c\udfb6 Song playing",
+          "kind": "music"
+        },
+        {
+          "start": 10.2,
+          "end": 13.4,
+          "text": " She's singing, ooh baby, ooh, ooh, ooh.",
+          "kind": "detail"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2024_1226_100158_F",
+          "fr_path": "",
+          "t_sec": 30.26,
+          "dur": 6.0,
+          "mph": null
+        }
+      ],
+      "notes": "kind=music clip=2024_1226_100158_F seg_idx=1",
+      "status": "planned",
+      "out_path": null
+    },
+    {
+      "id": "3ef849ff95",
+      "brief_topic": "highlights",
+      "title": "\u26a0\ufe0f Flagged for review",
+      "cues": [
+        {
+          "start": 0.4,
+          "end": 3.6,
+          "text": "\u26a0\ufe0f Flagged for review",
+          "kind": "review"
+        },
+        {
+          "start": 10.2,
+          "end": 13.4,
+          "text": " So full is a bit of an exaggeration. Like I'm still hungry ",
+          "kind": "detail"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2000_1127_220512_F",
+          "fr_path": "",
+          "t_sec": 45.46,
+          "dur": 6.0,
+          "mph": null
+        }
+      ],
+      "notes": "kind=review clip=2000_1127_220512_F seg_idx=9",
+      "status": "planned",
+      "out_path": null
+    },
+    {
+      "id": "8400f79c0b",
+      "brief_topic": "highlights",
+      "title": "\u26a0\ufe0f Flagged for review",
+      "cues": [
+        {
+          "start": 0.4,
+          "end": 3.6,
+          "text": "\u26a0\ufe0f Flagged for review",
+          "kind": "review"
+        },
+        {
+          "start": 10.2,
+          "end": 13.4,
+          "text": " It's actually pretty good.",
+          "kind": "detail"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2000_1130_182614_F",
+          "fr_path": "",
+          "t_sec": 22.94,
+          "dur": 6.0,
+          "mph": null
+        }
+      ],
+      "notes": "kind=review clip=2000_1130_182614_F seg_idx=10",
+      "status": "planned",
+      "out_path": null
+    },
+    {
+      "id": "858f0f75c4",
+      "brief_topic": "highlights",
+      "title": "\ud83d\ude80 4104 mph",
+      "cues": [
+        {
+          "start": 0.4,
+          "end": 3.6,
+          "text": "\ud83d\ude80 4104 mph",
+          "kind": "speed"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2024_1201_171802_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/12/01/2024_1201_171802_F.MP4",
+          "t_sec": 1.0,
+          "dur": 6.0,
+          "mph": 4104
+        }
+      ],
+      "notes": "kind=speed clip=2024_1201_171802_F seg_idx=30",
+      "status": "planned",
+      "out_path": null
+    },
+    {
+      "id": "2914e3416f",
+      "brief_topic": "highlights",
+      "title": "\ud83d\ude80 654 mph",
+      "cues": [
+        {
+          "start": 0.4,
+          "end": 3.6,
+          "text": "\ud83d\ude80 654 mph",
+          "kind": "speed"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2024_1221_160756_F",
+          "fr_path": "",
+          "t_sec": 0.0,
+          "dur": 6.0,
+          "mph": 654
+        }
+      ],
+      "notes": "kind=speed clip=2024_1221_160756_F seg_idx=0",
+      "status": "planned",
+      "out_path": null
+    }
+  ]
+}
