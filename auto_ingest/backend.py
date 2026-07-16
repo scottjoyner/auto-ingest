@@ -46,6 +46,9 @@ from typing import Dict
 # Cached detection result
 # ---------------------------------------------------------------------------
 _BACKEND: str | None = None
+_FAISS_BACKEND: str | None = None
+_FAISS_AVAILABLE: bool | None = None
+_FAISS_GPU: bool | None = None
 
 
 def detect_backend() -> str:
@@ -93,6 +96,35 @@ def detect_backend() -> str:
     return _BACKEND
 
 
+def faiss_backend() -> str:
+    """Return "gpu" if faiss is importable and reports >=1 GPU, else "cpu"."""
+    global _FAISS_BACKEND, _FAISS_AVAILABLE, _FAISS_GPU
+    if _FAISS_BACKEND is not None:
+        return _FAISS_BACKEND
+
+    faiss = None
+    try:
+        import faiss  # type: ignore
+        faiss = __import__("faiss")
+        _FAISS_AVAILABLE = True
+    except Exception:
+        faiss = None
+        _FAISS_AVAILABLE = False
+        _FAISS_GPU = False
+        _FAISS_BACKEND = "cpu"
+        return _FAISS_BACKEND
+
+    # faiss is present; probe for GPU support.
+    gpu = False
+    try:
+        gpu = bool(faiss.get_num_gpus() > 0)  # type: ignore
+    except Exception:
+        gpu = False
+    _FAISS_GPU = gpu
+    _FAISS_BACKEND = "gpu" if gpu else "cpu"
+    return _FAISS_BACKEND
+
+
 def torch_device() -> str:
     """Map the detected backend to a torch device string."""
     backend = detect_backend()
@@ -126,6 +158,10 @@ def backend_info() -> Dict:
     mlx_available = (backend == "mlx")
     onnx_available = (backend == "onnx")
 
+    # faiss_backend() populates the cache on first call; read it back here.
+    faiss_available = bool(_FAISS_AVAILABLE)
+    faiss_gpu = bool(_FAISS_GPU)
+
     gpu_name = None
     if cuda_available:
         try:
@@ -141,6 +177,8 @@ def backend_info() -> Dict:
         "mps_available": mps_available,
         "mlx_available": mlx_available,
         "onnx_available": onnx_available,
+        "faiss_available": faiss_available,
+        "faiss_gpu": faiss_gpu,
         "gpu_name": gpu_name,
     }
 

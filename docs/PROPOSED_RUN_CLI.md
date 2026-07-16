@@ -3,18 +3,32 @@
 Goal: **one command, same on every Tailscale machine**, that (a) detects host + hardware, (b) shows where preprocessing is, and (c) dispatches ingest/diarize/link/sync with best-fit backend.
 
 ## Command surface
+
+> Implemented in `bin/auto-ingest`. The design below was realized with these
+> subcommands; flag names reflect the shipped CLI.
+
 ```
-auto-ingest                        # alias: run
-  status [--source dashcam|audio|bodycam] [--key <k>]   # preprocessing manifest view
-  caps                                              # probe + print hardware/backend profile
-  ingest      [--day YYYY-MM-DD] [--limit N] [--dry-run]
-  diarize     [--day YYYY-MM-DD] [--backend auto]
-  link-speakers [--anchor-me] [--global-prefilter]
-  sync        [--to-vault|--to-neo4j|--both]
-  whoami      [--rebuild] [--corpus ~/me]           # speaker "me" anchor tool
-  claim       <key>            # claim a job for this host
-  import      <clean.json|csv> # load cleaned intermediate via dynamic tx
+auto-ingest
+  run-all      [--skip-copy] [--skip-diarize] [--skip-ingest] [--skip-classify]
+               [--skip-link] [--skip-yolo] [--limit N] [--max-speakers N]
+               [--faiss] [--more-aggressive] [--rank-and-label] [--state-file <p>] [--dry-run]
+  link-speakers [--limit N] [--max-speakers N] [--priority <re>] [--faiss]
+               [--more-aggressive] [--rank-and-label] [--state-file <p>] [--dry-run]
+               # non-speech exclusion is ON by default (--exclude-non-speech in linker; see link_global_speakers.py)
+  caps                                                  # probe + print hardware/backend profile
+  status      [--source dashcam|audio|bodycam]          # graph / linkage status
+  ingest      [--root <p>] [--nextcloud-* ...] [--kind movie|picture|all]
+              [--state <p>] [--limit N] [--no-transcribe] [--no-embed] [--no-shorts]
+              [--slideshow] [--force] [--dry-run]
+  whoami      [--dry-run] [--corpus <p>] [--merge] [--seed <id>]   # speaker "me" anchor
+  tiktok      [--clip <p>] [--source-root <p>] [--nextcloud] [--pick newest|random]
+              [--date <d>] --out <p> [--transcript-json <p>] [--hook <t>] [--cta <t>]
+              [--music <p>] [--zoom <f>] [--crf <n>] [--max-dur <s>] [--no-auto-transcript]
+  worker                                                   # idle-gated background worker
 ```
+
+Note: `run-all` is the chain copy→diarize→ingest→reconcile→classify→link→yolo.
+Backend selection (CUDA/ROCm/MLX/ONNX) is handled by `auto_ingest/backend.py`.
 
 ## `auto-ingest status` output (example)
 ```

@@ -11,6 +11,8 @@ from ultralytics.utils.plotting import Annotator, colors
 from PIL import Image
 import uuid
 
+from auto_ingest.backend import torch_device
+
 def list_files(directory):
     file_keys = set([])
     for filename in os.listdir(directory):
@@ -60,16 +62,12 @@ def list_directories(base_path):
                     # Dictionary to store tracking history with default empty lists
                     track_history = defaultdict(lambda: [])
                     import torch
-                    if torch.cuda.is_available():
-                        device = torch.device("cuda:0")
-                        print("Running on the GPU")
-                        model = YOLO("yolov8n-seg.pt")
-                        model.to(device)
+                    device = torch_device()
+                    if device != "cpu":
+                        print(f"Running on the GPU ({device})")
                     else:
-                        device = torch.device("cpu")
-                        model = YOLO("yolov8n-seg.pt")
-                        model.to(device)
                         print("Running on the CPU")
+                    model = YOLO("yolov8n-seg.pt", device=device)
                     # Load the YOLO model with segmentation capabilities
                     # model = YOLO("yolov8n-seg.pt")
                     # model = YOLO("yolov8n-seg.pt")

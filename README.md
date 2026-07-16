@@ -31,6 +31,26 @@ curl http://localhost:8766/api/health
 curl http://localhost:8766/api/status
 ```
 
+### Machine-agnostic CLI (new primary entrypoint)
+
+`bin/auto-ingest` is the preferred local entrypoint. It is machine-agnostic: all
+paths/credentials come from `config.yaml` + env (no hardcoded paths/creds). It
+auto-detects compute via `auto_ingest/backend.py` (CUDA / ROCm / MLX / ONNX) and
+routes torch/faiss/YOLO device selection accordingly.
+
+```bash
+bin/auto-ingest run-all            # copy→diarize→ingest→reconcile→classify→link→yolo
+bin/auto-ingest link-speakers      # global speaker linking
+bin/auto-ingest caps               # probe hardware/backend profile
+bin/auto-ingest status             # graph / linkage status
+bin/auto-ingest ingest             # iPhone media -> graph
+bin/auto-ingest whoami             # anchor the "me" speaker
+bin/auto-ingest tiktok             # vertical shorts
+bin/auto-ingest worker             # idle-gated background worker
+```
+
+> `run_all_optimized.sh` is a **deprecated** shim over `bin/auto-ingest run-all`.
+
 ## Trigger Jobs
 
 ```bash
@@ -117,6 +137,9 @@ Core Neo4j node types:
 | `deploy/path_profiles.env.example` | Environment template |
 | `run_ingest_all.sh` | Main ingest runner |
 | `ingest_transcriptsv5_3.py` | Python ingest script |
+| `bin/auto-ingest` | Machine-agnostic CLI (primary entrypoint); `run-all` chains copy→diarize→ingest→reconcile→classify→link→yolo. All config from `config.yaml` + env. |
+| `run_all_optimized.sh` | Deprecated shim over `bin/auto-ingest run-all` |
+| `auto_ingest/backend.py` | Auto-detects CUDA/ROCm/MLX/ONNX compute; routes torch/faiss/YOLO device selection |
 
 ## Management
 
