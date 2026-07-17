@@ -38,7 +38,7 @@ query = """
 MATCH (p:PhoneLog)
 WHERE p.timestamp >= '2025-04-25T01:00:00Z'
 AND p.timestamp <= '2025-04-25T02:50:00Z'
-RETURN p.timestamp AS timestamp, p.latitude AS lat, p.longitude AS lon
+RETURN p.timestamp AS timestamp, p.loc.latitude AS lat, p.loc.longitude AS lon
 ORDER BY p.timestamp DESC
 """
 query = """
@@ -51,10 +51,10 @@ WITH collect(p) AS logs
 UNWIND range(0, size(logs) - 1) AS i
 WITH logs[i] AS p, i
 WHERE i % 5 = 0  // only every 5th node
-RETURN 
+RETURN
   p.timestamp AS timestamp,
-  p.latitude AS lat,
-  p.longitude AS lon,
+  p.loc.latitude AS lat,
+  p.loc.longitude AS lon,
   p.speed AS speed,
   p.altitude AS altitude
 ORDER BY timestamp DESC

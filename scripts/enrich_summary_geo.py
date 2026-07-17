@@ -60,7 +60,7 @@ def build_buckets(driver, m_start, m_end):
     q = """
     MATCH (pl:PhoneLog)
     WHERE pl.timestamp >= $ms AND pl.timestamp < $me AND pl.loc IS NOT NULL
-    RETURN pl.timestamp AS ts, pl.loc.y AS lat, pl.loc.x AS lon
+    RETURN pl.timestamp AS ts, pl.loc.latitude AS lat, pl.loc.longitude AS lon
     """
     with driver.session() as s:
         res = s.run(q, ms=m_start + "T00:00:00Z", me=m_end + "T00:00:00Z")
