@@ -76,6 +76,64 @@ def test_compose_with_persona_falls_back_to_stylized(tmp_path):
     assert result.stat().st_size > 1000
 
 
+def test_compose_with_persona_single_encode_uses_passed_clip(monkeypatch, tmp_path):
+    """When a base clip is passed via broll_clip, compose_with_persona must NOT
+    re-open the base file (VideoFileClip on the broll path) — the whole point of
+    the single-encode fix: composite in-memory, write once."""
+    if not HAS_MOVIEPY:
+        pytest.skip("moviepy not installed in this interpreter")
+
+    import auto_ingest.shorts.persona as persona_mod
+
+    calls = {"videofileclip": [], "write": 0}
+
+    class FakeAudioClip:
+        def __init__(self, *a, **k):
+            pass
+
+    class FakeComposite:
+        def __init__(self, clips, size=None):
+            self.audio = None
+
+        def set_audio(self, a):
+            self.audio = a
+            return self
+
+        def write_videofile(self, out, **kwargs):
+            calls["write"] += 1
+            Path(out).write_bytes(b"x" * 2048)
+
+        def close(self):
+            pass
+
+    def fake_videofileclip(path, *a, **k):
+        # Track any re-open of a *file path* (the double-encode we removed).
+        calls["videofileclip"].append(str(path))
+        raise AssertionError(f"VideoFileClip should not be called (re-open of {path})")
+
+    class FakeBaseClip:
+        duration = 1.0
+        size = (1080, 1920)
+        audio = None
+
+    import moviepy.editor as mpy
+    monkeypatch.setattr(mpy, "VideoFileClip", fake_videofileclip)
+    monkeypatch.setattr(mpy, "CompositeVideoClip", FakeComposite)
+    monkeypatch.setattr(mpy, "AudioFileClip", FakeAudioClip)
+    # No brand avatar / no narration -> pure in-memory composite, base audio.
+    monkeypatch.setattr(persona_mod, "narrate_script", lambda *a, **k: None)
+
+    cfg = persona.PersonaConfig(source="stylized", brand_avatar="/nonexistent.png")
+    out = tmp_path / "out.mp4"
+    result = persona.compose_with_persona(
+        tmp_path / "base.mp4", [{"text": "hi"}], cfg, out, broll_clip=FakeBaseClip())
+
+    assert result == out
+    assert result.exists()
+    assert calls["write"] == 1  # exactly one encode
+    assert calls["videofileclip"] == []  # base file NOT re-opened
+
+
 def test_planned_short_persona_field_roundtrip(tmp_path):
     s = PlannedShort(id="x", brief_topic="t", title="T", persona="stylized")
     p = tmp_path / "plan.json"

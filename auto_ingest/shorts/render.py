@@ -107,10 +107,22 @@ def render_short(item: PlannedShort, out_dir: Path, *,
     # Persona overlay: composite the face-cam onto the cinematic base.
     if cfg is not None:
         try:
-            persona_mod.compose_with_persona(
-                base_path, cues, cfg, out_path,
-                width=width, height=height, bitrate=bitrate,
-                narration_audio=narration_audio)
+            # Single encode: load the base ONCE and composite in-memory so the
+            # final write happens once (no full B-roll re-encode). We keep the
+            # base path for back-compat but pass the open clip as broll_clip.
+            from moviepy.editor import VideoFileClip
+            base_clip = VideoFileClip(str(base_path))
+            try:
+                persona_mod.compose_with_persona(
+                    base_path, cues, cfg, out_path,
+                    width=width, height=height, bitrate=bitrate,
+                    narration_audio=narration_audio,
+                    broll_clip=base_clip)
+            finally:
+                try:
+                    base_clip.close()
+                except Exception:
+                    pass
         except Exception as e:  # persona stack is environment-dependent
             log.info("Persona overlay skipped for %s (using base render): %s",
                      item.id, e)

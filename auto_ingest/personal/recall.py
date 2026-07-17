@@ -45,7 +45,6 @@ except Exception:  # packaged import fallback
 
 from auto_ingest.personal.embed import (
     CLIP_DIM,
-    embed_text,
     ensure_media_indexes_with_retry,
 )
 from auto_ingest.shorts.db_retry import with_driver
@@ -170,6 +169,8 @@ def recall_media(driver, text: str, top_k: int,
                 since: Optional[str] = None, until: Optional[str] = None,
                 kind: Optional[str] = None) -> List[Dict[str, Any]]:
     ensure_media_indexes_with_retry()
+    from auto_ingest.personal.embed import embed_text
+
     qvec = embed_text(text)
     if qvec is None:
         raise RuntimeError("Text embedding failed (embed_text returned None).")
@@ -177,7 +178,7 @@ def recall_media(driver, text: str, top_k: int,
         raise RuntimeError(f"embed_text returned {len(qvec)} dims, expected {CLIP_DIM}.")
 
     cypher = """
-    CALL db.index.vector.queryNodes('media_text_embedding_index', $k, $qvec)
+    CALL db.index.vector.queryNodes('media_embedding_index', $k, $qvec)
       YIELD node, score
     WHERE 'MediaFile' IN labels(node)
     WITH node AS m, score

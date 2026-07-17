@@ -208,10 +208,11 @@ def stylized_avatar_clip(duration: float, width: int, height: int,
 # --------------------------------------------------------------------------- #
 # Orchestration: mux voice + overlay face-cam onto the B-roll
 # --------------------------------------------------------------------------- #
-def compose_with_persona(broll_mp4: Path, cues: list, cfg: PersonaConfig,
+def compose_with_persona(broll_mp4: Optional[Path], cues: list, cfg: PersonaConfig,
                           out_mp4: Path, *, width: int = 1080, height: int = 1920,
                           bitrate: str = "6M",
-                          narration_audio: Optional[Path] = None) -> Path:
+                          narration_audio: Optional[Path] = None,
+                          broll_clip: object = None) -> Path:
     """Produce the final short with the owner's personality layered on.
 
     Pipeline:
@@ -224,6 +225,13 @@ def compose_with_persona(broll_mp4: Path, cues: list, cfg: PersonaConfig,
            fall back;
          - otherwise the stylized brand avatar card.
       3. Composite the face-cam over the B-roll in a corner and mux the audio.
+
+    Single-encode: the caller may pass an already-built base clip via
+    ``broll_clip`` (a moviepy ``VideoFileClip``/``CompositeVideoClip``) so we
+    composite in-memory and write ONCE, instead of re-opening + re-encoding the
+    ``.base.mp4`` a second time. When ``broll_clip`` is given, ``broll_mp4`` is
+    ignored as an input (it is not re-opened). For back-compat, callers that
+    only pass ``broll_mp4`` still work (the file is opened here as before).
 
     Audio policy (single canonical path): if narration audio exists, it is the
     sole audio track. Otherwise the base B-roll's own audio is preserved. We
@@ -239,9 +247,14 @@ def compose_with_persona(broll_mp4: Path, cues: list, cfg: PersonaConfig,
     """
     from moviepy.editor import AudioFileClip, CompositeVideoClip, VideoFileClip
 
-    broll_mp4 = Path(broll_mp4)
     out_mp4 = Path(out_mp4)
-    with VideoFileClip(str(broll_mp4)) as bv:
+    # Prefer an already-built base clip (single encode). Only re-open the file
+    # for back-compat when no clip is supplied. ``owns_base`` tracks whether we
+    # opened it (and therefore must close it); a caller-supplied clip is closed
+    # by the caller.
+    owns_base = broll_clip is None
+    bv = broll_clip if broll_clip is not None else VideoFileClip(str(Path(broll_mp4)))
+    try:
         dur = float(bv.duration or 0.0)
         w, h = bv.size
 
@@ -282,6 +295,12 @@ def compose_with_persona(broll_mp4: Path, cues: list, cfg: PersonaConfig,
                              ffmpeg_params=["-movflags", "+faststart"],
                              preset="medium")
         comp.close()
+    finally:
+        if owns_base:
+            try:
+                bv.close()
+            except Exception:
+                pass
     return out_mp4
 
 

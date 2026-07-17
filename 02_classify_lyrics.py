@@ -12,6 +12,16 @@ from neo4j import GraphDatabase
 from transformers import pipeline
 from tqdm import tqdm
 
+# --------------- Helper ----------------
+def neo4j_env():
+    cfg = get_neo4j_config() or {}
+    return {
+        "uri": os.environ.get("NEO4J_URI") or cfg.get("uri") or "bolt://localhost:7687",
+        "user": os.environ.get("NEO4J_USER") or cfg.get("user") or "neo4j",
+        "password": os.environ.get("NEO4J_PASSWORD") or cfg.get("password") or os.environ.get("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026",
+        "db": os.environ.get("NEO4J_DB") or "neo4j",
+    }
+
 # --------------- Config ----------------
 _NEO4J_CFG = get_neo4j_config()
 NEO4J_URI  = os.getenv("NEO4J_URI", _NEO4J_CFG["uri"])

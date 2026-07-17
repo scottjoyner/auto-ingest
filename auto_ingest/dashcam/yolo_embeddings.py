@@ -10,7 +10,9 @@ from typing import Dict, List, Tuple, Optional, Iterable
 import numpy as np
 import pandas as pd
 from moviepy.editor import VideoFileClip
-from neo4j import GraphDatabase
+
+# Import db_retry for resilient Neo4j access
+from auto_ingest.shorts.db_retry import with_driver
 from neo4j.exceptions import Neo4jError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -766,6 +768,10 @@ MERGE (a)-[:NEXT]->(b)
 
 def neo4j_session(uri: str, user: str, pwd: str):
     return GraphDatabase.driver(uri, auth=(user, pwd))
+
+
+def wrapped_neo4j_session(uri: str, user: str, pwd: str):
+    return with_driver(lambda drv: drv)
 
 def neo4j_create_constraints(sess):
     for stmt in NQ_CREATE_CONSTRAINTS:

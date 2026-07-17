@@ -84,3 +84,20 @@ def test_link_all_keys_and_invocation():
     # Each of the three linkers fetched unlinked media (SELECT with LIMIT).
     select_queries = [q for q in drv.queries if "MATCH (m:MediaFile)" in q and "LIMIT" in q]
     assert len(select_queries) >= 3
+
+
+def test_link_to_phonelogs_uses_loc_point_and_merges_near():
+    # One unlinked media near a PhoneLog whose geo lives at pl.loc (spatial point).
+    media = [{"sha": "abc", "lat": 42.3601, "lon": -71.0589}]
+    # Fake session returns loc.latitude / loc.longitude shaped candidates.
+    phonelog = [{"pid": "pl-1", "lat": 42.3601, "lon": -71.0589}]
+    drv = FakeDriver(media, phonelog)
+    n = lm.link_to_phonelogs(drv, max_radius_m=100.0, limit=10)
+    assert n == 1
+
+    joined = " ".join(drv.queries)
+    # Candidate query must read the spatial point, not flat props.
+    assert "pl.loc" in joined
+    assert "point.distance" in joined
+    # The NEAR edge MERGE must fire for the in-radius candidate.
+    assert any("MERGE (m)-[:NEAR" in q for q in drv.queries)

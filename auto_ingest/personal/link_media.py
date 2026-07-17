@@ -190,12 +190,13 @@ def link_to_phonelogs(driver, max_radius_m: float = 100.0, limit: int = 500,
             lat0, lat1, lon0, lon1 = _bbox(lat, lon, max_radius_m)
             cands = sess.run(
                 "MATCH (pl:PhoneLog) "
-                "WHERE pl.latitude IS NOT NULL AND pl.longitude IS NOT NULL "
-                "AND pl.latitude >= $lat0 AND pl.latitude <= $lat1 "
-                "AND pl.longitude >= $lon0 AND pl.longitude <= $lon1 "
-                "RETURN elementId(pl) AS pid, pl.latitude AS lat, "
-                "pl.longitude AS lon LIMIT 50",
-                lat0=lat0, lat1=lat1, lon0=lon0, lon1=lon1,
+                "WHERE pl.loc IS NOT NULL "
+                "AND point.distance("
+                "  pl.loc, "
+                "  point({latitude:$lat, longitude:$lon, crs:'wgs-84'})) <= $r "
+                "RETURN elementId(pl) AS pid, pl.loc.latitude AS lat, "
+                "pl.loc.longitude AS lon LIMIT 50",
+                lat=lat, lon=lon, r=max_radius_m,
             ).data()
             best, best_d = None, float("inf")
             for c in cands:

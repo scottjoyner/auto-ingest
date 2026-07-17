@@ -22,11 +22,12 @@ def _load(path: Path, name: str):
 
 def test_watchdog_imports_and_returns_bool():
     wd = _load(REPO / "scripts" / "neo4j_watchdog.py", "neo4j_watchdog")
-    # Point at an unreachable port; must return False (never raise).
-    ok = wd.check_neo4j(uri="bolt://127.0.0.1:59999", user="neo4j",
-                        password="nope", db="neo4j", alert=False)
+    # Point at an unreachable port; must return (False, <kind>) (never raise).
+    ok, kind = wd.check_neo4j(uri="bolt://127.0.0.1:59999", user="neo4j",
+                               password="nope", db="neo4j", alert=False)
     assert isinstance(ok, bool)
     assert ok is False
+    assert kind in (None, "down", "oom", "error")
 
 
 def test_watchdog_classify_error():

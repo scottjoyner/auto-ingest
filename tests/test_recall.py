@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import List
 
 import auto_ingest.personal.recall as recall
+import auto_ingest.personal.embed as embed
 
 
 class FakeRecord:
@@ -35,13 +36,15 @@ class FakeResult:
 
 
 class FakeSession:
-    def __init__(self, queries: List[str], canned, emb_canned):
+    def __init__(self, queries: List[str], canned, emb_canned, driver):
         self.queries = queries
         self.canned = canned
         self.emb_canned = emb_canned
+        self.driver = driver
 
     def run(self, cypher, **params):
         self.queries.append(cypher)
+        self.driver._params.append(params)
         if "RETURN m.embedding" in cypher:
             return FakeResult(self.emb_canned)
         return FakeResult(self.canned)
@@ -56,11 +59,12 @@ class FakeSession:
 class FakeDriver:
     def __init__(self, canned, emb_canned=None):
         self.queries: List[str] = []
+        self._params: List[dict] = []
         self.canned = canned
         self.emb_canned = emb_canned or [{"emb": [0.0] * recall.CLIP_DIM}]
 
     def session(self, database=None):
-        return FakeSession(self.queries, self.canned, self.emb_canned)
+        return FakeSession(self.queries, self.canned, self.emb_canned, self)
 
 
 ANN_ROWS = [
@@ -84,14 +88,27 @@ def test_similar_media_drops_seed():
 
 def test_recall_media_place_filter(monkeypatch):
     monkeypatch.setattr(recall, "ensure_media_indexes_with_retry", lambda: None)
-    monkeypatch.setattr(recall, "embed_text", lambda text: [0.1] * recall.CLIP_DIM)
+    seed = [0.1] * recall.CLIP_DIM
+    monkeypatch.setattr(embed, "embed_text", lambda text: seed)
 
     drv = FakeDriver(ANN_ROWS)
     recall.recall_media(drv, "beach", top_k=5, place="Boston")
     joined = " ".join(drv.queries)
     assert "AT_PLACE" in joined
     assert "SummaryPlace" in joined
-    assert "media_text_embedding_index" in joined
+    assert "media_embedding_index" in joined
+    assert "media_text_embedding_index" not in joined
+    assert any(p.get("qvec") == seed for p in drv._params)
+
+
+def test_recall_media_uses_embed_text_seed(monkeypatch):
+    seed = [0.42] * recall.CLIP_DIM
+    monkeypatch.setattr(recall, "ensure_media_indexes_with_retry", lambda: None)
+    monkeypatch.setattr(embed, "embed_text", lambda text: seed)
+
+    drv = FakeDriver(ANN_ROWS)
+    recall.recall_media(drv, "cats", top_k=3)
+    assert any(p.get("qvec") == seed for p in drv._params)
 
 
 def test_geo_media_bounding_box():

@@ -100,12 +100,6 @@ def ensure_media_indexes(driver) -> None:
             "`vector.similarity_function`: 'cosine' } }"
         ),
         (
-            "CREATE VECTOR INDEX media_text_embedding_index IF NOT EXISTS "
-            "FOR (n:MediaFile) ON (n.text_embedding) "
-            "OPTIONS { indexConfig: { `vector.dimensions`: 512, "
-            "`vector.similarity_function`: 'cosine' } }"
-        ),
-        (
             "CREATE INDEX media_file_gps IF NOT EXISTS "
             "FOR (m:MediaFile) ON (m.gps_lat, m.gps_lon)"
         ),
