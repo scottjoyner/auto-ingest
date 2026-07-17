@@ -6,7 +6,11 @@ from neo4j import GraphDatabase
 
 URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
 USER = os.environ.get("NEO4J_USER", "neo4j")
-PASS = os.environ.get("NEO4J_PASSWORD") or os.environ.get("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
+try:
+    from auto_ingest_config import get_neo4j_password
+    PASS = get_neo4j_password()
+except Exception:
+    PASS = os.environ.get("NEO4J_PASSWORD") or os.environ.get("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
 DB = os.environ.get("NEO4J_DB", "neo4j")
 
 

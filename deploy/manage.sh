@@ -5,7 +5,6 @@
 set -euo pipefail
 COMPOSE_FILE="$(cd "$(dirname "$0")/.." && pwd)/docker-compose.yml"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-JOB_API="http://localhost:8766"
 
 cd "$PROJECT_DIR"
 
@@ -22,8 +21,6 @@ Commands:
   logs [service]         Show logs (default: all, use -f for follow)
   status                 Show container status
   build                  Build/rebuild the Docker image
-  enqueue <kind>         Enqueue a job (audio|dashcam|bodycam|all)
-  run <type>             One-shot run (ingest|sync)
   health                 Check all service health
   clean                  Remove stopped containers and unused images
 
@@ -31,9 +28,11 @@ Examples:
   $0 start                 # Start all services
   $0 start ingest-service  # Start only ingest
   $0 logs -f ingest-service
-  $0 enqueue all           # Queue an all-data job
-  $0 run ingest            # Trigger immediate ingest
   $0 health                # Check all services
+
+Note: 'enqueue' and 'run' commands are deprecated — Job API has been removed
+due to security concerns (unauthenticated HTTP → RCE). Use deploy/create_job.sh
+or docker compose directly instead.
 EOF
     exit 1
 }
@@ -106,9 +105,6 @@ cmd_status() {
     echo ""
     docker compose -f "$COMPOSE_FILE" ps
     echo ""
-    echo "=== Queue Status ==="
-    curl -s "$JOB_API/api/status" 2>/dev/null || echo "Job API not reachable"
-    echo ""
 }
 
 cmd_build() {
@@ -123,11 +119,10 @@ cmd_enqueue() {
         echo "Error: kind must be audio|dashcam|bodycam|all" >&2
         exit 1
     fi
-    echo "Enqueuing job: $kind"
-    curl -s -X POST "$JOB_API/api/enqueue" \
-        -H "Content-Type: application/json" \
-        -d "{\"kind\": \"$kind\"}" | python3 -m json.tool 2>/dev/null || \
-        echo "Error: Job API not reachable at $JOB_API"
+    # DEPRECATED: Job API removed (unauthenticated, RCE risk). Use deploy/create_job.sh directly.
+    echo "enqueue is deprecated — Job API has been removed." >&2
+    echo "Use deploy/create_job.sh <kind> instead." >&2
+    exit 1
 }
 
 cmd_run() {
@@ -136,11 +131,10 @@ cmd_run() {
         echo "Error: type must be ingest|sync" >&2
         exit 1
     fi
-    echo "Triggering $type run..."
-    curl -s -X POST "$JOB_API/api/run" \
-        -H "Content-Type: application/json" \
-        -d "{\"type\": \"$type\"}" | python3 -m json.tool 2>/dev/null || \
-        echo "Error: Job API not reachable at $JOB_API"
+    # DEPRECATED: Job API removed (unauthenticated, RCE risk). Run services manually or via docker compose.
+    echo "run is deprecated — Job API has been removed." >&2
+    echo "Run 'docker compose up -d <service>' directly instead." >&2
+    exit 1
 }
 
 cmd_health() {
@@ -150,16 +144,6 @@ cmd_health() {
     # Check containers
     echo "--- Containers ---"
     docker compose -f "$COMPOSE_FILE" ps --format "table {{.Name}}\t{{.Status}}" 2>/dev/null || echo "docker compose failed"
-    echo ""
-
-    # Check Job API
-    echo "--- Job API ---"
-    if curl -sf "$JOB_API/api/health" >/dev/null 2>&1; then
-        echo "Job API: OK"
-        curl -s "$JOB_API/api/status" | python3 -m json.tool 2>/dev/null
-    else
-        echo "Job API: DOWN (port 8765)"
-    fi
     echo ""
 
     # Check Neo4j

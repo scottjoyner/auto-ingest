@@ -159,41 +159,6 @@ services:
     networks:
       - auto-ingest-net
 
-  # === Job API (lightweight trigger) ===
-  # Exposes HTTP endpoints to enqueue jobs and trigger runs
-  job-api:
-    build: .
-    image: auto-ingest:latest
-    container_name: auto-ingest-job-api
-    command: ["python", "/app/deploy/job_trigger_api.py"]
-    restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "8766:8765"
-    volumes:
-      - ./:/app
-      - ${NAS_ROOT}:/nas
-      - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
-      - ${NAS2_ROOT:-/media/scott/NAS5}:/nas2
-    environment:
-      DROP_ROOT: ${DROP_ROOT}
-      NAS_ROOT: ${NAS_ROOT}
-      SCAN_ROOTS: ${SCAN_ROOTS}
-      AUDIO_ROOT: ${AUDIO_ROOT}
-      DASHCAM_ROOT: ${DASHCAM_ROOT}
-      BODYCAM_ROOT: ${BODYCAM_ROOT}
-      JOB_API_PORT: "8765"
-    networks:
-      - auto-ingest-net
-    # HTTP health endpoint served by job_trigger_api.py (GET /api/health).
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8765/api/health', timeout=5)\""]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
 networks:
   auto-ingest-net:
     driver: bridge

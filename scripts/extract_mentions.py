@@ -39,7 +39,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
+try:
+    from auto_ingest_config import get_neo4j_password
+    NEO4J_PASSWORD = get_neo4j_password()
+except Exception:
+    NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD") or os.getenv("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
 NEO4J_DB = os.getenv("NEO4J_DB", "neo4j")
 
 # Minimal, dependency-free pattern extractors (extend as needed).

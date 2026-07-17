@@ -20,10 +20,15 @@ from transformers import pipeline
 # --------------- Helper ----------------
 def neo4j_env():
     cfg = get_neo4j_config() or {}
+    try:
+        from auto_ingest_config import get_neo4j_password
+        pw = get_neo4j_password(cfg.get("password"))
+    except Exception:
+        pw = os.environ.get("NEO4J_PASSWORD") or cfg.get("password") or os.environ.get("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
     return {
         "uri": os.environ.get("NEO4J_URI") or cfg.get("uri") or "bolt://localhost:7687",
         "user": os.environ.get("NEO4J_USER") or cfg.get("user") or "neo4j",
-        "password": os.environ.get("NEO4J_PASSWORD") or cfg.get("password") or os.environ.get("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026",
+        "password": pw,
         "db": os.environ.get("NEO4J_DB") or "neo4j",
     }
 
