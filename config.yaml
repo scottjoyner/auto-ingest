@@ -49,6 +49,42 @@ knowledge_map:
   # Durable NAS mirror for the vault and derived artifacts.
   mirror_vault_path: /media/scott/NAS5/shared-knowledge
 
+  # Canonical vault model (G2 consolidation, DEEP_DIVE §3.7).
+  #
+  # The mirror (NAS5/shared-knowledge) is THE single canonical writer. Every
+  # host keeps a local clone and PULLS from the mirror; nobody SSH-pushes
+  # their local vault to peers. Peers are discovered by Tailscale hostname
+  # only — never by raw IP. See docs/VAULT_SYNC.md.
+  canonical_vault_path: /media/scott/NAS5/shared-knowledge
+
+  # Tailscale hostnames of every peer that holds a local vault clone.
+  # Append/remove a hostname here to grow/shrink the fleet. No IPs allowed.
+  # `self` is a reserved sentinel for the machine running the sync and is
+  # skipped (it is the local writer, not a remote peer).
+  vault_peers:
+    - deathstar
+    - demo-1
+    - destroyer
+    - optiplex
+
+  # Local clone anchor on each peer (resolved on the peer itself). Used by
+  # sync_vault_to_canonical.sh when pulling a peer's clone. Keep it a path,
+  # not an IP.
+  peer_vault_path: /home/scott/nas-knowledge
+
+  # Sync behavior tuning.
+  vault_sync:
+    ssh_user: scott
+    git_branch: main
+    rsync_opts: "-a --delete"
+    # Per-peer reachability probe before attempting sync; a down machine
+    # must NOT break the whole sync run.
+    peer_timeout_sec: 8
+    # Where this host publishes its local clone so peers can pull it. The
+    # canonical mirror is the single writer; this is only used to seed the
+    # mirror from the local clone.
+    push_to_canonical: true
+
   # Git configuration for versioning
   git:
     enabled: true

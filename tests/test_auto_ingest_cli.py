@@ -29,7 +29,7 @@ def test_build_parser_has_all_subcommands(cli):
     p = cli.build_parser()
     choices = list(p._subparsers._group_actions[0].choices.keys())  # type: ignore[attr-defined]
     assert set(choices) == {
-        "caps", "status", "link-speakers", "whoami", "tiktok",
+        "caps", "status", "claims", "reap", "link-speakers", "whoami", "tiktok",
         "worker", "ingest", "run-all", "shorts", "link-concepts",
     }
 

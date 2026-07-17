@@ -129,12 +129,12 @@ def cmd_caps(_args) -> int:
 # status
 # ---------------------------------------------------------------------------
 def cmd_status(args) -> int:
-    env = neo4j_env()
     try:
         from neo4j import GraphDatabase
     except Exception as e:
         print(f"neo4j driver unavailable: {e}", file=sys.stderr)
         return 1
+    env = neo4j_env()
     try:
         d = GraphDatabase.driver(env["NEO4J_URI"], auth=(env["NEO4J_USER"], env["NEO4J_PASSWORD"]))
         with d.session(database=env["NEO4J_DB"]) as s:
@@ -159,6 +159,75 @@ def cmd_status(args) -> int:
         d.close()
     except Exception as e:
         print(f"neo4j query failed: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# claims  (read-only view of active IngestJob claims + stage manifest, G4)
+# ---------------------------------------------------------------------------
+def cmd_claims(args) -> int:
+    """Human-readable view of IngestJob claims and per-key stage progress.
+
+    Read-only: issues only index-backed, LIMIT-bounded queries. Satisfies G4
+    (per-source preprocessing manifest visible via one command).
+    """
+    env = neo4j_env()
+    try:
+        from neo4j import GraphDatabase
+    except Exception as e:
+        print(f"neo4j driver unavailable: {e}", file=sys.stderr)
+        return 1
+    try:
+        from auto_ingest import ingest_claim
+    except Exception as e:
+        print(f"ingest_claim unavailable: {e}", file=sys.stderr)
+        return 1
+    try:
+        d = GraphDatabase.driver(env["NEO4J_URI"],
+                                 auth=(env["NEO4J_USER"], env["NEO4J_PASSWORD"]))
+        print(f"ACTIVE CLAIMS (ttl={args.ttl_sec}s):")
+        claims = ingest_claim.list_claims(d, ttl_sec=args.ttl_sec, limit=args.limit)
+        if not claims:
+            print("  (none)")
+        for c in claims:
+            print(f"  {c['key']:32s} owner={c['owner']} status={c['status']} "
+                  f"claimed_at={c['claimed_at']}")
+        if args.expired:
+            print(f"EXPIRED CLAIMS (ttl={args.ttl_sec}s):")
+            expired = ingest_claim.expired_claims(d, ttl_sec=args.ttl_sec,
+                                                  limit=args.limit)
+            if not expired:
+                print("  (none)")
+            for e in expired:
+                print(f"  {e['key']:32s} owner={e['owner']} "
+                      f"claimed_at={e['claimed_at']}")
+        d.close()
+    except Exception as e:
+        print(f"neo4j query failed: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# reap  (reaper — clears expired IngestJob claims; bounded + index-backed)
+# ---------------------------------------------------------------------------
+def cmd_reap(args) -> int:
+    env = neo4j_env()
+    try:
+        from auto_ingest import ingest_claim
+        from neo4j import GraphDatabase
+    except Exception as e:
+        print(f"unavailable: {e}", file=sys.stderr)
+        return 1
+    try:
+        d = GraphDatabase.driver(env["NEO4J_URI"],
+                                 auth=(env["NEO4J_USER"], env["NEO4J_PASSWORD"]))
+        cleared = ingest_claim.reap(d, ttl_sec=args.ttl_sec, limit=args.limit)
+        d.close()
+        print(f"reap: cleared {cleared} expired claim(s)")
+    except Exception as e:
+        print(f"neo4j reap failed: {e}", file=sys.stderr)
         return 1
     return 0
 
@@ -417,6 +486,17 @@ def build_parser() -> argparse.ArgumentParser:
     ps = sub.add_parser("status", help="Show graph / linkage status.")
     ps.add_argument("--source", choices=["dashcam", "audio", "bodycam"], default=None)
     ps.set_defaults(func=cmd_status)
+
+    pc = sub.add_parser("claims", help="Show active IngestJob claims + stage manifest (G4, read-only).")
+    pc.add_argument("--ttl-sec", type=int, default=3600, help="Claim TTL for active/expired split.")
+    pc.add_argument("--limit", type=int, default=200, help="Max claims to show.")
+    pc.add_argument("--expired", action="store_true", help="Also list expired (reapable) claims.")
+    pc.set_defaults(func=cmd_claims)
+
+    prp = sub.add_parser("reap", help="Clear expired IngestJob claims (bounded reaper).")
+    prp.add_argument("--ttl-sec", type=int, default=3600)
+    prp.add_argument("--limit", type=int, default=200)
+    prp.set_defaults(func=cmd_reap)
 
     pl = sub.add_parser("link-speakers", help="Globally link local Speakers -> GlobalSpeaker.")
     pl.add_argument("--limit", type=int, default=0, help="Process at most N speakers (debug).")

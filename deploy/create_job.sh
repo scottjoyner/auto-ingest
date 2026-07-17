@@ -34,3 +34,9 @@ $cmd
 JOB
 chmod +x "$JOB_FILE"
 echo "Created job: $JOB_FILE"
+
+# Best-effort: also create the queryable IngestJob manifest node so the claim
+# protocol (G4) has something to claim. A down Neo4j must not block job creation.
+KEY="$(basename "$JOB_FILE" .job)"
+"$(dirname "$0")/../scripts/claim_job.py" create "$KEY" \
+  || echo "manifest create skipped (neo4j unreachable)" >&2

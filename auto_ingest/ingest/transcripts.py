@@ -1099,7 +1099,8 @@ def ingest_location_samples_chunked(driver, t_id: str, key: str, started_at_iso:
 def process_key(key: str, paths: Dict[str, Any], driver,
                 batch_size: int, dry_run: bool = False, emb_v2: bool = True,
                 tx_sizes: Dict[str,int]=None, tx_timeout_seconds: int=120, fetch_size: int=100,
-                meta_opts: Dict[str, Any] = None):
+                meta_opts: Dict[str, Any] = None,
+                emit_intermediate_dir: Optional[str] = None):
     tx_sizes = tx_sizes or {}
     # Select best JSON; fallback CSV
     json_paths: List[str] = paths.get("json_all") or []
@@ -1291,6 +1292,21 @@ def process_key(key: str, paths: Dict[str, Any], driver,
                     w = ingest_location_samples_chunked(driver, t_id, key, started_at_iso, rows, batch=tx_sizes.get("loc", 500), timeout=tx_timeout_seconds)
                     meta_written += w
                     log.info(f"[{key}] metadata ingested: file={mp} kept={len(rows)} written={w} (good_ratio={stats['good_ratio']:.2%})")
+                    # G5 PoC: also emit a replayable, resumable cleaned intermediate.
+                    # The default Neo4j write above is unchanged; this artifact can be
+                    # later replayed by auto_ingest.ingest_import.import_intermediate.
+                    if emit_intermediate_dir:
+                        try:
+                            from auto_ingest.ingest_write import write_intermediate
+                            recs = [{"id": stable_id("loc", key, str(r["sec"]), f"{r.get('lat')}", f"{r.get('lon')}"),
+                                     "key": key, "sec": r["sec"], "frame": r["frame"],
+                                     "mph": r["mph"], "lat": r["lat"], "lon": r["lon"],
+                                     "flags": r.get("flags", []), "quality": r.get("quality", 100),
+                                     "parent": t_id} for r in rows]
+                            write_intermediate(emit_intermediate_dir, key, "metadata", recs, fmt="json")
+                            log.info(f"[{key}] wrote metadata intermediate ({len(recs)} rows) to {emit_intermediate_dir}")
+                        except Exception as ex:
+                            log.warning(f"[{key}] emit-intermediate failed: {ex}")
                 else:
                     log.warning(f"[{key}] metadata parse yielded 0 kept rows: {mp}")
             except Exception as ex:
@@ -1381,6 +1397,16 @@ def main():
     parser.add_argument("--meta-min-keep-ratio", type=float, default=float(os.getenv("META_MIN_KEEP_RATIO","0.5")))
     parser.add_argument("--meta-skip-when-bad", action="store_true")
 
+    # G5 proof-of-concept: when set, the cleaned dashcam-metadata rows are also
+    # written to a replayable intermediate file via auto_ingest.ingest_write
+    # INSTEAD OF replacing the normal Neo4j write (the default behavior is
+    # unchanged: rows still go to the graph). The artifact can later be replayed
+    # into the graph by auto_ingest.ingest_import.import_intermediate, which uses
+    # bounded UNWIND $rows MERGE batches so it is safe on the 21M-node graph.
+    parser.add_argument("--emit-intermediate", type=str, default=None,
+                        help="If set, write cleaned stage rows to this dir as "
+                             "replayable intermediates (in addition to the default Neo4j write).")
+
     args = parser.parse_args()
     log.setLevel(getattr(logging, args.log_level.upper(), logging.INFO))
 
@@ -1447,7 +1473,8 @@ def main():
                 key, paths, driver,
                 batch_size=args.batch_size, dry_run=args.dry_run, emb_v2=args.emb_v2,
                 tx_sizes=tx_sizes, tx_timeout_seconds=args.tx_timeout_sec, fetch_size=args.fetch_size,
-                meta_opts=meta_opts
+                meta_opts=meta_opts,
+                emit_intermediate_dir=args.emit_intermediate,
             )
             if info:
                 processed += 1
