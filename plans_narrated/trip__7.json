@@ -1,0 +1,94 @@
+{
+  "plan_id": "24d6f8b98ba2",
+  "topic": "trip_story",
+  "iteration": 1,
+  "created_at": 1784239260.766253,
+  "updated_at": 1784239260.7662532,
+  "brief": {
+    "topic": "trip_story",
+    "title": "Trip Story",
+    "hook": "",
+    "points": [],
+    "sources": [],
+    "tags": []
+  },
+  "shorts": [
+    {
+      "id": "7c3c9ca69f",
+      "brief_topic": "trip_story",
+      "title": "Dashcam",
+      "cues": [
+        {
+          "start": 0.4,
+          "end": 6.4,
+          "text": "35.21, 80.87",
+          "kind": "trip"
+        },
+        {
+          "start": 6.4,
+          "end": 12.4,
+          "text": "35.20, 80.03",
+          "kind": "trip"
+        },
+        {
+          "start": 12.4,
+          "end": 18.4,
+          "text": "35.20, 80.03",
+          "kind": "trip"
+        },
+        {
+          "start": 18.4,
+          "end": 24.4,
+          "text": "35.20, 80.28",
+          "kind": "trip"
+        },
+        {
+          "start": 24.4,
+          "end": 30.4,
+          "text": "35.20, 80.28",
+          "kind": "trip"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2024_1011_131421_R",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/10/11/2024_1011_131421_R.MP4",
+          "t_sec": 2.0,
+          "dur": 6.0,
+          "mph": 49
+        },
+        {
+          "clip_key": "2024_1011_131521_R",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/10/11/2024_1011_131521_R.MP4",
+          "t_sec": 2.0,
+          "dur": 6.0,
+          "mph": 29
+        },
+        {
+          "clip_key": "2024_1011_131521_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/10/11/2024_1011_131521_F.MP4",
+          "t_sec": 2.0,
+          "dur": 6.0,
+          "mph": 29
+        },
+        {
+          "clip_key": "2024_1011_131621_R",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/10/11/2024_1011_131621_R.MP4",
+          "t_sec": 2.0,
+          "dur": 6.0,
+          "mph": 41
+        },
+        {
+          "clip_key": "2024_1011_131621_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/10/11/2024_1011_131621_F.MP4",
+          "t_sec": 2.0,
+          "dur": 6.0,
+          "mph": 41
+        }
+      ],
+      "notes": "trip=Dashcam_1756764726903 clips=5",
+      "status": "planned",
+      "out_path": null
+    }
+  ]
+}

@@ -1,0 +1,179 @@
+{
+  "plan_id": "27946ef1126e",
+  "topic": "diffusion_models",
+  "iteration": 1,
+  "created_at": 1784239260.628003,
+  "updated_at": 1784239260.628003,
+  "brief": {
+    "topic": "diffusion_models",
+    "title": "diffusion models",
+    "hook": "multi-agent but even to get to that point where you're having agents hand",
+    "points": [
+      "multi-agent but even to get to that point where you're having agents hand",
+      "given the level of complexity associated with it",
+      "you're looking to build. What does orchestra",
+      "That's the whole orchestration framework here.",
+      "answer, and you can have multiple agents.",
+      "to really understand how I can orchestrate"
+    ],
+    "sources": [
+      {
+        "kind": "utterance",
+        "ref_id": "ff631439d894a0651c137a49c593efcc",
+        "title": "multi-agent (0.91)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "d3018989e41078307e9ff4b036416c6f",
+        "title": "computational complexity (0.91)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "b7f38ffb1041034dd468f8cbfb769c39",
+        "title": "orchestration (0.91)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "c7afa8b4cb878614b28dfded8fd4c89e",
+        "title": "orchestration (0.90)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "6948329d78eb9ac946c9429b5dfee7b0",
+        "title": "multi-agent (0.90)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "8914b15c1c869d9b6cad01398840fd70",
+        "title": "orchestration (0.90)",
+        "url": null,
+        "year": null
+      }
+    ],
+    "tags": [
+      "agent",
+      "algorithms",
+      "alignment",
+      "computational complexity",
+      "control",
+      "data structures",
+      "databases",
+      "entanglement",
+      "image generation",
+      "language model",
+      "multi-agent",
+      "orchestration",
+      "phase transition",
+      "quantum computing",
+      "rope",
+      "text generation",
+      "tokenization",
+      "vision transformer"
+    ]
+  },
+  "shorts": [
+    {
+      "id": "613c9fd59f",
+      "brief_topic": "diffusion_models",
+      "title": "diffusion models",
+      "cues": [
+        {
+          "start": 0.0,
+          "end": 2.4,
+          "text": "diffusion models",
+          "kind": "hook"
+        },
+        {
+          "start": 2.4,
+          "end": 10.4,
+          "text": "controlled. I'm a control freak. And we're",
+          "kind": "point"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2024_1227_151347_R",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/12/27/2024_1227_151347_R.MP4",
+          "t_sec": 35.46,
+          "dur": 8.0,
+          "mph": null
+        }
+      ],
+      "notes": "utter=b89c888fbab6bd30807d70249217160e clip=2024_1227_151347_R t=35.5s (time-aligned) concept=control",
+      "status": "planned",
+      "out_path": null
+    },
+    {
+      "id": "613c9fd59f",
+      "brief_topic": "diffusion_models",
+      "title": "diffusion models",
+      "cues": [
+        {
+          "start": 0.0,
+          "end": 2.4,
+          "text": "diffusion models",
+          "kind": "hook"
+        },
+        {
+          "start": 2.4,
+          "end": 10.4,
+          "text": "controlled. I'm a control freak. And we're",
+          "kind": "point"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2024_1227_151347_R",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/12/27/2024_1227_151347_R.MP4",
+          "t_sec": 35.46,
+          "dur": 8.0,
+          "mph": null
+        }
+      ],
+      "notes": "utter=b89c888fbab6bd30807d70249217160e clip=2024_1227_151347_R t=35.5s (time-aligned) concept=control",
+      "status": "planned",
+      "out_path": null
+    },
+    {
+      "id": "f13ef653e6",
+      "brief_topic": "diffusion_models",
+      "title": "diffusion models",
+      "cues": [
+        {
+          "start": 0.0,
+          "end": 2.4,
+          "text": "diffusion models",
+          "kind": "hook"
+        },
+        {
+          "start": 2.4,
+          "end": 10.4,
+          "text": "text generation but also tagging of the tone inside there.",
+          "kind": "point"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2025_0611_183248_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2025/06/11/2025_0611_183248_F.MP4",
+          "t_sec": 23.66,
+          "dur": 8.0,
+          "mph": null
+        }
+      ],
+      "notes": "utter=1dc68343819a6e5dd647573c8ddd567a clip=2025_0611_183248_F t=23.7s (time-aligned) concept=text generation",
+      "status": "planned",
+      "out_path": null
+    }
+  ]
+}

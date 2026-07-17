@@ -91,6 +91,25 @@ DEFAULT_PROFILES: Dict[str, Dict[str, Any]] = {
         "karaoke": False,
         "show_speaker_tag": True,
     },
+    "cinematic": {
+        "font_path": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "font_size": 66,
+        "y_pos_ratio": 0.80,
+        "line_height_px": 92,
+        "stroke_px": 5,
+        "colors": {
+            "text": (255, 255, 255, 255),
+            "stroke": (0, 0, 0, 235),
+            "highlight_text": (0, 0, 0, 255),
+        },
+        "max_width_px": 1040,
+        "wordgrid": False,
+        "karaoke": True,
+        "show_speaker_tag": True,
+        "kenburns": True,
+        "show_speed_hud": True,
+        "anim_sec": 0.4,
+    },
 }
 
 
@@ -520,6 +539,114 @@ def _render_tag(text: str, font: ImageFont.ImageFont, color_rgba: Tuple[int, int
     return img
 
 
+# Accent colors per cue kind (research-scripted shorts). Used for the pill
+# tag / underline accent so hook vs point vs source vs trip read distinctly.
+_CUE_KIND_STYLE: Dict[str, Dict[str, Any]] = {
+    "hook":    {"accent": (255, 196, 0, 235),   "font_scale": 1.15, "tag": "Topic"},
+    "point":   {"accent": (0, 200, 255, 235),   "font_scale": 1.0,  "tag": None},
+    "source":  {"accent": (180, 120, 255, 235), "font_scale": 0.92, "tag": "From your words"},
+    "trip":    {"accent": (120, 230, 150, 235), "font_scale": 1.0,  "tag": "On the road"},
+    "mood":    {"accent": (255, 120, 160, 235), "font_scale": 1.05, "tag": None},
+    "line":    {"accent": (255, 235, 59, 230),  "font_scale": 1.0,  "tag": None},
+}
+
+
+def _cue_kind_style(kind: str) -> Dict[str, Any]:
+    return _CUE_KIND_STYLE.get(kind, _CUE_KIND_STYLE["line"])
+
+
+def _draw_scrim(width: int, band_h: int, color: Tuple[int, int, int, int] = (0, 0, 0, 150)) -> Image.Image:
+    """Vertical gradient scrim (transparent -> color -> transparent) for text legibility."""
+    img = Image.new("RGBA", (width, band_h), (0, 0, 0, 0))
+    d = img.load()
+    r, g, b, a = color
+    for y in range(band_h):
+        # Peak alpha at the vertical center of the band, fading to edges.
+        t = 1.0 - abs((y / max(band_h - 1, 1)) - 0.5) * 2.0
+        alpha = int(a * t * t)
+        for x in range(width):
+            d[x, y] = (r, g, b, alpha)
+    return img
+
+
+def _apply_kenburns(clip, *, zoom: float = 1.08, pan: Tuple[float, float] = (0.04, 0.04)):
+    """Subtle slow zoom + pan ('Ken Burns') so static B-roll feels alive.
+
+    Scales the clip from 1.0 -> ``zoom`` across its duration and drifts the
+    framing by ``pan`` (fraction of width/height). The clip is re-cropped to
+    its original size each frame so downstream composition is unaffected.
+    """
+    from moviepy.video.fx.all import crop, resize
+
+    w, h = clip.w, clip.h
+    dur = float(clip.duration or 0.0) or 1.0
+
+    def _factor(t: float) -> float:
+        return 1.0 + (zoom - 1.0) * (t / dur)
+
+    def _frame(get_frame, t):
+        f = _factor(t)
+        # Center the zoom; pan shifts the crop window over time.
+        ow = int(w * f)
+        oh = int(h * f)
+        px = int(pan[0] * (ow - w) * (t / dur))
+        py = int(pan[1] * (oh - h) * (t / dur))
+        # get_frame returns an (H, W, 3) array; resize it then crop center.
+        import numpy as _np
+        arr = get_frame(t)
+        from PIL import Image as _Image
+        im = _Image.fromarray(arr).resize((ow, oh), _Image.LANCZOS)
+        cropped = im.crop((px, py, px + w, py + h))
+        return _np.array(cropped)
+
+    # Build via fl so each frame is transformed independently.
+    return clip.fl(_frame).resize((w, h))
+
+
+def _draw_speed_hud(mph: float, width: int, height: int,
+                    accent: Tuple[int, int, int, int] = (0, 200, 255, 235)) -> Image.Image:
+    """Small top-left speed readout: a rounded gauge + 'NN mph' label."""
+    pad = 28
+    box_w, box_h = 300, 96
+    x0, y0 = pad, pad
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    # Scrim behind the HUD for legibility.
+    d.rounded_rectangle([x0, y0, x0 + box_w, y0 + box_h], radius=20,
+                        fill=(0, 0, 0, 140))
+    d.rounded_rectangle([x0, y0, x0 + box_w, y0 + box_h], radius=20,
+                        outline=accent, width=3)
+    font = _load_font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 46)
+    label = f"{int(round(mph))} mph"
+    d.text((x0 + 18, y0 + 22), label, font=font, fill=(255, 255, 255, 255))
+    # Tiny speed tick marks.
+    for i in range(5):
+        tx = x0 + 18 + i * 52
+        d.line([(tx, y0 + box_h - 14), (tx, y0 + box_h - 6)], fill=accent, width=4)
+    return img
+
+
+def _draw_end_card(width: int, height: int, hashtag: str,
+                   accent: Tuple[int, int, int, int] = (0, 200, 255, 235)) -> Image.Image:
+    """Branded outro: scrim + 'your words, not a paper' + topic hashtag."""
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    # Bottom scrim for legibility.
+    scrim = _draw_scrim(width, 520)
+    img.paste(scrim, (0, height - 520), scrim)
+    # Accent rule + main line.
+    ax = width // 2
+    d.rectangle([ax - 120, height - 430, ax + 120, height - 422], fill=accent)
+    font_big = _load_font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 58)
+    d.text((ax - 300, height - 400), "your words, not a paper", font=font_big,
+           fill=(255, 255, 255, 255), anchor="mm")
+    # Sub line: follow + hashtag.
+    font_sub = _load_font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
+    sub = f"# {hashtag}" if hashtag else "subscribe"
+    d.text((ax, height - 320), sub, font=font_sub, fill=accent, anchor="mm")
+    return img
+
+
 def _draw_sentence(
     sentence: str,
     width: int,
@@ -800,6 +927,52 @@ def compose_shorts(
     logging.info(f"Wrote {out_path}")
 
 
+def _build_caption_image(text: str, width: int, profile: Dict, kind: str) -> Image.Image:
+    """Render a styled caption image for one cue (per-kind font/accent/tag)."""
+    kstyle = _cue_kind_style(kind)
+    prof = _normalize_profile_from_json(profile)
+    prof = dict(prof)
+    prof["font_size"] = int(prof.get("font_size", 64) * kstyle["font_scale"])
+    accent = kstyle["accent"]
+    img = _draw_sentence(text, width, prof, None, {}).convert("RGBA")
+    if accent:
+        ux = ImageDraw.Draw(img)
+        ux.rectangle([width * 0.30, img.height - 6, width * 0.70, img.height - 2], fill=accent)
+    if kstyle.get("tag"):
+        tag_font = _load_font(prof["font_path"], int(prof.get("font_size", 64) * 0.5))
+        tag_img = _render_tag(kstyle["tag"], tag_font, accent)
+        framed = Image.new("RGBA", (width, img.height + tag_img.height + 8), (0, 0, 0, 0))
+        framed.paste(tag_img, ((width - tag_img.width) // 2, 0), tag_img)
+        framed.paste(img, (0, tag_img.height + 8), img)
+        img = framed
+    return img
+
+
+def _cue_word_timings(text: str, start: float, end: float,
+                      explicit: Optional[List[Dict[str, Any]]]) -> List[Tuple[str, float, float]]:
+    """Return [(word, w_start, w_end), ...] for a cue.
+
+    Uses explicit per-word timings when provided, otherwise distributes words
+    evenly across [start, end] (good enough without forced alignment).
+    """
+    words = [w for w in text.split() if w]
+    if not words:
+        return []
+    if explicit:
+        out = []
+        for w in explicit:
+            ws = w.get("start")
+            we = w.get("end")
+            if ws is None or we is None:
+                continue
+            out.append((str(w.get("word", "")).strip(), float(ws), float(we)))
+        if out:
+            return out
+    span = max(end - start, 0.1)
+    step = span / len(words)
+    return [(w, start + i * step, start + (i + 1) * step) for i, w in enumerate(words)]
+
+
 def compose_scripted_short(
     shots: List[Dict[str, Any]],
     cues: List[Dict[str, Any]],
@@ -815,6 +988,8 @@ def compose_scripted_short(
     bitrate: str = "6M",
     fade: float = 0.12,
     narration_audio: Optional[Path] = None,
+    end_card: bool = True,
+    hashtag: str = "",
 ) -> None:
     """Compose a research-scripted short from highway B-roll + a cue track.
 
@@ -844,8 +1019,17 @@ def compose_scripted_short(
     # Build the B-roll piece(s) from highway shots.
     pieces = []
     src_clips = []
+    shot_windows: List[Tuple[float, float, Optional[float]]] = []  # (t_start, t_end, mph)
+    cum = 0.0
     for i, sh in enumerate(shots):
-        frp = Path(sh["fr_path"])
+        frp = Path(sh.get("fr_path") or "")
+        # Skip shots with no resolvable footage (e.g. audio-sourced discussion
+        # lines whose dashcam clip isn't mounted here). An empty path resolves
+        # to cwd (a directory) and would crash VideoFileClip.
+        if not frp or not frp.exists() or not frp.is_file():
+            logging.warning("Skipping shot %d: missing footage %r", i, sh.get("fr_path"))
+            cum += float(sh.get("dur", 6.0))
+            continue
         dur = float(sh.get("dur", 6.0))
         v = VideoFileClip(str(frp)).without_audio()
         src_clips.append(v)
@@ -875,9 +1059,15 @@ def compose_scripted_short(
         y1 = max(0, (src_h - ch) // 2)
         vcrop = sub.crop(x1=x1, y1=y1, width=cw, height=ch)
         vcrop = vcrop.resize((width, height))
+        # Subtle Ken Burns drift so static highway clips feel alive.
+        if profile.get("kenburns", True):
+            vcrop = _apply_kenburns(vcrop)
         if i > 0 and fade:
             vcrop = vcrop.crossfadein(fade)
         pieces.append(vcrop)
+        mph = sh.get("mph")
+        shot_windows.append((cum, cum + dur, float(mph) if mph is not None else None))
+        cum += dur
 
     for sc in src_clips:
         try:
@@ -889,9 +1079,21 @@ def compose_scripted_short(
     broll = concatenate_videoclips(pieces, method="compose") if len(pieces) > 1 else pieces[0]
     total = float(broll.duration or 0.0)
 
+    # Speed HUD: a small top-left readout per shot that carries an mph value.
+    hud_clips = []
+    if profile.get("show_speed_hud", True):
+        for (t0, t1, mph) in shot_windows:
+            if mph is None:
+                continue
+            hud = ImageClip(np.array(_draw_speed_hud(mph, width, height))).set_start(t0)
+            hud = hud.set_duration(max(0.0, min(t1, total) - t0))
+            hud = hud.crossfadein(0.3).crossfadeout(0.3) if hud.duration and hud.duration > 0.6 else hud
+            hud_clips.append(hud)
+
     # Overlay cues on top of the B-roll.
     base_y = int(height * y_ratio)
     caption_clips = []
+    anim_t = float(profile.get("anim_sec", 0.35))  # entrance animation length
     for c in cues:
         start = float(c.get("start", 0.0))
         end = float(c.get("end", start + 3.0))
@@ -903,12 +1105,85 @@ def compose_scripted_short(
         text = (c.get("text") or "").strip()
         if not text:
             continue
-        img = _draw_sentence(text, width, profile, None, empty_smap)
-        ic = ImageClip(np.array(img.convert("RGBA"))).set_start(start).set_duration(end - start)
-        ic = ic.set_position(("center", base_y))
+        kind = c.get("kind", "line")
+
+        # Karaoke: highlight each word in turn across the cue's duration when
+        # the profile asks for it and the cue has more than one word.
+        do_karaoke = bool(profile.get("karaoke", True)) and len(text.split()) > 1
+        if do_karaoke:
+            wtimings = _cue_word_timings(text, start, end, c.get("words"))
+            for (w, ws, we) in wtimings:
+                kstart = max(start, ws)
+                kend = min(end, we)
+                if kend <= kstart:
+                    continue
+                kprof = _normalize_profile_from_json(profile)
+                kprof = dict(kprof)
+                kstyle = _cue_kind_style(kind)
+                kprof["font_size"] = int(kprof.get("font_size", 64) * kstyle["font_scale"])
+                kimg = _draw_sentence_highlight(text, w, width, kprof, None, empty_smap).convert("RGBA")
+                if kstyle.get("tag"):
+                    tag_font = _load_font(kprof["font_path"], int(kprof.get("font_size", 64) * 0.5))
+                    tag_img = _render_tag(kstyle["tag"], tag_font, kstyle["accent"])
+                    framed = Image.new("RGBA", (width, kimg.height + tag_img.height + 8), (0, 0, 0, 0))
+                    framed.paste(tag_img, ((width - tag_img.width) // 2, 0), tag_img)
+                    framed.paste(kimg, (0, tag_img.height + 8), kimg)
+                    kimg = framed
+                band_h = int(kimg.height + 120)
+                scrim = ImageClip(np.array(_draw_scrim(width, band_h))).set_start(kstart).set_duration(kend - kstart)
+                scrim = scrim.set_position(("center", base_y - band_h // 2))
+                kc = ImageClip(np.array(kimg)).set_start(kstart).set_duration(kend - kstart)
+                if anim_t > 0 and kend - kstart > anim_t:
+                    kc = kc.fadein(anim_t)
+                kc = kc.set_position(("center", base_y))
+                caption_clips.append(scrim)
+                caption_clips.append(kc)
+            continue
+
+        # Non-karaoke caption: per-kind font size + accent + optional pill tag.
+        img = _build_caption_image(text, width, profile, kind)
+
+        # Scrim band behind the caption for legibility over bright footage.
+        band_h = int(img.height + 120)
+        scrim = ImageClip(np.array(_draw_scrim(width, band_h))).set_start(start).set_duration(end - start)
+        scrim = scrim.set_position(("center", base_y - band_h // 2))
+
+        ic = ImageClip(np.array(img)).set_start(start).set_duration(end - start)
+
+        # Animated entrance: rise + fade in over anim_t seconds.
+        if anim_t > 0 and end - start > anim_t:
+            ic = ic.fadein(anim_t)
+            rise = int(_normalize_profile_from_json(profile).get("line_height_px", 90) * 0.6)
+
+            def _pos(t, base_y=base_y, rise=rise):  # noqa: B008
+                if t <= 0:
+                    return ("center", base_y + rise)
+                frac = min(1.0, t / anim_t)
+                return ("center", int(base_y + rise * (1.0 - frac)))
+
+            ic = ic.set_position(_pos)
+        else:
+            ic = ic.set_position(("center", base_y))
+
+        caption_clips.append(scrim)
         caption_clips.append(ic)
 
-    comp = CompositeVideoClip([broll] + caption_clips)
+    comp = CompositeVideoClip([broll] + hud_clips + caption_clips)
+    # Branded end card in the final beats (subscribe / topic hashtag).
+    if end_card and total > 3.0:
+        ec_dur = min(2.8, total * 0.25)
+        ec_start = max(0.0, total - ec_dur)
+        tag = hashtag or ""
+        if not tag:
+            for c in cues:
+                if c.get("kind") == "hook" and c.get("text"):
+                    slug = re.sub(r"[^a-z0-9]+", " ", str(c["text"]).lower()).strip()
+                    tag = slug.replace(" ", "")[:24]
+                    break
+        ec_img = _draw_end_card(width, height, tag)
+        ec = ImageClip(np.array(ec_img)).set_start(ec_start).set_duration(total - ec_start)
+        ec = ec.fadein(min(0.5, ec_dur * 0.4))
+        comp = CompositeVideoClip([broll] + hud_clips + caption_clips + [ec])
     # A synthesized narration track (e.g. owner-voice TTS) takes precedence
     # over any ambient B-roll audio. It is trimmed/padded to the video length
     # so the short is fully narrated even if the voice clip is shorter/longer.

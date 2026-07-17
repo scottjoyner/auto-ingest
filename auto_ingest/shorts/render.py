@@ -53,6 +53,12 @@ def render_short(item: PlannedShort, out_dir: Path, *,
 
     shots = [s.to_dict() for s in item.shots]
     cues = [c.to_dict() for c in item.cues]
+    # Skip shorts with no resolvable footage (audio-sourced discussion lines
+    # whose dashcam clip isn't mounted here) rather than crashing the renderer.
+    if not any((sh.get("fr_path") and Path(sh["fr_path"]).is_file()) for sh in shots):
+        log.info("Skip %s (no resolvable footage)", item.id)
+        item.status = "rejected"
+        return out_path
     narration_audio = None
     if tts:
         try:
@@ -65,6 +71,7 @@ def render_short(item: PlannedShort, out_dir: Path, *,
         shots, cues, out_path,
         profile_name=profile_name, width=width, height=height, bitrate=bitrate,
         narration_audio=narration_audio,
+        hashtag=item.brief_topic or "",
     )
     item.status = "rendered"
     item.out_path = str(out_path)

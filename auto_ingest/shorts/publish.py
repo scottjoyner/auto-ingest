@@ -116,3 +116,48 @@ def queue_all_unpublished(platform: str = "youtube_shorts", limit: int = 50) -> 
         queue_for_publish(s, platform=platform)
         n += 1
     return n
+
+
+def scan_rendered(out_root: Path) -> List[Publishable]:
+    """List rendered MP4s directly from disk (DB-independent staging).
+
+    The parent directory is treated as the topic and the filename stem as the
+    short key. This lets us stage a publish queue even when Neo4j is saturated.
+    """
+    root = Path(out_root)
+    out: List[Publishable] = []
+    if not root.exists():
+        return out
+    for mp4 in sorted(root.rglob("*.mp4")):
+        topic = mp4.parent.name
+        key = mp4.stem
+        out.append(Publishable(
+            key=key, topic=topic, title=key.replace("_", " "),
+            out_path=str(mp4)))
+    return out
+
+
+def queue_all_on_disk(out_root: Path, platforms: List[str], limit: int = 0) -> int:
+    """Stage every rendered MP4 on disk into the queue for each platform.
+
+    Idempotent per (key, platform) via :func:`queue_for_publish`. Returns the
+    number of (short, platform) entries appended.
+    """
+    items = scan_rendered(out_root)
+    if limit:
+        items = items[:limit]
+    n = 0
+    for it in items:
+        for plat in platforms:
+            before = _queue_file_lines()
+            queue_for_publish(it, platform=plat)
+            if _queue_file_lines() > before:
+                n += 1
+    log.info("Staged %d (short,platform) entries from disk under %s", n, out_root)
+    return n
+
+
+def _queue_file_lines() -> int:
+    if not QUEUE_PATH.exists():
+        return 0
+    return sum(1 for _ in QUEUE_PATH.read_text().splitlines() if _.strip())

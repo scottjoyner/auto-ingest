@@ -275,26 +275,58 @@ def build_parser() -> argparse.ArgumentParser:
     pt.set_defaults(func=_cmd_trip)
 
 
-    ppv = sub.add_parser("publish", help="Publish workflow: queue/inspect rendered shorts.")
-    ppv.add_argument("action", choices=["queue", "list"],
-                     help="queue = stage all unpublished shorts; list = show them")
-    ppv.add_argument("--platform", default="youtube_shorts")
-    ppv.add_argument("--limit", type=int, default=50)
+    ppv = sub.add_parser("publish", help="Publish workflow: queue/inspect/upload rendered shorts.")
+    ppv.add_argument("action", choices=["queue", "list", "upload", "auth", "youtube"], nargs="?",
+                     help="queue = stage; list = show staged; upload = push; "
+                          "auth/youtube = bootstrap a YouTube OAuth token (sign-in link)")
+    ppv.add_argument("--platform", default="youtube_shorts",
+                     help="Single platform for queue/list (default youtube_shorts)")
+    ppv.add_argument("--platforms", nargs="*", default=["youtube_shorts", "tiktok", "instagram"],
+                     help="Platforms for disk-based queue + upload (all by default)")
+    ppv.add_argument("--disk", action="store_true",
+                     help="Stage from rendered MP4s on disk instead of Neo4j (DB-independent)")
+    ppv.add_argument("--out-root",
+                     default="/media/scott/NAS5/fileserver/dashcam_timelapse/_mix_run/narrated",
+                     help="Root dir scanned by --disk")
+    ppv.add_argument("--limit", type=int, default=0)
+    ppv.add_argument("--dry-run", action="store_true", default=True,
+                     help="Report what would upload; no network calls (default)")
+    ppv.add_argument("--no-dry-run", dest="dry_run", action="store_false",
+                     help="Actually upload (requires platform credentials in env)")
+    ppv.add_argument("--headless", action="store_true",
+                     help="auth: use manual code-paste instead of local browser server")
     ppv.set_defaults(func=_cmd_publish)
 
     return p
 
 
 def _cmd_publish(args) -> int:
-    if args.action == "list":
-        items = publish.list_unpublished(limit=args.limit)
-        for it in items:
-            print(f"{it.key}  {it.topic}  {it.title}  -> {it.out_path}")
-        print(f"{len(items)} unpublished short(s)")
+    if args.action == "queue":
+        if args.disk:
+            n = publish.queue_all_on_disk(args.out_root, args.platforms, limit=args.limit)
+            print(f"Staged {n} (short,platform) entries from disk under {args.out_root}")
+        else:
+            n = publish.queue_all_unpublished(platform=args.platform, limit=args.limit)
+            print(f"Queued {n} short(s) for {args.platform}")
         return 0
-    # queue
-    n = publish.queue_all_unpublished(platform=args.platform, limit=args.limit)
-    print(f"Queued {n} short(s) for {args.platform}")
+    if args.action == "list":
+        from auto_ingest.shorts import uploader
+        items = uploader.load_queue()
+        for it in items:
+            print(f"{it.platform:14} {it.key}  {it.topic}  -> {it.out_path}")
+        print(f"{len(items)} queued short(s)")
+        return 0
+    if args.action == "auth":
+        from auto_ingest.shorts import yt_auth
+        tok = yt_auth.bootstrap_token(headless=args.headless)
+        print(f"YouTube authenticated. Token at {tok}")
+        return 0
+    # upload
+    from auto_ingest.shorts import uploader
+    attempted = uploader.process_queue(
+        platforms=args.platforms, dry_run=args.dry_run)
+    mode = "dry-run" if args.dry_run else "LIVE"
+    print(f"[{mode}] upload: attempted {attempted} item(s)")
     return 0
 
 

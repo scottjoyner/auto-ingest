@@ -1,0 +1,148 @@
+{
+  "plan_id": "76c824ba7f34",
+  "topic": "reinforcement_learning",
+  "iteration": 1,
+  "created_at": 1784271582.5804312,
+  "updated_at": 1784271582.5804312,
+  "brief": {
+    "topic": "reinforcement_learning",
+    "title": "reinforcement learning",
+    "hook": "We can't do quantum error correction because it",
+    "points": [
+      "We can't do quantum error correction because it",
+      "multi-agent but even to get to that point where you're having agents hand",
+      "given the level of complexity associated with it",
+      "you're looking to build. What does orchestra",
+      "quantum bits to account for error correction right",
+      "You look at all of that it has fine-tuning instruction"
+    ],
+    "sources": [
+      {
+        "kind": "utterance",
+        "ref_id": "4392ee16707740ffda4065f2779a425e",
+        "title": "quantum error correction (0.93)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "ff631439d894a0651c137a49c593efcc",
+        "title": "multi-agent (0.91)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "d3018989e41078307e9ff4b036416c6f",
+        "title": "computational complexity (0.91)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "b7f38ffb1041034dd468f8cbfb769c39",
+        "title": "orchestration (0.91)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "482121dcc0411f5270e06381b6298488",
+        "title": "quantum error correction (0.91)",
+        "url": null,
+        "year": null
+      },
+      {
+        "kind": "utterance",
+        "ref_id": "8939b8ab9dfb5874819a9ffc32a289aa",
+        "title": "instruction tuning (0.91)",
+        "url": null,
+        "year": null
+      }
+    ],
+    "tags": [
+      "agent",
+      "alignment",
+      "compilers",
+      "computational complexity",
+      "context window",
+      "control",
+      "databases",
+      "entanglement",
+      "image generation",
+      "instruction tuning",
+      "materials science",
+      "multi-agent",
+      "orchestration",
+      "phase transition",
+      "quantum computing",
+      "quantum error correction",
+      "rope",
+      "vision transformer"
+    ]
+  },
+  "shorts": [
+    {
+      "id": "888ae2e034",
+      "brief_topic": "reinforcement_learning",
+      "title": "reinforcement learning",
+      "cues": [
+        {
+          "start": 0.0,
+          "end": 2.4,
+          "text": "reinforcement learning",
+          "kind": "hook"
+        },
+        {
+          "start": 2.4,
+          "end": 10.4,
+          "text": "controlled. I'm a control freak. And we're",
+          "kind": "point"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2024_1227_151347_R",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/12/27/2024_1227_151347_R.MP4",
+          "t_sec": 35.46,
+          "dur": 8.0,
+          "mph": null
+        }
+      ],
+      "notes": "utter=b89c888fbab6bd30807d70249217160e clip=2024_1227_151347_R t=35.5s (time-aligned) concept=control",
+      "status": "planned",
+      "out_path": null
+    },
+    {
+      "id": "888ae2e034",
+      "brief_topic": "reinforcement_learning",
+      "title": "reinforcement learning",
+      "cues": [
+        {
+          "start": 0.0,
+          "end": 2.4,
+          "text": "reinforcement learning",
+          "kind": "hook"
+        },
+        {
+          "start": 2.4,
+          "end": 10.4,
+          "text": "controlled. I'm a control freak. And we're",
+          "kind": "point"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2024_1227_151347_R",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/12/27/2024_1227_151347_R.MP4",
+          "t_sec": 35.46,
+          "dur": 8.0,
+          "mph": null
+        }
+      ],
+      "notes": "utter=b89c888fbab6bd30807d70249217160e clip=2024_1227_151347_R t=35.5s (time-aligned) concept=control",
+      "status": "planned",
+      "out_path": null
+    }
+  ]
+}

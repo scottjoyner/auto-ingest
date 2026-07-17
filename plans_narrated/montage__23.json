@@ -1,0 +1,170 @@
+{
+  "plan_id": "477ace3198d4",
+  "topic": "montage",
+  "iteration": 1,
+  "created_at": 1784239696.0430946,
+  "updated_at": 1784239696.0430946,
+  "brief": {
+    "topic": "montage",
+    "title": "Day in the Drive",
+    "hook": "",
+    "points": [],
+    "sources": [],
+    "tags": []
+  },
+  "shorts": [
+    {
+      "id": "edb538ee21",
+      "brief_topic": "montage",
+      "title": "Day in the Drive \u2014 I-15 #1",
+      "cues": [
+        {
+          "start": 0.4,
+          "end": 3.6,
+          "text": "118 mph \u2022 I-15 \u2022 09:14 PM",
+          "kind": "mood"
+        },
+        {
+          "start": 10.27,
+          "end": 13.47,
+          "text": "111 mph \u2022 I-15 \u2022 09:17 PM",
+          "kind": "mood"
+        },
+        {
+          "start": 20.13,
+          "end": 23.33,
+          "text": "110 mph \u2022 I-15 \u2022 09:20 PM",
+          "kind": "mood"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2024_0408_023703_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/04/08/2024_0408_023703_F.MP4",
+          "t_sec": 0.0,
+          "dur": 6.0,
+          "mph": 118
+        },
+        {
+          "clip_key": "2024_0515_051305_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/05/15/2024_0515_051305_F.MP4",
+          "t_sec": 0.0,
+          "dur": 6.0,
+          "mph": 111
+        },
+        {
+          "clip_key": "2024_0730_053545_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/07/30/2024_0730_053545_F.MP4",
+          "t_sec": 7.0,
+          "dur": 6.0,
+          "mph": 110.0
+        }
+      ],
+      "notes": "mood=default road=I-15 vibe=on the road",
+      "status": "planned",
+      "out_path": null
+    },
+    {
+      "id": "c1242cfbec",
+      "brief_topic": "montage",
+      "title": "Day in the Drive \u2014 I-15 #2",
+      "cues": [
+        {
+          "start": 0.4,
+          "end": 3.6,
+          "text": "114 mph \u2022 I-15 \u2022 09:21 PM",
+          "kind": "mood"
+        },
+        {
+          "start": 10.27,
+          "end": 13.47,
+          "text": "133 mph \u2022 I-15 \u2022 09:24 PM",
+          "kind": "mood"
+        },
+        {
+          "start": 20.13,
+          "end": 23.33,
+          "text": "111 mph \u2022 I-15 \u2022 09:27 PM",
+          "kind": "mood"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2024_0515_050605_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/05/15/2024_0515_050605_F.MP4",
+          "t_sec": 1.0,
+          "dur": 6.0,
+          "mph": 114
+        },
+        {
+          "clip_key": "2024_0602_060142_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/06/02/2024_0602_060142_F.MP4",
+          "t_sec": 0.0,
+          "dur": 6.0,
+          "mph": 133
+        },
+        {
+          "clip_key": "2024_0602_053642_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/06/02/2024_0602_053642_F.MP4",
+          "t_sec": 0.0,
+          "dur": 6.0,
+          "mph": 111
+        }
+      ],
+      "notes": "mood=default road=I-15 vibe=on the road",
+      "status": "planned",
+      "out_path": null
+    },
+    {
+      "id": "0ef1fe969b",
+      "brief_topic": "montage",
+      "title": "Day in the Drive \u2014 I-15 #3",
+      "cues": [
+        {
+          "start": 0.4,
+          "end": 3.6,
+          "text": "111 mph \u2022 I-15 \u2022 09:28 PM",
+          "kind": "mood"
+        },
+        {
+          "start": 10.27,
+          "end": 13.47,
+          "text": "119 mph \u2022 I-15 \u2022 09:31 PM",
+          "kind": "mood"
+        },
+        {
+          "start": 20.13,
+          "end": 23.33,
+          "text": "111 mph \u2022 I-15 \u2022 09:34 PM",
+          "kind": "mood"
+        }
+      ],
+      "shots": [
+        {
+          "clip_key": "2024_0506_033653_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/05/06/2024_0506_033653_F.MP4",
+          "t_sec": 1.0,
+          "dur": 6.0,
+          "mph": 111
+        },
+        {
+          "clip_key": "2024_0602_054342_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/06/02/2024_0602_054342_F.MP4",
+          "t_sec": 1.0,
+          "dur": 6.0,
+          "mph": 119
+        },
+        {
+          "clip_key": "2024_0731_210147_F",
+          "fr_path": "/media/scott/SSD_4TB/fileserver/dashcam/2024/07/31/2024_0731_210147_F.MP4",
+          "t_sec": 1.0,
+          "dur": 6.0,
+          "mph": 111
+        }
+      ],
+      "notes": "mood=default road=I-15 vibe=on the road",
+      "status": "planned",
+      "out_path": null
+    }
+  ]
+}
