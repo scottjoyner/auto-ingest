@@ -3,9 +3,18 @@ try:
     from auto_ingest_config import get_fileserver_path
 except Exception:  # packaged import fallback
     from auto_ingest._config import get_fileserver_path
-import os, re, ast, json, math, logging, argparse, datetime, subprocess, shlex
+import argparse
+import ast
+import datetime
+import json
+import logging
+import math
+import os
+import re
+import shlex
+import subprocess
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional, Iterable
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -13,7 +22,6 @@ from moviepy.editor import VideoFileClip
 
 # Import db_retry for resilient Neo4j access
 from auto_ingest.shorts.db_retry import with_driver
-from neo4j.exceptions import Neo4jError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -470,7 +478,7 @@ def find_best_locevent_then_phonelog(sess, t_utc: datetime.datetime, win_mins: i
     for offs in [0, +3600, -3600]:
         t_try = t_utc + datetime.timedelta(seconds=offs)
         r = q_locevent(t_try)
-        if r: 
+        if r:
             r["_offset"] = offs
             candidates.append(r)
     primary = None

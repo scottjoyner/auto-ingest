@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
+import argparse
+import json
+import os
+import re
+
 from auto_ingest_config import get_fileserver_path, get_neo4j_config
-import os, re, json, math, argparse
+
 os.environ.setdefault("USE_TF", "0")
 os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List, Tuple
-from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from neo4j import GraphDatabase
-from transformers import pipeline
 from tqdm import tqdm
+from transformers import pipeline
+
 
 # --------------- Helper ----------------
 def neo4j_env():

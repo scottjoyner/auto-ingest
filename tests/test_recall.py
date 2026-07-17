@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import List
 
-import auto_ingest.personal.recall as recall
 import auto_ingest.personal.embed as embed
+import auto_ingest.personal.recall as recall
 
 
 class FakeRecord:

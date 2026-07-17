@@ -342,18 +342,22 @@ def cmd_tiktok(args) -> int:
 
 def cmd_shorts(args) -> int:
     """Forward to the research-scripted shorts package CLI."""
-    return _run("python3", ["-m", "auto_ingest.shorts.cli"] + args.rest,
-                extra_env=neo4j_env())
+    return _run_module("auto_ingest.shorts.cli", args.rest,
+                       extra_env=neo4j_env())
 
 
 def cmd_link_concepts(args) -> int:
     """Forward to scripts/link_utterances_to_concepts.py (W-56)."""
-    return _run("python3", ["scripts/link_utterances_to_concepts.py"] + args.rest,
+    return _run("scripts/link_utterances_to_concepts.py", args.rest,
                 extra_env=neo4j_env())
 
 
 def cmd_worker(args) -> int:
-    return _run("./run_worker.sh", [], extra_env=neo4j_env())
+    """Run the idle-machine worker loop (shell script)."""
+    env = neo4j_env()
+    cmd = [str(REPO / "run_worker.sh")]
+    print(f"[auto-ingest] $ {' '.join(cmd)}", flush=True)
+    return subprocess.call(cmd, cwd=str(REPO), env=env)
 
 
 # ---------------------------------------------------------------------------

@@ -376,15 +376,10 @@ def _clip_model():
     return _CLIP
 
 
-# Prefer the canonical personal-recall embed path if available.
-try:
-    from auto_ingest.personal.embed import embed_image as _shared_embed_image
-    embed_image = _shared_embed_image  # noqa: F811  (prefer shared impl)
-except Exception:
-    pass
-
-
+# Prefer the canonical personal-recall embed path if available;
+# fall back to the local CLIP loader below.
 def embed_image(path: Path) -> Optional[List[float]]:
+    """Fallback CLIP image embedding (used when shared personal/embed is unavailable)."""
     bundle = _clip_model()
     if not bundle:
         return None
@@ -402,6 +397,14 @@ def embed_image(path: Path) -> Optional[List[float]]:
     except Exception as e:
         _log(f"  clip embed failed: {e}")
         return None
+
+
+# Try to override with the shared personal-recall embed (uses same CLIP cache).
+try:
+    from auto_ingest.personal.embed import embed_image as _shared_embed_image  # noqa: F401
+    embed_image = _shared_embed_image  # noqa: F811
+except Exception:
+    pass  # keep local fallback
 
 
 # --------------------------------------------------------------------------
