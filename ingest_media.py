@@ -26,6 +26,11 @@ Usage:
   # live Nextcloud (WebDAV pull)
   python3 ingest_media.py --nextcloud-url https://cloud.example.com/remote.php/dav/files/ME/Photos \
       --nextcloud-user ME --nextcloud-pass TOKEN --kind all
+
+  # also link MediaFile nodes to SummaryPlace/Trip/PhoneLog by GPS, and build
+  # per-date + per-Trip/Place Ken Burns slideshows (near-dup images pruned)
+  python3 ingest_media.py --root /media/scott/SSD_4TB/photos --slideshow \
+      --link-limit 5000   # --no-link to skip; --no-embed to skip CLIP embedding
 """
 from __future__ import annotations
 
@@ -147,6 +152,14 @@ def video_meta(path: Path) -> Dict:
             nd = _norm_date(int(m.group("y")), int(m.group("m")), int(m.group("d")))
             if nd:
                 meta["date"] = nd
+        # best-effort full timestamp from the creation_time tag
+        try:
+            dt = datetime.strptime(ct.replace("T", " ").replace("Z", ""),
+                                   "%Y-%m-%d %H:%M:%S")
+            meta["created_at"] = dt.strftime("%Y-%m-%d %H:%M:%S")
+            meta["epoch_millis"] = int(dt.timestamp() * 1000)
+        except Exception:
+            pass
     return meta
 
 
@@ -169,7 +182,7 @@ def image_meta(path: Path) -> Dict:
         with Image.open(path) as im:
             meta = {"width": im.width, "height": im.height}
             ex = im.getexif()
-            # DateTimeOriginal = 36867
+            # DateTimeOriginal = 36867 (date only); time from 36868/306
             dt = ex.get(36867) or ex.get(306)
             if dt:
                 m = re.match(r"(?P<y>\d{4})[:_](?P<m>\d{2})[:_](?P<d>\d{2})", str(dt))
@@ -178,6 +191,21 @@ def image_meta(path: Path) -> Dict:
                                     int(m.group("d")))
                     if nd:
                         meta["date"] = nd
+            # best-effort full timestamp: 36868 DateTimeDigitized, else 306
+            dtt = ex.get(36868) or ex.get(306)
+            if dtt:
+                m2 = re.match(
+                    r"(?P<y>\d{4})[:_](?P<mo>\d{2})[:_](?P<d>\d{2})\s+"
+                    r"(?P<h>\d{2})[:_](?P<mi>\d{2})[:_](?P<s>\d{2})", str(dtt))
+                if m2:
+                    try:
+                        full = datetime(int(m2.group("y")), int(m2.group("mo")),
+                                        int(m2.group("d")), int(m2.group("h")),
+                                        int(m2.group("mi")), int(m2.group("s")))
+                        meta["created_at"] = full.strftime("%Y-%m-%d %H:%M:%S")
+                        meta["epoch_millis"] = int(full.timestamp() * 1000)
+                    except Exception:
+                        pass
             # GPS via piexif (handles HEIC nested IFD that Pillow returns as int)
             try:
                 import piexif
@@ -346,6 +374,14 @@ def _clip_model():
     model.eval()
     _CLIP = (model, preprocess, tok)
     return _CLIP
+
+
+# Prefer the canonical personal-recall embed path if available.
+try:
+    from auto_ingest.personal.embed import embed_image as _shared_embed_image
+    embed_image = _shared_embed_image  # noqa: F811  (prefer shared impl)
+except Exception:
+    pass
 
 
 def embed_image(path: Path) -> Optional[List[float]]:
@@ -561,7 +597,8 @@ def upsert_media(drv, rec: Dict) -> None:
         m.size=$size, m.thumb=$thumb, m.ingested_at=$now,
         m.storage_root=$storage_root, m.relative_path=$relative_path,
         m.host_path=$host_path, m.tailscale_host_hint=$tailscale_host_hint,
-        m.retention_class=$retention_class
+        m.retention_class=$retention_class,
+        m.captured_at=$captured_at, m.epoch_millis=$epoch_millis
     """
     params = {
         "sha": rec["sha"], "path": rec["path"], "source": rec["source"],
@@ -579,6 +616,8 @@ def upsert_media(drv, rec: Dict) -> None:
         "host_path": rec.get("host_path"),
         "tailscale_host_hint": rec.get("tailscale_host_hint"),
         "retention_class": rec.get("retention_class"),
+        "captured_at": rec.get("created_at"),
+        "epoch_millis": rec.get("epoch_millis"),
     }
     with drv.session(database=NEO4J_DB) as s:
         s.run(q, **params)
@@ -697,6 +736,10 @@ def main() -> int:
     ap.add_argument("--no-transcribe", action="store_true", help="Skip Whisper transcription")
     ap.add_argument("--no-embed", action="store_true", help="Skip CLIP image embedding")
     ap.add_argument("--no-shorts", action="store_true", help="Skip short generation")
+    ap.add_argument("--no-link", action="store_true",
+                    help="Skip GPS-based MediaFile linking (SummaryPlace/Trip/PhoneLog)")
+    ap.add_argument("--link-limit", type=int, default=0,
+                    help="Max MediaFile nodes to link this run (0=all)")
     ap.add_argument("--music", type=Path, default=None, help="Background music for slideshows")
     ap.add_argument("--slideshow", action="store_true",
                     help="Also build per-date Ken Burns slideshow shorts from pictures")
@@ -790,12 +833,72 @@ def main() -> int:
     if args.slideshow and not args.dry_run and args.kind in ("picture", "all"):
         build_slideshows(drv, source, args.music)
 
+    # Optional GPS-based linking of MediaFile -> SummaryPlace/Trip/PhoneLog.
+    if not args.no_link and not args.dry_run:
+        try:
+            from auto_ingest.personal.embed import ensure_media_indexes_with_retry
+            ensure_media_indexes_with_retry()
+        except Exception as e:
+            _log(f"  ensure_media_indexes failed (continuing): {e}")
+        try:
+            from auto_ingest.personal.link_media import link_all
+            from auto_ingest.shorts.db_retry import with_driver
+            with_driver(lambda drv: link_all(drv, limit=args.link_limit))
+            _log("  linking complete")
+        except Exception as e:
+            _log(f"  linking skipped: {e}")
+
     _log(f"Done. Processed {count} file(s). State: {args.state}")
     return 0
 
 
+def dedup_by_embedding(paths: List[Path], threshold: float = 0.95) -> List[Path]:
+    """Drop near-duplicate consecutive images (cosine sim >= threshold).
+
+    Uses the shared CLIP embed; if CLIP is unavailable, returns paths unchanged.
+    """
+    try:
+        from auto_ingest.personal.embed import embed_image as _embed
+    except Exception:
+        return paths
+    try:
+        import numpy as np
+        vecs: List[Optional[List[float]]] = []
+        for p in paths:
+            try:
+                vecs.append(_embed(p))
+            except Exception:
+                vecs.append(None)
+        out: List[Path] = []
+        for i, p in enumerate(paths):
+            v = vecs[i]
+            if v is None or not out:
+                out.append(p)
+                continue
+            last_v = vecs[paths.index(out[-1])]
+            if last_v is None:
+                out.append(p)
+                continue
+            sim = float(np.dot(v, last_v) / (np.linalg.norm(v) * np.linalg.norm(last_v)))
+            if sim < threshold:
+                out.append(p)
+        return out
+    except Exception:
+        return paths
+
+
+def _safe(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "_", str(s))[:80]
+
+
 def build_slideshows(drv, source: str, music: Optional[Path]) -> None:
-    _log("Building per-date picture slideshows ...")
+    _log("Building picture slideshows (per-date + per-Trip/Place) ...")
+    groups: Dict[str, List[str]] = {}
+
+    def _add(grp: str, paths: List[str]) -> None:
+        if len(paths) >= 2:
+            groups.setdefault(grp, paths)
+
     with drv.session(database=NEO4J_DB) as s:
         rows = s.run(
             "MATCH (m:MediaFile {source:$src, kind:'picture'}) "
@@ -805,17 +908,36 @@ def build_slideshows(drv, source: str, music: Optional[Path]) -> None:
     for r in rows:
         by_date.setdefault(r["date"], []).append(r["path"])
     for date, paths in sorted(by_date.items()):
-        if len(paths) < 2:
+        _add(f"date:{date}", paths)
+
+    # Group by linked SummaryPlace / Trip when available.
+    with drv.session(database=NEO4J_DB) as s:
+        for r in s.run(
+            "MATCH (m:MediaFile {source:$src, kind:'picture'})-[:AT_PLACE]->"
+            "(p:SummaryPlace) RETURN p.name AS grp, m.path AS path "
+            "ORDER BY grp, m.path", src=source).data():
+            groups.setdefault(f"place:{_safe(r['grp'])}", []).append(r["path"])
+        for r in s.run(
+            "MATCH (m:MediaFile {source:$src, kind:'picture'})-[:DURING]->"
+            "(t:Trip) RETURN coalesce(t.uniqueKey, t.tripId) AS grp, m.path AS path "
+            "ORDER BY grp, m.path", src=source).data():
+            groups.setdefault(f"trip:{_safe(r['grp'])}", []).append(r["path"])
+
+    for grp, paths in sorted(groups.items()):
+        deduped = dedup_by_embedding([Path(p) for p in paths])
+        if len(deduped) < 2:
             continue
-        out = Path(SHORT_ROOT) / date / f"slideshow_{date}.mp4"
+        out = Path(SHORT_ROOT) / grp / f"slideshow_{_safe(grp)}.mp4"
         if out.exists():
             continue
-        ok = build_slideshow([Path(p) for p in paths], out, music)
+        ok = build_slideshow(deduped, out, music)
         if ok:
             with drv.session(database=NEO4J_DB) as s2:
-                s2.run("MATCH (m:MediaFile {source:$src, kind:'picture', date:$d}) "
-                       "SET m.slideshow=$p", src=source, d=date, p=str(out))
-            _log(f"  slideshow {date}: {len(paths)} pics -> {out}")
+                s2.run(
+                    "MATCH (m:MediaFile {source:$src, kind:'picture'}) "
+                    "WHERE m.path IN $ps SET m.slideshow=$p",
+                    src=source, ps=[str(p) for p in deduped], p=str(out))
+            _log(f"  slideshow {grp}: {len(deduped)} pics -> {out}")
 
 
 if __name__ == "__main__":

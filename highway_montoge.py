@@ -2,6 +2,11 @@
 from auto_ingest_config import get_fileserver_path
 # -*- coding: utf-8 -*-
 """
+DEPRECATED — legacy short generator. Retained for CLI compatibility / history only.
+
+Canonical renderer: ``auto_ingest/shorts/compose.py`` (``render_short`` /
+``compose_scripted_short``). Do not extend this module; new work belongs in compose.py.
+
 highway_montage.py
 Plan & render “similar actions” highway montages (45–135 mph) using your vector/geo/speed searches.
 
@@ -663,6 +668,11 @@ def main() -> int:
 
 if __name__ == "__main__":
     import sys
+    print(
+        "DEPRECATED: highway_montoge.py is a legacy generator; the canonical "
+        "renderer is auto_ingest/shorts/compose.py (render_short / "
+        "compose_scripted_short). Running as-is for compatibility.",
+        file=sys.stderr)
     sys.exit(main())
 
 """

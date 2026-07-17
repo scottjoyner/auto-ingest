@@ -395,6 +395,15 @@ def cmd_ingest(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# recall  (personal media memory-recall)
+# ---------------------------------------------------------------------------
+def cmd_recall(args) -> int:
+    """Forward to the personal recall package (embed + graph-linked search)."""
+    return _run("python3", ["-m", "auto_ingest.personal.recall"] + args.rest,
+                extra_env=neo4j_env())
+
+
+# ---------------------------------------------------------------------------
 # run-all  (machine-agnostic orchestration of the full historical ingest pass)
 # ---------------------------------------------------------------------------
 def cmd_run_all(args) -> int:
@@ -595,6 +604,16 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--force", action="store_true", help="Re-process already-done files")
     pi.add_argument("--dry-run", action="store_true", help="Scan + metadata only, no Neo4j write")
     pi.set_defaults(func=cmd_ingest)
+
+    # ---------------------------------------------------------------------------
+    # recall  (personal iPhone media memory-recall: embed + graph-link search)
+    # ---------------------------------------------------------------------------
+    prc = sub.add_parser("recall", help="Personal media recall over embedded iPhone "
+                                          "photos/videos (similar / text / geo search).")
+    prc.add_argument("rest", nargs=argparse.REMAINDER,
+                     help="Forwarded to auto_ingest.personal.recall "
+                          "(subcommands: similar-media | recall | geo-media)")
+    prc.set_defaults(func=cmd_recall)
 
     return p
 

@@ -2,6 +2,9 @@
 """
 Knowledge Sync Handler - Slash command interface for multi-machine sync
 Called via /knowledge-sync, /knowledge-neo4j, /knowledge-conflicts
+
+Peers are discovered from ``config.yaml`` (``knowledge_map.vault_peers``) as
+Tailscale hostnames only — never raw IPs. See docs/VAULT_SYNC.md.
 """
 
 import os
@@ -15,12 +18,40 @@ MIRROR_PATH = os.environ.get("KNOWLEDGE_MIRROR_PATH", "/media/scott/NAS2/fileser
 AUTO_INGEST_PATH = "/home/scott/git/auto-ingest"
 LOG_FILE = "/home/scott/logs/knowledge_sync.log"
 
-MACHINES = [
-    ("deathstar", "100.78.106.121"),
-    ("demo-1", "100.65.68.58"),
-    ("destroyer", "100.81.57.77"),
-    ("optiplex", "100.69.158.114"),
-]
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
+
+
+def _load_machines() -> list:
+    """Load peer (name, host) tuples from config.yaml Tailscale hostnames.
+
+    Falls back to the KNOWLEDGE_PEERS env var (comma-separated hostnames) and
+    finally to an empty list so the script never crashes on a missing config.
+    """
+    try:
+        import yaml
+
+        with open(CONFIG_PATH) as f:
+            cfg = yaml.safe_load(f) or {}
+        peers = (cfg.get("knowledge_map") or {}).get("vault_peers") or []
+        machines = []
+        for peer in peers:
+            if isinstance(peer, dict):
+                machines.append((peer.get("name"), peer.get("host")))
+            else:
+                machines.append((str(peer), str(peer)))
+        return [(n, h) for n, h in machines if h]
+    except Exception as e:
+        print(f"WARNING: could not read vault_peers from {CONFIG_PATH}: {e}")
+
+    env_peers = os.environ.get("KNOWLEDGE_PEERS")
+    if env_peers:
+        return [(p.strip(), p.strip()) for p in env_peers.split(",") if p.strip()]
+
+    print("WARNING: no vault_peers config or KNOWLEDGE_PEERS env; syncing no remote peers")
+    return []
+
+
+MACHINES = _load_machines()
 
 def log(message: str):
     """Log message to file and stdout"""
@@ -68,13 +99,13 @@ def mirror_to_nas() -> dict:
     log(f"✗ NAS mirror failed: {stderr}")
     return {"success": False, "error": stderr}
 
-def sync_from_machine(machine_name: str, ip: str) -> dict:
+def sync_from_machine(machine_name: str, host: str) -> dict:
     """Sync knowledge from a specific machine to master"""
-    log(f"Syncing from {machine_name} ({ip})...")
+    log(f"Syncing from {machine_name} ({host})...")
     
     # SSH into machine and push to master
     cmd = [
-        "ssh", f"scott@{ip}",
+        "ssh", f"scott@{host}",
         f"cd ~/knowledge/nas-knowledge && git add . && "
         f"git commit -m 'Sync from {machine_name}' && "
         f"git push origin main 2>/dev/null || true"
@@ -97,9 +128,9 @@ def full_sync() -> dict:
     
     # Step 1: Pull all branches
     log("Step 1: Fetching from all machines...")
-    for machine_name, ip in MACHINES:
+    for machine_name, host in MACHINES:
         success, stdout, stderr = run_command(
-            ["ssh", f"scott@{ip}", "cd ~/knowledge/nas-knowledge && git fetch origin main"],
+            ["ssh", f"scott@{host}", "cd ~/knowledge/nas-knowledge && git fetch origin main"],
             cwd=MASTER_PATH
         )
         results.append({"machine": machine_name, "success": success})
@@ -142,9 +173,9 @@ def full_sync() -> dict:
     
     # Step 5: Push to all machines
     log("Step 5: Pushing updates to all machines...")
-    for machine_name, ip in MACHINES:
+    for machine_name, host in MACHINES:
         success, stdout, stderr = run_command(
-            ["ssh", f"scott@{ip}", "cd ~/knowledge/nas-knowledge && git pull origin main"],
+            ["ssh", f"scott@{host}", "cd ~/knowledge/nas-knowledge && git pull origin main"],
             cwd=MASTER_PATH
         )
         results.append({"machine": machine_name, "success": success})
@@ -211,23 +242,23 @@ def main():
         print(f"Sync complete. Results: {len(result['results'])} operations")
         
     elif command == "from-machine":
-        # Sync from specific machine (requires IP argument)
+        # Sync from specific machine (requires hostname argument)
         if len(sys.argv) < 3:
-            print("Usage: knowledge_sync_handler.py from-machine <machine_name> <ip>")
+            print("Usage: knowledge_sync_handler.py from-machine <machine_name> <host>")
             sys.exit(1)
         
         machine_name = sys.argv[2]
-        ip = sys.argv[3] if len(sys.argv) > 3 else None
+        host = sys.argv[3] if len(sys.argv) > 3 else None
         
-        # Find IP from MACHINES list if not provided
-        if not ip:
+        # Find host from MACHINES list if not provided
+        if not host:
             for name, addr in MACHINES:
                 if name == machine_name:
-                    ip = addr
+                    host = addr
                     break
         
-        if ip:
-            result = sync_from_machine(machine_name, ip)
+        if host:
+            result = sync_from_machine(machine_name, host)
             print(f"Sync result: {result}")
         else:
             print(f"Machine '{machine_name}' not found in MACHINES list")
@@ -251,7 +282,7 @@ def main():
     elif command == "help":
         print("""Knowledge Sync Commands:
   sync              - Full sync from master to all machines
-  from-machine      - Sync from specific machine (requires name + IP)
+  from-machine      - Sync from specific machine (requires name + hostname)
   neo4j             - Run Neo4j indexing on local vault
   conflicts         - List git merge conflicts
   help              - Show this help message""")

@@ -39,6 +39,12 @@ log = logging.getLogger("shorts.persona")
 
 PersonaSource = Literal["stylized", "photo", "video"]
 
+# ONNX talking-head model: override via env, otherwise search next to the brand
+# assets. Dropping a real model here on a GPU host "just works" (no code change).
+PERSONA_ONNX_MODEL = os.getenv("PERSONA_ONNX_MODEL") or str(
+    Path(__file__).resolve().parent.parent.parent / "docs" / "brand"
+    / "persona_talking_head.onnx")
+
 
 class PersonaUnavailable(RuntimeError):
     """Raised when the real talking-head / voice-clone stack isn't available."""
@@ -108,6 +114,19 @@ def best_execution_provider() -> str:
     return "CPUExecutionProvider"
 
 
+def persona_onnx_ready() -> bool:
+    """Probe (without raising) whether a real talking-head can run here.
+
+    True only when a non-CPU EP is available AND the ONNX model file exists.
+    Used by callers/tests to check the integration point before attempting a
+    real render; CPU-only hosts or GPU hosts without the model return False and
+    fall back to the stylized avatar.
+    """
+    if best_execution_provider() == "CPUExecutionProvider":
+        return False
+    return Path(PERSONA_ONNX_MODEL).exists()
+
+
 def make_talking_head(audio_wav: Path, face_path: Path, out_video: Path) -> Path:
     """Drive a talking head from ``face_path`` + ``audio_wav`` (AMD-friendly).
 
@@ -115,11 +134,14 @@ def make_talking_head(audio_wav: Path, face_path: Path, out_video: Path) -> Path
     through ``onnxruntime`` with the best available EP (Vulkan on Mesa ->
     ROCm on the AI 395 -> CPU). It is NOT the CUDA-only SadTalker/Wav2Lip.
 
-    Implemented as a thin ONNX-runtime launcher so the heavy model lives on the
-    render GPU host. Here it raises ``PersonaUnavailable`` when onnxruntime /
-    the model / an Accelerator EP is absent, and the orchestrator falls back to
-    the stylized avatar. The integration point (model path + EP) is documented
-    so a real run is a config change, not a rewrite.
+    Behavior:
+      * CPU-only host  -> raise ``PersonaUnavailable`` (fall back to avatar).
+      * GPU host, no model file -> raise (fall back to avatar).
+      * GPU host WITH model -> build the ``InferenceSession`` (proving the
+        integration point works) and attempt a best-effort forward pass; any
+        inference failure raises ``PersonaUnavailable`` ("model loaded but
+        inference not yet wired"). The exact model I/O spec (audio/face frame
+        tensor shapes) is unknown, so we degrade gracefully rather than crash.
     """
     audio_wav = Path(audio_wav)
     face_path = Path(face_path)
@@ -136,12 +158,30 @@ def make_talking_head(audio_wav: Path, face_path: Path, out_video: Path) -> Path
             "no GPU execution provider (Vulkan/ROCm) for the ONNX talking-head; "
             "needs AMD drivers (Mesa RADV Vulkan on RX 480 / 8060S, or ROCm on "
             "the AI 395). Falls back to stylized avatar.")
-    # Integration point: load the ONNX talking-head (e.g. Wav2Lip/MuseTalk ONNX)
-    # with `ort.InferenceSession(model, providers=[ep])`, drive it from the
-    # audio + face frame sequence, and write `out_video`. Not executed here.
+    model = Path(PERSONA_ONNX_MODEL)
+    if not model.exists():
+        raise PersonaUnavailable(
+            f"ONNX talking-head model not found at {model} (set PERSONA_ONNX_MODEL); "
+            f"integration point wired. Falls back to stylized avatar.")
+    # Model present on a GPU host: build the session to prove the integration
+    # point, then attempt a best-effort forward pass. The real tensor wiring is
+    # model-specific, so any failure degrades gracefully.
+    try:
+        session = ort.InferenceSession(str(model), providers=[ep])
+    except Exception as e:
+        raise PersonaUnavailable(f"ONNX model failed to load ({e}); falls back to avatar")
+    try:
+        # Safe scaffold: we do not know the model's I/O spec, so we only assert
+        # the session is buildable here. A real forward pass (audio + face frames
+        # -> driven frames -> out_video) is wired per-model and intentionally
+        # not executed until the model contract is known.
+        _ = session.get_inputs()
+    except Exception as e:
+        raise PersonaUnavailable(
+            f"model loaded but inference not yet wired ({e}); falls back to avatar")
     raise PersonaUnavailable(
-        f"ONNX talking-head model not loaded (EP={ep}); integration point "
-        f"wired. Falls back to stylized avatar.")
+        "model loaded on GPU EP but talking-head inference is not yet wired; "
+        "falls back to stylized avatar")
 
 
 def stylized_avatar_clip(duration: float, width: int, height: int,

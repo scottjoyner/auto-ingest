@@ -4,6 +4,12 @@ from __future__ import annotations
 from auto_ingest_config import get_fileserver_path
 # -*- coding: utf-8 -*-
 """
+DEPRECATED — legacy short generator. Retained for CLI compatibility / history only.
+
+Canonical renderer: ``auto_ingest/shorts/compose.py`` (``render_short`` /
+``compose_scripted_short``). ``runall.sh`` / ``render.py`` now delegate there;
+this module's own rendering logic is frozen and should not be extended.
+
 Build vertical 9:16 'shorts' with dynamic, speaker-aware captions from *_FR.MP4.
 
 Adds:

@@ -24,7 +24,7 @@ Completed this session (verified green — 176 tests pass on system python + `.v
 - **S-G14** persona test no longer silently skips (synthetic clip).
 - **K-N2/K-N5** `bin/run` symlink → `auto-ingest`; archived `auto.py` + `autogen_coder_team_*` (clearly-redundant legacy).
 
-Still open (deferred): K-N3 (distributed claim), O-G6 (config unification), O-G1/G3 (orchestration canonicalization), P-G8/G9/G12 (metrics schema versioning, feedback actions, brand --check), P-G5 (persona in schedule), G1/G2/G4/G5/G6 (knowledge_map sync, vault, manifest, outbox), G11/N6/N7/N8/N9/N11 (speaker promotion, MCP tools, knowledge_map refs, doc paths), S-G17 residual (smart_shorts/tiktok_shorts duplication).
+Still open (deferred): K-N3 (distributed claim), O-G6 (config unification), O-G1/G3 (orchestration canonicalization), P-G8/G9/G12 (metrics schema versioning, feedback actions, brand --check), P-G5 (persona in schedule), G1/G2/G4/G5/G6 (knowledge_map sync, vault, manifest, outbox), G11/N6/N7/N8/N9/N11 (speaker promotion, MCP tools, knowledge_map refs, doc paths), S-G17 residual (addressed: legacy generators marked deprecated, canonical = compose.py).
 
 ## 0. TL;DR
 

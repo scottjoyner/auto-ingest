@@ -1,3 +1,7 @@
+# DEPRECATED — legacy short generator. Retained for history / CLI compatibility only.
+# Canonical renderer: auto_ingest/shorts/compose.py (render_short / compose_scripted_short).
+# Do not extend this module; new work belongs in compose.py.
+
 import whisper
 from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip
 
@@ -73,6 +77,12 @@ def create_shorts_video(
 
 
 if __name__ == "__main__":
+    import sys
+    print(
+        "DEPRECATED: generate_short_1.py is a legacy generator; the canonical "
+        "renderer is auto_ingest/shorts/compose.py (render_short / "
+        "compose_scripted_short). Running as-is for compatibility.",
+        file=sys.stderr)
     create_shorts_video(
         input_video_path="input.mp4",
         output_video_path="shorts_output.mp4",

@@ -102,3 +102,29 @@ No behavior changed, no endpoints removed.
 * This document, recording the decision.
 
 No compose services were deleted or modified. No running scripts were touched.
+
+---
+
+## 6. Short-generator consolidation (B1)
+
+The repo root historically carried five short generators. Per the gap analysis
+(S-G16/S-G17), the canonical renderer is now `auto_ingest/shorts/compose.py`
+(`render_short` / `compose_scripted_short`). The legacy root-level generators
+were consolidated (no working code deleted):
+
+| File | Status |
+|------|--------|
+| `tiktok_shorts.py` | **STILL ACTIVE** — called by `ingest_media.py` (iPhone video -> vertical short) and `worker_content.py`. Behavior unchanged; do not break callers. |
+| `shorts_builder.py` | DEPRECATED for its inline renderer; `runall.sh` / `render.py` already delegate to `compose.py`. Retained for CLI compatibility. |
+| `smart_shorts.py` | DEPRECATED — history/CLI only; canonical is `compose.py`. |
+| `highway_montoge.py` | DEPRECATED — history/CLI only; canonical is `compose.py`. |
+| `generate_short_1.py` | DEPRECATED — history/CLI only; canonical is `compose.py`. |
+
+Each deprecated file gained a top-of-file DEPRECATION note pointing at
+`compose.py`, and `smart_shorts.py`/`highway_montoge.py`/`generate_short_1.py`
+emit a stderr deprecation warning when run as `__main__` (without changing
+behavior). `tiktok_shorts.py` was left untouched.
+
+Decision recorded 2026-07-17: legacy generators are retained (not deleted) and
+marked deprecated; new short work goes exclusively into
+`auto_ingest/shorts/compose.py`.
