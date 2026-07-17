@@ -64,3 +64,48 @@ def test_cli_publish_schedule_dry_run_no_queuing(capsys, monkeypatch, tmp_path):
     assert "youtube_shorts" in out
     # No queue file should be written in dry-run.
     assert not (tmp_path / "queue.jsonl").exists()
+
+
+def test_slot_carries_persona_source_and_needs_render(monkeypatch):
+    monkeypatch.delenv("PERSONA_SOURCE", raising=False)
+    avail = [{"short_id": "s0", "topic": "large_language_models"}]
+    # Day 1 has 1 slot; a matching short is available -> needs_render False.
+    slots = scheduling.consume_calendar_for_day(1, available=avail)
+    assert slots[0].persona_source == "stylized"
+    assert slots[0].needs_render is False
+    d = slots[0].to_dict()
+    assert d["persona_source"] == "stylized"
+    assert d["needs_render"] is False
+
+
+def test_persona_source_env_override(monkeypatch):
+    monkeypatch.setenv("PERSONA_SOURCE", "photo")
+    slots = scheduling.consume_calendar_for_day(1, available=[])
+    assert slots[0].persona_source == "photo"
+    # No available short -> needs_render True.
+    assert slots[0].needs_render is True
+
+
+def test_persona_source_invalid_env_falls_back(monkeypatch):
+    monkeypatch.setenv("PERSONA_SOURCE", "bogus")
+    slots = scheduling.consume_calendar_for_day(1, available=[])
+    assert slots[0].persona_source == "stylized"
+
+
+def test_persona_source_explicit_arg_wins(monkeypatch):
+    monkeypatch.setenv("PERSONA_SOURCE", "photo")
+    plans = scheduling.build_calendar(days=1, available=[], persona_source="video")
+    slot = plans[0].slots[0]
+    assert slot.persona_source == "video"
+
+
+def test_calendar_to_json_needs_render_and_persona(monkeypatch):
+    monkeypatch.delenv("PERSONA_SOURCE", raising=False)
+    plans = scheduling.build_calendar(days=7, available=[])
+    out = scheduling.calendar_to_json(plans)
+    # Every slot lacks a rendered short -> all need render.
+    assert out["needs_render"] == out["total_slots"]
+    for dp in out["days"]:
+        for s in dp["slots"]:
+            assert s["persona_source"] == "stylized"
+            assert s["needs_render"] is True

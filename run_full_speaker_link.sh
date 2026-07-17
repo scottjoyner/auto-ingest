@@ -14,12 +14,33 @@ export NEO4J_USER="${NEO4J_USER:-neo4j}"
 export NEO4J_PASSWORD="${NEO4J_PASSWORD:-${NEO4J_PASSWORD_DEFAULT:-knowledge_graph_2026}}"
 export NEO4J_DB="${NEO4J_DB:-neo4j}"
 
-echo "=== pausing live ingest containers ==="
-docker stop auto-ingest-service auto-ingest-worker 2>/dev/null || true
+# Pause the live ingest containers to avoid Neo4j write-lock contention / deadlock.
+# Portable: only stop containers that actually exist on THIS host (so the script
+# is safe to run on other boxes in the distributed fleet that may not run the
+# auto-ingest-service/auto-ingest-worker containers — N8/K-N8).
+INGEST_CONTAINERS="auto-ingest-service auto-ingest-worker"
+present=""
+if command -v docker >/dev/null 2>&1; then
+  for c in $INGEST_CONTAINERS; do
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$c"; then
+      present="$present $c"
+    fi
+  done
+fi
+if [ -n "$present" ]; then
+  echo "=== pausing live ingest containers:$present ==="
+  # shellcheck disable=SC2086
+  docker stop $present 2>/dev/null || true
+else
+  echo "=== no ingest containers found on this host; skipping pause (portable mode) ==="
+fi
 
 cleanup() {
-  echo "=== restarting ingest containers ==="
-  docker start auto-ingest-service auto-ingest-worker 2>/dev/null || true
+  if [ -n "$present" ]; then
+    echo "=== restarting ingest containers:$present ==="
+    # shellcheck disable=SC2086
+    docker start $present 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 

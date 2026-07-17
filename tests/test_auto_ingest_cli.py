@@ -173,6 +173,8 @@ def _make_run_all_args(**over):
     a.faiss = False
     a.more_aggressive = False
     a.rank_and_label = False
+    a.promote = False
+    a.promote_min_weight = 0.0
     a.dry_run = False
     a.state_file = ""
     for k, v in over.items():
@@ -232,8 +234,11 @@ def test_cmd_run_all_skip_flags(cli, monkeypatch):
                               skip_classify=True, skip_yolo=True)
     rc = cli.cmd_run_all(args)
     assert rc == 0
-    # Only the link stage should run
-    assert calls == [("module", "auto_ingest.diarize.link_global_speakers")]
+    # Only the link stage should run (linker module + N11 anchor re-merge script)
+    assert calls == [
+        ("module", "auto_ingest.diarize.link_global_speakers"),
+        ("script", "scripts/anchor_speaker_me.py"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +255,8 @@ def _make_link_args(**over):
     a.faiss = False
     a.more_aggressive = False
     a.rank_and_label = False
+    a.promote = False
+    a.promote_min_weight = 0.0
     a.dry_run = False
     a.state_file = ""
     for k, v in over.items():
@@ -306,3 +313,51 @@ def test_cmd_link_speakers_priority_override(cli, monkeypatch):
     # more_aggressive widens global-thresh
     idx_t = args.index("--global-thresh")
     assert args[idx_t + 1] == "0.74"
+
+
+def test_cmd_link_speakers_promote_flag(cli, monkeypatch):
+    captured = {}
+
+    def fake_run_module(mod, args, extra_env=None):
+        captured.setdefault("module_calls", []).append(list(args))
+        return 0
+
+    def fake_run(script, args, extra_env=None):
+        captured.setdefault("script_calls", []).append((script, list(args)))
+        return 0
+
+    monkeypatch.setattr(cli, "_run_module", fake_run_module)
+    monkeypatch.setattr(cli, "_run", fake_run)
+
+    rc = cli.cmd_link_speakers(_make_link_args(promote=True, promote_min_weight=42.0))
+    assert rc == 0
+    linker_args = captured["module_calls"][0]
+    assert "--promote" in linker_args
+    idx = linker_args.index("--promote-min-weight")
+    assert linker_args[idx + 1] == "42.0"
+    # N11: a whoami --merge runs after a successful (rc=0) link pass to keep the
+    # Scott anchor canonical.
+    script_calls = captured.get("script_calls", [])
+    assert any(c[0] == "scripts/anchor_speaker_me.py" and "--merge" in c[1]
+               for c in script_calls)
+
+
+def test_cmd_link_speakers_no_merge_on_failure(cli, monkeypatch):
+    captured = {}
+
+    def fake_run_module(mod, args, extra_env=None):
+        captured.setdefault("module_calls", []).append(list(args))
+        return 1  # simulate linker failure
+
+    def fake_run(script, args, extra_env=None):
+        captured.setdefault("script_calls", []).append((script, list(args)))
+        return 0
+
+    monkeypatch.setattr(cli, "_run_module", fake_run_module)
+    monkeypatch.setattr(cli, "_run", fake_run)
+
+    rc = cli.cmd_link_speakers(_make_link_args(promote=True))
+    assert rc == 1
+    # No merge when the linker failed.
+    assert captured.get("script_calls", []) == []
+

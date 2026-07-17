@@ -12,8 +12,8 @@ Graph: (Scott:Person)-[:SPOKE]->(Utterance) etc., built by enrich_scott_unify.py
 Run: python scott_graph_mcp.py   (stdio MCP server)
 """
 from __future__ import annotations
+
 import sys
-import traceback
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -30,6 +30,7 @@ mcp = FastMCP("scott-graph")
 # ---------------------------------------------------------------------------
 def _driver():
     import neo4j
+
     from auto_ingest_config import get_neo4j_config
     cfg = get_neo4j_config()
     return neo4j.GraphDatabase.driver(cfg["uri"], auth=(cfg["user"], cfg["password"])), cfg.get("db")
@@ -287,6 +288,100 @@ def scott_timeline(limit: int = 15) -> str:
     for r in rows:
         role = r.get("role") or "place"
         out.append(f"- {r['place']} [{role}]: {r['pings']:,} pings")
+    return "\n".join(out)
+
+
+@mcp.tool()
+@_safe
+def find_speaker(name: str, trip: str = "") -> str:
+    """USE WHEN: you want to find a specific person/speaker and where they appear,
+    optionally scoped to one Trip (e.g. 'Dashcam_1756390890239'). Uses the existing
+    IN_TRIP edges and is_me anchor so it resolves global speaker identity.
+    Inputs: name = speaker name/label to match (e.g. 'Scott'); trip = optional Trip
+    key to scope the search. Example: find_speaker('Scott', 'Dashcam_1756390890239')"""
+    name = (name or "").strip()
+    if not name:
+        return "Please give a speaker name, e.g. find_speaker('Scott')."
+    trip = (trip or "").strip()
+    drv, db = _driver()
+    try:
+        if trip:
+            rows = drv.session(database=db).run(
+                """
+                MATCH (t:Trip {key:$trip})
+                MATCH (c:DashcamClip)-[:IN_TRIP]->(t)
+                MATCH (tr:Transcription)-[:FOR_CLIP]->(c)
+                MATCH (tr)-[:HAS_SEGMENT]->(s:Segment)-[m:SPOKEN_BY]->(sp:Speaker)
+                MATCH (sp)-[:SAME_PERSON]->(g:GlobalSpeaker)
+                WHERE g.label CONTAINS $name OR g.name CONTAINS $name
+                   OR g.person_id CONTAINS $name OR sp.label CONTAINS $name
+                RETURN DISTINCT g.id AS gid, coalesce(g.label, g.name) AS who,
+                       coalesce(g.is_me, false) AS is_me, count(s) AS segs
+                ORDER BY segs DESC LIMIT 20
+                """, name=name, trip=trip,
+            ).data()
+        else:
+            rows = drv.session(database=db).run(
+                """
+                MATCH (g:GlobalSpeaker)
+                WHERE g.label CONTAINS $name OR g.name CONTAINS $name
+                   OR g.person_id CONTAINS $name
+                OPTIONAL MATCH (g)<-[:SAME_PERSON]-(sp:Speaker)
+                WITH g, count(sp) AS spk
+                RETURN g.id AS gid, coalesce(g.label, g.name) AS who,
+                       coalesce(g.is_me, false) AS is_me, spk AS segs
+                ORDER BY spk DESC LIMIT 20
+                """, name=name,
+            ).data()
+    finally:
+        drv.close()
+    if not rows:
+        scope = f" in trip {trip}" if trip else ""
+        return f"No GlobalSpeaker matching '{name}'{scope}."
+    out = [f"Speakers matching '{name}'" + (f" in {trip}" if trip else "") + ":"]
+    for r in rows:
+        me = " [is_me]" if r.get("is_me") else ""
+        out.append(f"- {r['who']}{me} (gid={r['gid']}, linked Speakers={r['segs']})")
+    return "\n".join(out)
+
+
+@mcp.tool()
+@_safe
+def who_was_with(scott_date: str, limit: int = 20) -> str:
+    """USE WHEN: someone asks who Scott was with / which other speakers shared
+    clips with him on a given DATE. Uses the Scott is_me anchor + IN_TRIP + per-clip
+    co-occurrence.
+    Inputs: scott_date = a date like '2026-06-14'; limit = max companions (max 100).
+    Example: who_was_with('2026-06-14')"""
+    d = _norm_date(scott_date)
+    if not d:
+        return "Please give a date, e.g. who_was_with('2026-06-14')."
+    limit = _cap(limit)
+    drv, db = _driver()
+    try:
+        # 1) find clips containing the Scott is_me anchor on the date
+        # 2) find other speakers in those same clips
+        rows = drv.session(database=db).run(
+            """
+            MATCH (me:GlobalSpeaker {is_me:true})<-[:SAME_PERSON]-(sp_me:Speaker)
+            MATCH (sp_me)<-[:SPOKEN_BY]-(s0:Segment)<-[:HAS_SEGMENT]-(tr0:Transcription)-[:FOR_CLIP]->(c:DashcamClip)
+            WHERE substring(toString(tr0.started_at),0,10) = $d
+            MATCH (c)<-[:FOR_CLIP]-(tr:Transcription)-[:HAS_SEGMENT]->(s:Segment)<-[m:SPOKEN_BY]-(sp:Speaker)
+            WHERE sp <> sp_me
+            MATCH (sp)-[:SAME_PERSON]->(g:GlobalSpeaker)
+            RETURN coalesce(g.label, g.name, sp.label) AS who, g.id AS gid,
+                   coalesce(g.is_me, false) AS is_me, count(DISTINCT c) AS clips
+            ORDER BY clips DESC LIMIT $lim
+            """, d=d, lim=limit,
+        ).data()
+    finally:
+        drv.close()
+    if not rows:
+        return f"No co-occurring speakers found with Scott on {d}."
+    out = [f"Who was with Scott on {d}:"]
+    for r in rows:
+        me = " [is_me]" if r.get("is_me") else ""
+        out.append(f"- {r['who']}{me} (clips={r['clips']}, gid={r['gid']})")
     return "\n".join(out)
 
 

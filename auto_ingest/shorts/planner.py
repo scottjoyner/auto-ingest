@@ -136,11 +136,16 @@ def plan_shorts(brief: Brief, anchors: List[Dict[str, object]], *,
         except Exception as e:  # graph pressure / missing data -> templated fallback
             log.info("Content mining skipped for %s: %s", brief.topic, e)
 
+    # Disjoint, evenly-strided partition of ``points`` across the shorts so
+    # every point appears in exactly one short and none are dropped. Stride is
+    # ceil(len(points)/short_count); short s gets points[start:start+stride]
+    # (clamped to the end). Deterministic given ``seed`` (no RNG used here).
+    stride = (len(points) + short_count - 1) // max(short_count, 1)
+
     shorts: List[PlannedShort] = []
     for s_idx in range(short_count):
-        # rotate a window of points for this short
-        start = (s_idx * 2) % max(len(points), 1)
-        window = points[start:start + 3] or points[:1]
+        start = s_idx * stride
+        window = points[start:start + stride] or points[:1]
 
         cues = _distribute_cues(
             title=brief.title,
@@ -170,7 +175,7 @@ def plan_shorts(brief: Brief, anchors: List[Dict[str, object]], *,
             title=title,
             cues=cues,
             shots=[Shot(**s) for s in shots],
-            notes=f"points[{start}:{start + len(window)}]",
+            notes=f"points[{start}:{start + len(window)}] (stride={stride})",
             status="planned",
         ))
 

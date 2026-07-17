@@ -92,6 +92,29 @@ def test_plan_distributes_points_across_shorts():
     assert any(t.startswith("p") for t in all_cue_texts)
 
 
+def test_plan_partitions_points_disjoint_and_complete():
+    # No point is repeated and all points are covered (even divide).
+    points = [f"p{i}" for i in range(12)]
+    plan = planner.plan_shorts(_brief(points), _ANCHORS,
+                               short_count=3, short_dur=30.0, seed=4)
+    assert len(plan.shorts) == 3
+    seen: list[str] = []
+    for s in plan.shorts:
+        pt_cues = [c.text for c in s.cues if c.kind == "point"]
+        seen.extend(pt_cues)
+    # every curated point appears exactly once across shorts
+    assert sorted(seen) == sorted(points), seen
+    assert len(seen) == len(set(seen)), "a point was repeated across shorts"
+
+    # Uneven divide: coverage is maximal (no point dropped, none duplicated).
+    points2 = [f"q{i}" for i in range(10)]
+    plan2 = planner.plan_shorts(_brief(points2), _ANCHORS,
+                                short_count=3, short_dur=30.0, seed=4)
+    seen2 = [c.text for s in plan2.shorts for c in s.cues if c.kind == "point"]
+    assert sorted(seen2) == sorted(points2)
+    assert len(seen2) == len(set(seen2))
+
+
 def test_iterate_drops_rejected_and_reseeds():
     plan = planner.plan_shorts(_brief(["a", "b", "c", "d"]), _ANCHORS,
                                   short_count=3, seed=1)
@@ -461,6 +484,27 @@ def test_render_plan_skip_history(monkeypatch, tmp_path):
     out = render.render_plan(plan, tmp_path, skip_history=True)
     assert rendered == ["s2"], "s1 should be skipped (clip_A already used in history)"
     assert len(out) == 1
+
+
+def test_render_short_rejects_when_no_footage(monkeypatch, tmp_path):
+    # Pure test (no moviepy): a short with no resolvable footage must be
+    # rejected, return early, and never invoke compose_scripted_short.
+    item = PlannedShort(
+        id="nope", title="Nope", brief_topic="demo",
+        shots=[Shot(clip_key="k", fr_path="/does/not/exist.mp4", t_sec=0, dur=6)],
+        cues=[Cue(text="a", start=0, end=2, kind="narration")],
+    )
+    called = {}
+    def _boom(*a, **k):
+        called["compose"] = True
+        raise AssertionError("compose must not be called for rejected short")
+    monkeypatch.setattr("auto_ingest.shorts.compose.compose_scripted_short", _boom)
+
+    out = render.render_short(item, tmp_path)
+    assert item.status == "rejected"
+    assert not called, "compose_scripted_short should not be called"
+    # No MP4 should exist (it returns early before writing video).
+    assert not Path(out).exists(), "rejected short must not write an mp4"
 
 
 def test_publish_queue_dedup_idempotent(tmp_path, monkeypatch):

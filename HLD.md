@@ -488,7 +488,7 @@ Check distributed lock (Redis/Neo4j)
 
 ## Appendix A: References
 
-- [UNIFICATION.md](../auto-ingest/UNIFICATION.md) — Cross-repo alignment plan
+- [UNIFICATION.md](docs/UNIFICATION.md) — Cross-repo alignment plan
 - [system_design.md](../auto-ingest/docs/system_design.md) — Auto-ingest architecture
 - [architecture.md](../auto-ingest/docs/architecture.md) — Content OS workflow
 - [Hermes Agent Skills](https://hermes-agent.nousresearch.com/docs)

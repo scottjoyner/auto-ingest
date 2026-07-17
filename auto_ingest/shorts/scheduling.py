@@ -12,11 +12,21 @@ rotation are both encoded in the schedule JSON and applied here.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
 DEFAULT_SCHEDULE = Path(__file__).resolve().parent.parent.parent / "docs" / "publish_schedule.json"
+
+# Which persona face-source a slot's short should be rendered with. Defaults to
+# the env override (PERSONA_SOURCE) or the stylized brand avatar (no GPU needed).
+VALID_PERSONA_SOURCES = ("stylized", "photo", "video")
+
+
+def default_persona_source() -> str:
+    src = os.environ.get("PERSONA_SOURCE", "stylized").strip().lower()
+    return src if src in VALID_PERSONA_SOURCES else "stylized"
 
 
 @dataclass
@@ -27,11 +37,14 @@ class PostSlot:
     topic: str
     short_id: Optional[str] = None
     note: str = ""
+    persona_source: str = "stylized"
+    needs_render: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         return {
             "day": self.day, "platform": self.platform, "time_local": self.time_local,
             "topic": self.topic, "short_id": self.short_id, "note": self.note,
+            "persona_source": self.persona_source, "needs_render": self.needs_render,
         }
 
 
@@ -67,7 +80,8 @@ def _topic_for_day(day: int, schedule: Dict) -> str:
 
 
 def build_calendar(days: int = 30, schedule: Optional[Dict] = None,
-                   available: Optional[List[Dict]] = None) -> List[DayPlan]:
+                   available: Optional[List[Dict]] = None,
+                   persona_source: Optional[str] = None) -> List[DayPlan]:
     """Build a ``days``-long posting calendar.
 
     ``available`` is a list of dicts like ``{"short_id": str, "topic": str}``
@@ -75,8 +89,13 @@ def build_calendar(days: int = 30, schedule: Optional[Dict] = None,
     from available shorts of the day's lead topic, falling back to any
     available short, then to a placeholder (note="NEEDS_RENDER") so gaps are
     visible in the plan.
+
+    Each slot carries ``persona_source`` (default from the ``PERSONA_SOURCE``
+    env or ``"stylized"``) and a ``needs_render`` flag (True when no rendered
+    short backs the slot yet).
     """
     schedule = schedule or load_schedule()
+    persona = (persona_source or default_persona_source())
     platforms = schedule["platforms"]
     windows = schedule["cadence"]["windows_local"]
     avail = list(available or [])
@@ -114,6 +133,8 @@ def build_calendar(days: int = 30, schedule: Optional[Dict] = None,
                     day=d, platform=p, time_local=t, topic=topic,
                     short_id=chosen["short_id"] if chosen else None,
                     note="" if chosen else "NEEDS_RENDER",
+                    persona_source=persona,
+                    needs_render=chosen is None,
                 )
                 ring = (ring + 1) % max(len(avail), 1) if avail else 0
                 day_plan.slots.append(slot)
@@ -123,7 +144,8 @@ def build_calendar(days: int = 30, schedule: Optional[Dict] = None,
 
 
 def consume_calendar_for_day(day: int, available: Optional[List[Dict]] = None,
-                              schedule: Optional[Dict] = None) -> List[PostSlot]:
+                              schedule: Optional[Dict] = None,
+                              persona_source: Optional[str] = None) -> List[PostSlot]:
     """Return the posting slots scheduled for a given ``day`` (1-indexed).
 
     Pure (no network/creds): wraps :func:`build_calendar` with ``days=day``
@@ -132,7 +154,8 @@ def consume_calendar_for_day(day: int, available: Optional[List[Dict]] = None,
     """
     if day < 1:
         raise ValueError("day must be >= 1")
-    plans = build_calendar(days=day, schedule=schedule, available=available)
+    plans = build_calendar(days=day, schedule=schedule, available=available,
+                           persona_source=persona_source)
     if not plans or day > plans[-1].day:
         return []
     return plans[day - 1].slots
@@ -150,7 +173,7 @@ def calendar_to_json(plans: List[DayPlan]) -> Dict[str, object]:
     return {
         "days": [dp.to_dict() for dp in plans],
         "total_slots": sum(len(dp.slots) for dp in plans),
-        "needs_render": sum(1 for dp in plans for s in dp.slots if s.note == "NEEDS_RENDER"),
+        "needs_render": sum(1 for dp in plans for s in dp.slots if s.needs_render),
     }
 
 

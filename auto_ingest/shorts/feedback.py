@@ -196,3 +196,86 @@ def suggest_next(recs: List[MetricsRecord]) -> List[str]:
     if not suggestions:
         suggestions.append("Data is thin — keep posting and re-ingest for sharper suggestions.")
     return suggestions
+
+
+# --------------------------------------------------------------------------- #
+# Concrete, thresholded actions (P-G9)
+# --------------------------------------------------------------------------- #
+# Thresholds are deliberate + documented so operators can tune them. They are
+# expressed on the same units the platform exports use (CTR as a percentage,
+# retention as avg_view_pct percentage, views as raw counts).
+ACTION_CTR_RERENDER = 2.0        # CTR (%) below this -> re-render (new thumb/hook)
+ACTION_RETENTION_PROMOTE = 60.0  # retention (%) above this -> promote the hook
+ACTION_LOW_VIEWS = 100           # avg views below this for a topic -> pause topic
+
+
+@dataclass
+class Action:
+    kind: str            # rerender | promote | pause
+    target: str          # short_id / hook text / topic
+    reason: str          # human-readable threshold explanation
+    metric: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, object]:
+        return {"kind": self.kind, "target": self.target,
+                "reason": self.reason, "metric": self.metric}
+
+    def __str__(self) -> str:  # pragma: no cover - trivial formatting
+        return f"[{self.kind}] {self.target}: {self.reason}"
+
+
+def suggest_actions(records: List[MetricsRecord]) -> List[Action]:
+    """Emit concrete, deterministic, thresholded actions from raw metrics.
+
+    Pure (no network). Rules:
+      * re-render a short whose CTR < ``ACTION_CTR_RERENDER``%
+      * promote a short/hook whose retention (avg_view_pct) >
+        ``ACTION_RETENTION_PROMOTE``%
+      * pause a topic whose average views < ``ACTION_LOW_VIEWS``
+
+    Deterministic ordering: rerender, then promote, then pause; each group
+    sorted by target for stable output.
+    """
+    rerender: List[Action] = []
+    promote: List[Action] = []
+
+    # Per-short CTR / retention rules.
+    for r in records:
+        if r.ctr is not None and r.ctr < ACTION_CTR_RERENDER:
+            rerender.append(Action(
+                kind="rerender", target=r.short_id, metric=round(float(r.ctr), 2),
+                reason=f"CTR {r.ctr:.2f}% < {ACTION_CTR_RERENDER}% "
+                       f"(re-render short with a stronger thumbnail/hook)"))
+        if r.avg_view_pct is not None and r.avg_view_pct > ACTION_RETENTION_PROMOTE:
+            label = r.topic or r.short_id
+            promote.append(Action(
+                kind="promote", target=label,
+                metric=round(float(r.avg_view_pct), 1),
+                reason=f"retention {r.avg_view_pct:.1f}% > "
+                       f"{ACTION_RETENTION_PROMOTE}% (promote hook / make a series)"))
+
+    # Per-topic average-views rule (pause underperformers).
+    topic_views: Dict[str, List[float]] = {}
+    for r in records:
+        if r.views is None:
+            continue
+        topic_views.setdefault(r.topic or "(untitled)", []).append(float(r.views))
+    pause: List[Action] = []
+    for topic, vals in topic_views.items():
+        avg = _avg(vals) or 0.0
+        if avg < ACTION_LOW_VIEWS:
+            pause.append(Action(
+                kind="pause", target=topic, metric=round(avg, 1),
+                reason=f"avg_views {avg:.1f} < {ACTION_LOW_VIEWS} "
+                       f"(pause topic; low reach)"))
+
+    rerender.sort(key=lambda a: a.target)
+    # De-dup promote targets (keep the highest metric per target).
+    best_promote: Dict[str, Action] = {}
+    for a in promote:
+        if a.target not in best_promote or (a.metric or 0) > (best_promote[a.target].metric or 0):
+            best_promote[a.target] = a
+    promote_sorted = sorted(best_promote.values(), key=lambda a: a.target)
+    pause.sort(key=lambda a: a.target)
+    return rerender + promote_sorted + pause
+

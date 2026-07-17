@@ -20,6 +20,10 @@ from auto_ingest.shorts.models import PlannedShort
 
 log = logging.getLogger("shorts.metrics")
 
+# Schema version for persisted MetricsRecord rows. Bump when the on-disk shape
+# changes so old stores can be migrated on load.
+METRICS_SCHEMA_VERSION = 1
+
 DEFAULT_STORE = Path(
     os.environ.get("AUTO_INGEST_METRICS",
                    str(Path.home() / ".config" / "auto-ingest" / "metrics.jsonl"))
@@ -43,10 +47,18 @@ class MetricsRecord:
     pred_virality: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["_v"] = METRICS_SCHEMA_VERSION
+        return d
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "MetricsRecord":
+        v = d.get("_v")
+        if v is None:
+            log.warning("metrics record missing _v; defaulting to schema v1")
+            v = 1
+        if v != METRICS_SCHEMA_VERSION:
+            d = _migrate_metrics(dict(d), v)
         return cls(
             short_id=d["short_id"],
             platform=d["platform"],
@@ -62,6 +74,18 @@ class MetricsRecord:
             fetched_at=d.get("fetched_at", ""),
             pred_virality=d.get("pred_virality"),
         )
+
+
+def _migrate_metrics(d: Dict[str, Any], from_v: int) -> Dict[str, Any]:
+    """Migrate an older metrics record dict to the current schema.
+
+    Currently only v1 exists, so this is a forward-compat hook: unknown/newer
+    versions are passed through unchanged (best-effort) with a warning.
+    """
+    if from_v > METRICS_SCHEMA_VERSION:
+        log.warning("metrics record _v=%s is newer than supported v%s; "
+                    "reading best-effort", from_v, METRICS_SCHEMA_VERSION)
+    return d
 
 
 def _store_path(path: Optional[Path] = None) -> Path:

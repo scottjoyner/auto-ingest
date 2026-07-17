@@ -123,3 +123,74 @@ def test_publish_prediction_roundtrip(tmp_path):
     assert len(out) == 1
     assert out[0].pred_virality is not None
     assert 0.0 <= out[0].pred_virality <= 100.0
+
+
+def test_metrics_schema_version_written(tmp_path):
+    from auto_ingest.shorts.metrics import METRICS_SCHEMA_VERSION
+    store = tmp_path / "metrics.jsonl"
+    record_metric(_rec(), path=store)
+    import json as _json
+    line = store.read_text(encoding="utf-8").splitlines()[0]
+    assert _json.loads(line)["_v"] == METRICS_SCHEMA_VERSION
+
+
+def test_metrics_missing_version_defaults_v1(tmp_path, caplog):
+    import json as _json
+    store = tmp_path / "metrics.jsonl"
+    # Write a legacy row with no _v.
+    legacy = {"short_id": "old", "platform": "youtube", "topic": "llm",
+              "published_at": "2025-01-01", "views": 50}
+    store.write_text(_json.dumps(legacy) + "\n", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        out = load_metrics(path=store)
+    assert len(out) == 1
+    assert out[0].short_id == "old"
+    assert any("missing _v" in r.message for r in caplog.records)
+
+
+def test_metrics_version_roundtrip(tmp_path):
+    store = tmp_path / "metrics.jsonl"
+    record_metric(_rec(short_id="rt", views=321), path=store)
+    out = load_metrics(path=store)
+    # Re-serialize and reload — value + version survive.
+    assert out[0].to_dict()["_v"] == 1
+    upsert_metric(out[0], path=store)
+    again = load_metrics(path=store)
+    assert again[0].views == 321
+
+
+def test_suggest_actions_thresholds():
+    from auto_ingest.shorts.feedback import (
+        ACTION_CTR_RERENDER,
+        ACTION_LOW_VIEWS,
+        ACTION_RETENTION_PROMOTE,
+        suggest_actions,
+    )
+    recs = [
+        # low CTR -> rerender
+        _rec(short_id="lowctr", ctr=1.0, views=500, avg_view_pct=30.0,
+             topic="rag"),
+        # high retention -> promote
+        _rec(short_id="hiret", ctr=5.0, views=800, avg_view_pct=72.0,
+             topic="transformers"),
+        # low views topic -> pause
+        _rec(short_id="deadtopic", ctr=4.0, views=10, avg_view_pct=40.0,
+             topic="robotics"),
+    ]
+    actions = suggest_actions(recs)
+    kinds = {(a.kind, a.target) for a in actions}
+    assert ("rerender", "lowctr") in kinds
+    assert ("promote", "transformers") in kinds
+    assert ("pause", "robotics") in kinds
+    # Threshold sanity.
+    assert ACTION_CTR_RERENDER == 2.0
+    assert ACTION_RETENTION_PROMOTE == 60.0
+    assert ACTION_LOW_VIEWS == 100
+    # Deterministic: same input -> same output ordering.
+    assert [a.to_dict() for a in suggest_actions(recs)] == \
+        [a.to_dict() for a in suggest_actions(recs)]
+
+
+def test_suggest_actions_empty():
+    from auto_ingest.shorts.feedback import suggest_actions
+    assert suggest_actions([]) == []

@@ -620,6 +620,7 @@ def _cmd_schedule(args) -> int:
         print(f"  {s.time_local}  {s.platform:14}  {s.topic}")
         print(f"      id:    {s.short_id or '—'}  ({status})")
         print(f"      title: {title}")
+        print(f"      persona: {s.persona_source}  needs_render={s.needs_render}")
 
         if args.apply and s.short_id and exists:
             pub = publish.Publishable(
@@ -660,8 +661,10 @@ def _cmd_publish_metrics(args) -> int:
             return 0
         rep = feedback.feedback_report(recs)
         sugg = feedback.suggest_next(recs)
+        actions = feedback.suggest_actions(recs)
         if args.as_json:
-            print(json.dumps({"report": rep, "suggestions": sugg}, indent=2))
+            print(json.dumps({"report": rep, "suggestions": sugg,
+                              "actions": [a.to_dict() for a in actions]}, indent=2))
         else:
             print("=== Performance by platform ===")
             for p, v in rep["by_platform"].items():
@@ -681,6 +684,10 @@ def _cmd_publish_metrics(args) -> int:
             print("\n=== Suggestions for next batch ===")
             for s in sugg:
                 print(f"  - {s}")
+            if actions:
+                print("\n=== Concrete actions (thresholded) ===")
+                for a in actions:
+                    print(f"  - {a}")
         return 0
     if sub == "predict":
         if not args.plan_file:

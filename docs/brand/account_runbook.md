@@ -31,14 +31,15 @@ authenticates the pipeline — it only stands up the accounts.
 ## 3. TikTok — standard account
 1. In the isolated browser, go to TikTok sign-up → **Use phone or email**.
 2. Use the brand email; verify with the virtual number SMS code.
-3. Username `@researchfastlane`; set bio + avatar.
+3. Username `@researchfastlane`; set bio + avatar (`docs/brand/avatar_tiktok.png`).
 4. Immediately add the brand email as recovery + enable 2FA (authenticator).
 5. Do NOT switch to/from any other TikTok account on this environment.
 
 ## 4. Instagram — business profile
 1. Sign up with the brand email (separate from personal FB/IG).
 2. Switch to a **Professional / Business** account for insights.
-3. Username `@researchfastlane`; bio + avatar from `brand_spec.md`.
+3. Username `@researchfastlane`; bio + avatar (`docs/brand/avatar_instagram.png`)
+   from `brand_spec.md`.
 4. Verify phone (virtual number) + enable 2FA.
 
 ## 5. Post-creation checklist

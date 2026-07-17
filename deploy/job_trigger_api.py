@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# DEPRECATED: see docs/PLAN_orchestration.md (O-G1/O-G3). This HTTP trigger API
+# is a stub-grade, unauthenticated enqueue/run surface with no in-repo caller.
+# It is kept only as a possible future bridge to the ingest_claim protocol; do
+# NOT expose it in production until its auth story (Caddy + bearer/mTLS, noted
+# in main()) is implemented. No logic in this file was changed for deprecation.
 """
 Auto-Ingest Job Trigger API
 Lightweight HTTP server that exposes endpoints to enqueue jobs

@@ -29,9 +29,18 @@ Purpose:
 Services:
 - `ingest-service`: runs `run_ingest_all.sh` directly.
 - `ingest-worker`: claims and executes queued `.job` files from NAS drop.
+- `sync-service`: continuously rsyncs the legacy deathstar drop into canonical roots.
 - `content-service`: runs Content OS CLI.
 - `ingest-cron`: cron-driven ingest trigger.
 - `content-cron`: cron-driven content trigger.
+- `job-api`: lightweight HTTP trigger (host `:8766` → container `:8765`) exposing
+  `GET /api/health`, `GET /api/status`, `POST /api/enqueue`, `POST /api/run`.
+
+Healthchecks (added O-G8):
+- `ingest-service` / `ingest-worker` are healthy when their loop script is present
+  **and** Neo4j answers a read-only probe (`scripts/neo4j_watchdog.py --no-alert`).
+- `job-api` is healthy when `GET /api/health` responds.
+- Inspect with `docker compose ps` (STATUS column shows `healthy`/`unhealthy`).
 
 Operator actions:
 - Start all:
@@ -201,13 +210,65 @@ Dispatcher host:
 1. Generate jobs with `deploy/create_job.sh`.
 2. Monitor `drop/claimed`, `drop/done`, `drop/failed`.
 
+## 3a) Bootstrap a new worker box (checklist)
+
+Turnkey recipe to bring a fresh Linux box online as an `ingest-worker`:
+
+1. **Network (Tailscale):** join the tailnet so the box can reach Neo4j + NAS
+   over a stable private IP.
+   ```bash
+   curl -fsSL https://tailscale.com/install.sh | sh
+   sudo tailscale up            # authenticate; note the tailnet IP
+   tailscale ip -4              # confirm connectivity to the DB host
+   ```
+2. **Mount the shared NAS** at the same path every other host uses (must match
+   `NAS_ROOT` / `DROP_ROOT` so `mv`-based job claims stay atomic on one FS):
+   ```bash
+   sudo mkdir -p /nas
+   # CIFS example (fstab entry recommended for reboots):
+   sudo mount -t cifs //<nas-host>/fileserver /nas -o credentials=/etc/nas.cred,uid=$(id -u),igd
+   ls /nas/drop                 # verify the shared queue is visible
+   ```
+   If the mount is flaky, `deploy/fix-s-drive-mount.sh` remounts the S/NAS share.
+3. **Repo + env:** sync the repo and copy the host profile.
+   ```bash
+   git clone <repo> auto-ingest && cd auto-ingest
+   cp deploy/path_profiles.env.example .env
+   # edit .env: NAS_ROOT, DROP_ROOT, AUDIO/DASHCAM/BODYCAM roots, NEO4J_URI + creds
+   docker compose config        # validate interpolation
+   ```
+4. **Start the worker (+ optional cron):**
+   ```bash
+   docker compose build
+   docker compose up -d ingest-worker
+   docker compose ps            # STATUS should reach 'healthy'
+   ```
+5. **Cron (host-level, optional):** if running the worker outside compose, add a
+   restart-on-boot + watchdog cron:
+   ```
+   @reboot cd /home/<user>/auto-ingest && docker compose up -d ingest-worker
+   */5 * * * * cd /home/<user>/auto-ingest && python3 scripts/neo4j_watchdog.py >> logs/watchdog.log 2>&1
+   ```
+6. **Verify claims flow:** on the dispatcher run `deploy/create_job.sh audio`,
+   then confirm the new box moves it through `drop/claimed` → `drop/done`.
+
+
 ## 4) Operational checks and troubleshooting
 
 ### Health checks
-- Containers running:
+- Containers running (and `healthy` per compose healthchecks):
   ```bash
   docker compose ps
   ```
+- Neo4j reachability (read-only; classifies down vs OOM, optional webhook via
+  `WATCHDOG_ALERT_URL`):
+  ```bash
+  python3 scripts/neo4j_watchdog.py          # one-shot, exit 0/1
+  python3 scripts/neo4j_watchdog.py --loop 60  # continuous poll
+  ```
+- Log rotation: long jobs use `tools/setup_logging.py` (10 MB × 5 backups) so
+  `logs/*.log` stay bounded; the `bin/auto-ingest` entrypoint wires it in
+  automatically (`AUTO_INGEST_LOG_DIR` overrides the dir).
 - Queue movement:
   ```bash
   ls -lah /nas/drop /nas/drop/claimed /nas/drop/done /nas/drop/failed

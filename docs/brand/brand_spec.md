@@ -51,8 +51,14 @@ Channel display name: **Research in the Fast Lane**.
 - Generator: `scripts/gen_brand_assets.py --banner`.
 
 ### 3. TikTok / Instagram profile photo
-- Reuse the avatar (square). IG optionally crops to circle — keep the monogram
-  centered with padding.
+- Dedicated square, on-brand avatars are generated (ink background, cyan
+  monogram **"R"** + cyan ring) sized for each platform's circle crop:
+  - Instagram: `avatar_instagram.png` (640×640) — `--instagram`.
+  - TikTok: `avatar_tiktok.png` (720×720) — `--tiktok`.
+- Both share the YouTube avatar's identity (monogram + ring) so the brand reads
+  identically across all three platforms. Keep the monogram centered with
+  padding so a circle crop never clips it.
+- `--all` emits these alongside `avatar.png` + `banner_youtube.png`.
 
 ### 4. Bio / description (per platform)
 - **YouTube**: "AI/ML research, explained before you scroll. Built from a real
@@ -105,11 +111,15 @@ Vulkan or ROCm execution provider, prioritized:
 ## File layout (generated into the repo)
 ```
 docs/brand/
-  avatar.png          # 1000x1000
-  banner_youtube.png  # 2560x1440
-  brand_spec.md       # this file
+  avatar.png             # 1000x1000 (YouTube)
+  banner_youtube.png     # 2560x1440
+  avatar_instagram.png   # 640x640
+  avatar_tiktok.png      # 720x720
+  brand_spec.md          # this file
 scripts/gen_brand_assets.py   # reproducible generator
 ```
 
 Regenerate anytime with `python3 scripts/gen_brand_assets.py --all`.
+Verify assets match the manifest palette + declared handles with
+`python3 scripts/gen_brand_assets.py --check`.
 Assets are committed so the brand is version-controlled and reviewable.

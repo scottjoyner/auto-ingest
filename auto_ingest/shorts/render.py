@@ -15,6 +15,18 @@ from auto_ingest.shorts.models import Plan, PlannedShort
 
 log = logging.getLogger("shorts.render")
 
+# Status state machine for a :class:`PlannedShort` / ``:Short`` node:
+#   queued    -> freshly planned, awaiting render (initial status "planned").
+#   rejected  -> render determined no resolvable footage; terminal for this
+#                attempt (a fresh plan via iterate_plan can regenerate it).
+#   rendered  -> an MP4 was produced (compose_scripted_short succeeded).
+#   published -> (set by publish.py) the MP4 was uploaded to a platform.
+# A short that becomes ``rejected`` mid-render MUST NOT later be flipped to
+# ``rendered`` by the upsert: render_short sets status="rejected" and returns
+# before compose_scripted_short runs, so no MP4 exists; upsert_manifest simply
+# persists whatever status the in-memory item already carries. render_plan also
+# skips already-rejected items before calling render_short.
+
 PROFILE_NAME = os.getenv("SHORTS_PROFILE", "clean")
 WIDTH = int(os.getenv("SHORTS_W", "1080"))
 HEIGHT = int(os.getenv("SHORTS_H", "1920"))

@@ -13,7 +13,9 @@
   "tagline": "AI/ML papers, explained before you scroll.",
   "assets": {
     "avatar": "avatar.png",
-    "banner_youtube": "banner_youtube.png"
+    "banner_youtube": "banner_youtube.png",
+    "avatar_instagram": "avatar_instagram.png",
+    "avatar_tiktok": "avatar_tiktok.png"
   },
   "palette": {
     "ink": [11, 14, 20],

@@ -23,6 +23,9 @@ from auto_ingest.shorts.models import Brief, PlannedShort
 
 log = logging.getLogger("shorts.abtest")
 
+# Schema version for persisted VariantPlan rows in ab_variants.jsonl.
+ABTEST_SCHEMA_VERSION = 1
+
 VARIANT_STORE = Path(
     os.environ.get(
         "AB_VARIANTS_PATH",
@@ -175,10 +178,19 @@ class VariantPlan:
     winner: Optional[int] = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["_v"] = ABTEST_SCHEMA_VERSION
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "VariantPlan":
+        v = d.get("_v")
+        if v is None:
+            log.warning("ab variant record missing _v; defaulting to schema v1")
+            v = 1
+        elif v > ABTEST_SCHEMA_VERSION:
+            log.warning("ab variant record _v=%s is newer than supported v%s; "
+                        "reading best-effort", v, ABTEST_SCHEMA_VERSION)
         return cls(
             short_id=d["short_id"],
             platform=d["platform"],

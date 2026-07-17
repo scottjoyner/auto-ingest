@@ -202,6 +202,10 @@ def cmd_link_speakers(args) -> int:
     # transaction memory; only run it when explicitly requested, ideally as a final pass.
     if args.rank_and_label:
         flags.append("--rank-and-label")
+    if args.promote:
+        flags.append("--promote")
+        if args.promote_min_weight:
+            opts["--promote-min-weight"] = str(args.promote_min_weight)
     if args.dry_run:
         flags.append("--dry-run")
     if args.state_file:
@@ -210,7 +214,16 @@ def cmd_link_speakers(args) -> int:
     cli = list(flags)
     for k, v in opts.items():
         cli += [k, v]
-    return _run_module(DEFAULT_LINKER_MODULE, cli, extra_env=neo4j_env())
+    rc = _run_module(DEFAULT_LINKER_MODULE, cli, extra_env=neo4j_env())
+    # N11: re-anchor Scott after every link pass so the canonical "me" GlobalSpeaker
+    # cannot fragment again as new clusters are written. (whoami --merge is idempotent;
+    # in dry-run we skip the merge so we don't pretend to write, matching --dry-run.)
+    if rc == 0 and not args.dry_run:
+        merge_cli = ["--merge"]
+        if args.dry_run:
+            merge_cli = ["--dry-run"]
+        _run("scripts/anchor_speaker_me.py", merge_cli, extra_env=neo4j_env())
+    return rc
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +401,8 @@ def _link_args(args):
     a.faiss = args.faiss
     a.more_aggressive = args.more_aggressive
     a.rank_and_label = args.rank_and_label
+    a.promote = args.promote
+    a.promote_min_weight = args.promote_min_weight
     a.dry_run = args.dry_run
     a.state_file = args.state_file or ""
     return a
@@ -411,6 +426,10 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--more-aggressive", action="store_true", help="Wider thresholds/nets.")
     pl.add_argument("--rank-and-label", action="store_true",
                     help="Also run full-graph dominance + Transcription labeling (heavy; final pass only).")
+    pl.add_argument("--promote", action="store_true",
+                    help="After linking, promote tentative GlobalSpeakers to confirmed by evidence threshold (paged).")
+    pl.add_argument("--promote-min-weight", type=float, default=0.0,
+                    help="Minimum weight_sum for --promote (0 = use linker default).")
     pl.add_argument("--dry-run", action="store_true", help="Do not write to Neo4j.")
     pl.add_argument("--state-file", type=str, default="",
                    help="JSON file of already-processed speaker IDs for monotonic chunked/resumed runs.")
@@ -430,6 +449,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--more-aggressive", action="store_true", help="Linker: wider thresholds.")
     pr.add_argument("--rank-and-label", action="store_true",
                     help="Linker: full-graph dominance + labeling (heavy; final pass).")
+    pr.add_argument("--promote", action="store_true",
+                    help="Linker: promote tentative GlobalSpeakers to confirmed by evidence. ")
     pr.add_argument("--dry-run", action="store_true", help="Linker: do not write to Neo4j.")
     pr.add_argument("--state-file", type=str, default="",
                     help="Linker: resume state file of processed speaker IDs.")
@@ -499,6 +520,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    # Best-effort rotating log setup (O-G8). Never breaks existing stdout output.
+    try:
+        from tools.setup_logging import setup_logging
+        setup_logging(name="auto-ingest")
+    except Exception:
+        pass
     args = build_parser().parse_args()
     return args.func(args)
 

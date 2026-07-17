@@ -137,3 +137,34 @@ def test_assign_variant_missing_active_uses_zero(tmp_path):
     thumb, title = abtest.assign_variant(_Item(), plan)
     assert thumb.endswith("a.jpg")
     assert title == "fallback"
+
+
+def test_variant_plan_schema_version(tmp_path, monkeypatch):
+    monkeypatch.setattr(abtest, "VARIANT_STORE", tmp_path / "ab.jsonl")
+    abtest.plan_variants("s1", "youtube", ["a.jpg"], ["A"])
+    import json
+    line = (tmp_path / "ab.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    assert json.loads(line)["_v"] == abtest.ABTEST_SCHEMA_VERSION
+
+
+def test_variant_plan_missing_version_defaults(tmp_path, monkeypatch, caplog):
+    import json
+    store = tmp_path / "ab.jsonl"
+    monkeypatch.setattr(abtest, "VARIANT_STORE", store)
+    legacy = {"short_id": "old", "platform": "youtube",
+              "thumb_variants": ["a.jpg"], "title_variants": ["A"],
+              "active_variant": 0}
+    store.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        plans = abtest.load_variants(short_id="old")
+    assert len(plans) == 1
+    assert plans[0].short_id == "old"
+    assert any("missing _v" in r.message for r in caplog.records)
+
+
+def test_variant_plan_version_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(abtest, "VARIANT_STORE", tmp_path / "ab.jsonl")
+    abtest.plan_variants("s1", "youtube", ["a.jpg", "b.jpg"], ["A", "B"])
+    loaded = abtest.load_variants(short_id="s1")[0]
+    assert loaded.to_dict()["_v"] == 1
+    assert loaded.thumb_variants == ["a.jpg", "b.jpg"]

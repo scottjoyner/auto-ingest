@@ -520,6 +520,63 @@ def compute_dominance_and_label_transcriptions(sess):
     """)
 
 
+def promote_by_evidence(drv, min_weight: float = 30.0, batch: int = 5000,
+                         dry_run: bool = False) -> int:
+    """Promote tentative ``GlobalSpeaker`` nodes to ``confirmed`` based on an
+    accumulated-evidence threshold (``weight_sum``) rather than a full-graph
+    aggregation.
+
+    The legacy ``--rank-and-label`` pass computed dominance across the entire
+    ~21M-node graph in a single transaction and exceeded Neo4j's transaction
+    memory. This function is SAFE by contrast: it pages over ``GlobalSpeaker``
+    by id (index-backed, ``g.id > $after``) and issues one bounded
+    ``SET status='confirmed'`` write per page. No query touches more than
+    ``batch`` GlobalSpeakers, so it cannot OOM. It never reads ``weight_sum``
+    without a where-predicate that the ``GlobalSpeaker`` schema can satisfy
+    with the unique-id index + a property scan limited to the page.
+
+    Returns the number of GlobalSpeakers promoted. Idempotent: a confirmed
+    node already at/above threshold is not re-counted.
+
+    This deliberately avoids a graph-wide aggregation or any multi-hop walk.
+    """
+    promoted = 0
+    after = None
+    with drv.session(database=NEO4J_DB) as sess:
+        while True:
+            rows = sess.run(
+                """
+                MATCH (g:GlobalSpeaker)
+                WHERE g.id > coalesce($after, '')
+                  AND coalesce(g.status, 'tentative') <> 'confirmed'
+                  AND coalesce(g.weight_sum, 0.0) >= $minw
+                RETURN g.id AS gid
+                ORDER BY g.id
+                LIMIT $batch
+                """,
+                after=after, minw=min_weight, batch=batch,
+            ).data()
+            if not rows:
+                break
+            gids = [r["gid"] for r in rows]
+            promoted += len(gids)
+            if not dry_run:
+                sess.run(
+                    """
+                    UNWIND $gids AS gid
+                    MATCH (g:GlobalSpeaker {id: gid})
+                    SET g.status = 'confirmed', g.updated_at = datetime()
+                    """,
+                    gids=gids,
+                )
+            after = gids[-1]
+    logging.info(
+        f"promote_by_evidence: promoted {promoted} GlobalSpeaker(s) "
+        f"with weight_sum >= {min_weight} (dry_run={dry_run})."
+    )
+    return promoted
+
+
 # -----------------------
 # Fetch (Segment first, fallback to Utterance)
 # -----------------------
@@ -1344,6 +1401,11 @@ def parse_args():
     p.add_argument("--priority-thresh", type=float, default=0.82, help="Cosine threshold to attach locals to the priority GlobalSpeaker (stricter to avoid contamination).")
     p.add_argument("--priority-max-attach", type=int, default=20000, help="Safety cap for number of local speakers to attach to the priority GS this run.")
     p.add_argument("--rank-and-label", action="store_true", default=False, help="Compute dominance metrics and label Transcriptions' primary GlobalSpeaker.")
+    p.add_argument("--promote", action="store_true", default=False,
+                   help="After linking, promote tentative GlobalSpeakers to confirmed when their "
+                        "accumulated weight_sum meets a threshold (lightweight, paged; never a full-graph scan).")
+    p.add_argument("--promote-min-weight", type=float, default=30.0,
+                   help="Minimum weight_sum for --promote to confirm a tentative GlobalSpeaker.")
     p.add_argument("--speaker-batch", type=int, default=1500,
                help="How many distinct Speaker IDs to page per DB roundtrip.")
     p.add_argument("--items-per-speaker", type=int, default=64,
@@ -1751,6 +1813,10 @@ def main():
         with drv.session(database=NEO4J_DB) as sess:
             compute_dominance_and_label_transcriptions(sess)
         logging.info("Dominance computed and Transcriptions labeled with primary_global_speaker.")
+
+    if args.promote:
+        promote_by_evidence(drv, min_weight=args.promote_min_weight, dry_run=args.dry_run)
+        logging.info("Evidence-based promotion pass complete.")
 
 
     logging.info("Done.")
