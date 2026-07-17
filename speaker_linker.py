@@ -64,7 +64,13 @@ DEFAULT_WRITE_SNIPS = False
 # Optional trivial music filter heuristic (text-level): drop snips with almost no alpha chars
 TEXT_ALPHA_MIN = 2
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Consult the canonical backend router for device selection (CPU-safe fallback
+# when no accelerator is present — e.g. this AMD Ryzen AI host resolves to CPU).
+try:
+    from auto_ingest.backend import recommended_torch_device
+    DEVICE = recommended_torch_device()
+except Exception:
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # -----------------------
 # Neo4j helpers

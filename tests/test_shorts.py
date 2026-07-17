@@ -11,7 +11,16 @@ from pathlib import Path
 
 import pytest
 
-from auto_ingest.shorts import backdrop, curator, planner, render, tts
+from auto_ingest.shorts import (
+    backdrop,
+    content_miner,
+    curator,
+    hook_bank,
+    planner,
+    render,
+    tts,
+    virality,
+)
 from auto_ingest.shorts.models import Brief, Cue, Plan, PlannedShort, Shot, SourceRef
 
 
@@ -66,7 +75,7 @@ def test_plan_shorts_deterministic():
     plan2 = planner.plan_shorts(_brief(["a", "b", "c", "d"]), _ANCHORS,
                                    short_count=3, short_dur=24.0, seed=1)
     assert plan.shorts[0].id == plan2.shorts[0].id
-    assert plan.shorts[0].cues[0].text == "hook"
+    assert any(c.kind == "hook" for c in plan.shorts[0].cues)
     for s in plan.shorts:
         assert s.shots, "expected highway shots"
         for sh in s.shots:
@@ -77,8 +86,9 @@ def test_plan_distributes_points_across_shorts():
     plan = planner.plan_shorts(_brief(["p1", "p2", "p3", "p4", "p5", "p6"]),
                                   _ANCHORS, short_count=3, short_dur=30.0, seed=2)
     all_cue_texts = [c.text for s in plan.shorts for c in s.cues]
-    assert plan.shorts[0].cues[0].kind == "hook"
-    assert plan.shorts[-1].cues[-1].kind == "source"
+    assert any(c.kind == "hook" for c in plan.shorts[0].cues)
+    # sources are still present on the final short (payoff cue now caps it)
+    assert any(c.kind == "source" for c in plan.shorts[-1].cues)
     assert any(t.startswith("p") for t in all_cue_texts)
 
 
@@ -499,3 +509,168 @@ def test_render_plan_in_plan_dedup(monkeypatch, tmp_path):
     out = render.render_plan(plan, tmp_path, skip_used_clips=True)
     assert rendered == ["s1"], "s2 should be skipped (clip_A reused in-plan)"
     assert len(out) == 1
+
+
+# --------------------------------------------------------------------------- #
+# hook_bank (content strategy — no Neo4j / no moviepy)
+# --------------------------------------------------------------------------- #
+def test_topic_type_of_infers():
+    assert hook_bank.topic_type_of(Brief(topic="t", title="T", hook="h", tags=["paper", "arxiv"])) == "paper"
+    assert hook_bank.topic_type_of(Brief(topic="t", title="T", hook="h", tags=["debate"])) == "debate"
+    assert hook_bank.topic_type_of(Brief(topic="t", title="T", hook="h", tags=["opinion"])) == "opinion"
+    assert hook_bank.topic_type_of(Brief(topic="t", title="T", hook="h", tags=["utterance"])) == "utterance"
+    assert hook_bank.topic_type_of(Brief(topic="t", title="T", hook="h", tags=["concept"])) == "concept"
+
+
+def test_build_hook_cues_single_part():
+    b = Brief(topic="t", title="Cool Topic", hook="h", points=["p"],
+              tags=["concept"])
+    cues = hook_bank.build_hook_cues(b, 12.0, short_index=0, total_parts=1)
+    assert cues[0].kind == "hook"
+    assert len(cues) == 1  # no callback when single part
+
+
+def test_build_hook_cues_series_adds_callback_and_payoff():
+    b = Brief(topic="t", title="Cool Topic", hook="h", points=["p"],
+              tags=["concept"])
+    cues = hook_bank.build_hook_cues(b, 12.0, short_index=1, total_parts=3)
+    kinds = [c.kind for c in cues]
+    assert "hook" in kinds and "callback" in kinds
+    assert any("Part 2 of 3" in c.text for c in cues)
+    payoff = hook_bank.build_payoff_cue(b, 12.0)
+    assert payoff.kind == "payoff"
+    assert payoff.start > 8.0  # reserved near the end
+
+
+def test_hook_rotates_across_variants():
+    b = Brief(topic="t", title="Cool Topic", hook="h", points=["p"],
+              tags=["concept"])
+    v0 = hook_bank.hook_for(b, variant=0, topic_type="concept")
+    v1 = hook_bank.hook_for(b, variant=1, topic_type="concept")
+    assert v0 != v1  # different cold-open per part
+
+
+def test_myth_fact_pair():
+    cues = hook_bank.myth_fact_pair("bigger models always smarter",
+                                     "scaling hits diminishing returns")
+    assert [c.kind for c in cues] == ["myth", "fact"]
+    assert "bigger models" in cues[0].text and "scaling" in cues[1].text
+
+
+def test_curiosity_reveal_returns_question_and_reveal():
+    cues = hook_bank.curiosity_reveal("why does it work?", "the math is simple", 12.0)
+    assert [c.kind for c in cues] == ["question", "reveal"]
+    assert cues[0].end <= cues[1].start  # reveal follows the question
+    assert cues[1].text == "the math is simple"
+
+
+def test_series_intro_and_outro():
+    b = Brief(topic="t", title="Cool Topic", hook="h", points=["p"], tags=["concept"])
+    intro = hook_bank.build_series_intro(b, 3, 0)
+    assert intro.kind == "series" and "Part 1 of 3" in intro.text
+    mid = hook_bank.build_series_outro(b, 3, 0, duration=12.0)
+    assert "Next: Part 2 of 3" in mid.text
+    last = hook_bank.build_series_outro(b, 3, 2, duration=12.0)
+    assert "Series complete" in last.text
+    # outro sits near the end, not on top of the hook
+    assert mid.start > 8.0
+
+
+def test_distribute_cues_series_has_intro_callback_outro():
+    plan = planner.plan_shorts(_brief(["p1", "p2", "p3"]), _ANCHORS,
+                                short_count=2, short_dur=20.0, seed=3)
+    kinds0 = [c.kind for c in plan.shorts[0].cues]
+    assert "series" in kinds0  # intro + outro
+    assert "callback" in kinds0
+    assert "reveal" in kinds0  # curiosity gap
+    assert "payoff" in kinds0
+
+
+def test_distribute_cues_single_part_has_no_series():
+    plan = planner.plan_shorts(_brief(["p1", "p2"]), _ANCHORS,
+                                short_count=1, short_dur=20.0, seed=3)
+    kinds = [c.kind for c in plan.shorts[0].cues]
+    assert "series" not in kinds
+    assert "callback" not in kinds
+    assert "reveal" in kinds
+
+
+# --------------------------------------------------------------------------- #
+# virality scorer (pure, no Neo4j)
+# --------------------------------------------------------------------------- #
+def _short_with(*kinds, duration=20.0, hook_text="You've been using LLMs wrong"):
+    cues = [Cue(0.4, 3.4, hook_text, kind="hook")]
+    t = 3.6
+    for k in kinds:
+        cues.append(Cue(round(t, 2), round(t + 2.6, 2), f"{k} line here", kind=k))
+        t += 2.8
+    return PlannedShort(id="x", brief_topic="t", title="T", cues=cues)
+
+
+def test_virality_scores_weak_short_low():
+    weak = _short_with("point", "point")  # no gap hook, no callback/payoff/reveal
+    vs = virality.score_short(weak)
+    assert 0.0 <= vs.total <= 100.0
+    assert vs.total < 60.0
+    assert any("callback" in s or "payoff" in s for s in vs.suggestions)
+
+
+def test_virality_scores_strong_short_high():
+    strong = _short_with("point", "callback", "reveal", "payoff", "myth", "fact")
+    vs = virality.score_short(strong)
+    assert vs.total > 70.0
+    assert vs.grade() in ("A", "B")
+
+
+def test_virality_plan_ranking():
+    plan = Plan(topic="t", brief=_brief(["p"]), shorts=[
+        _short_with("point", "point"),
+        _short_with("point", "callback", "reveal", "payoff", "myth", "fact"),
+    ])
+    res = virality.score_plan(plan)
+    assert res["ranked"][0] == plan.shorts[1].id
+    assert res["best"] > res["worst"]
+
+
+def test_virality_short_with_real_myth_fact_scores_share():
+    s = _short_with("myth", "fact", "reveal", "payoff", "callback")
+    vs = virality.score_short(s)
+    assert vs.factors["share"] >= 80.0
+
+
+# --------------------------------------------------------------------------- #
+# content_miner (fake driver)
+# --------------------------------------------------------------------------- #
+class _FakeMinerDriver:
+    def __init__(self, rows): self._rows = rows
+    def session(self):
+        return _MinerSession(self._rows)
+
+
+class _MinerSession:
+    def __init__(self, rows): self._rows = rows
+    def __enter__(self): return self
+    def __exit__(self, *e): return False
+    def run(self, q, **kw):
+        low = q.lower()
+        if "has_chunk" in low:
+            return _FakeResult(self._rows)
+        return _FakeResult([])
+
+
+def test_content_miner_myth_fact_and_reveal():
+    rows = [{"ptitle": "Cool Paper", "pid": "1234", "text":
+             "However, the model unexpectedly outperforms baselines without fine-tuning on the held-out set.",
+             "excerpt": "However, the model unexpectedly outperforms baselines without fine-tuning on the held-out set."}]
+    drv = _FakeMinerDriver(rows)
+    mf = content_miner.myth_fact_for_topic(drv, "large_language_models")
+    assert mf and "large language models" in mf[0]
+    assert "unexpectedly" in mf[1]
+    tw = content_miner.reveal_twist_for_topic(drv, "large_language_models")
+    assert tw and "unexpectedly" in tw
+
+
+def test_content_miner_returns_none_on_empty():
+    drv = _FakeMinerDriver([])
+    assert content_miner.myth_fact_for_topic(drv, "x") is None
+    assert content_miner.reveal_twist_for_topic(drv, "x") is None

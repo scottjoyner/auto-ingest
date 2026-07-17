@@ -41,7 +41,28 @@ class CuratedFacts:
 # ---------------------------
 def curate_topic(driver, topic: str, *, top_papers: int = 6, top_concepts: int = 12,
                  chunk_per_paper: int = 1) -> CuratedFacts:
-    """Read top papers/concepts/chunks for a Topic from Neo4j."""
+    """Read top papers/concepts/chunks for a Topic from Neo4j.
+
+    Resilient against transient Neo4j memory/connection pressure (S-G18): when
+    no ``driver`` is supplied, the query runs through ``db_retry.with_driver``
+    (fresh driver per attempt, linear backoff). Callers passing a driver keep
+    the existing path.
+    """
+    if driver is None:
+        from auto_ingest.shorts import db_retry
+        return db_retry.with_driver(
+            lambda d: _curate_topic_impl(d, topic, top_papers=top_papers,
+                                         top_concepts=top_concepts,
+                                         chunk_per_paper=chunk_per_paper)
+        ) or CuratedFacts(topic=topic, topic_title=topic)
+    return _curate_topic_impl(driver, topic, top_papers=top_papers,
+                              top_concepts=top_concepts, chunk_per_paper=chunk_per_paper)
+
+
+def _curate_topic_impl(driver, topic: str, *, top_papers: int = 6,
+                       top_concepts: int = 12,
+                       chunk_per_paper: int = 1) -> CuratedFacts:
+    """Actual curation read (see :func:`curate_topic`)."""
     with driver.session() as sess:
         title_rec = sess.run(
             "MATCH (t:Topic {name:$topic}) RETURN coalesce(t.title, t.name) AS title",
@@ -299,7 +320,8 @@ def brief_from_discussions(topic: str, clips: List[DiscussionClip],
     if not points:
         raise ValueError(f"No usable discussion clips for topic {topic!r}")
     hook = points[0]
-    return Brief(
+    from auto_ingest.shorts.hook_bank import topic_type_of
+    brief = Brief(
         topic=topic,
         title=str(topic_title or topic).replace("_", " "),
         hook=hook,
@@ -307,3 +329,5 @@ def brief_from_discussions(topic: str, clips: List[DiscussionClip],
         sources=sources[:6],
         tags=sorted({c.concept for c in clips}),
     )
+    brief.topic_type = topic_type_of(brief)
+    return brief

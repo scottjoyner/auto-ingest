@@ -42,6 +42,8 @@ class Brief:
     points: List[str] = field(default_factory=list)
     sources: List[SourceRef] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
+    topic_type: Optional[str] = None  # paper | concept | debate | opinion | utterance
+    series_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -51,6 +53,8 @@ class Brief:
             "points": list(self.points),
             "sources": [s.to_dict() for s in self.sources],
             "tags": list(self.tags),
+            "topic_type": self.topic_type,
+            "series_id": self.series_id,
         }
 
     @classmethod
@@ -62,6 +66,8 @@ class Brief:
             points=list(d.get("points", [])),
             sources=[SourceRef.from_dict(s) for s in d.get("sources", [])],
             tags=list(d.get("tags", [])),
+            topic_type=d.get("topic_type"),
+            series_id=d.get("series_id"),
         )
 
 
@@ -112,6 +118,8 @@ class PlannedShort:
     notes: str = ""
     status: str = "planned"  # planned | rendered | rejected
     out_path: Optional[str] = None
+    thumbnail_path: Optional[str] = None
+    persona: Optional[str] = None  # stylized | photo | video (on-screen personality)
 
     def duration(self) -> float:
         if not self.cues:
@@ -128,6 +136,8 @@ class PlannedShort:
             "notes": self.notes,
             "status": self.status,
             "out_path": self.out_path,
+            "thumbnail_path": self.thumbnail_path,
+            "persona": self.persona,
         }
 
     @classmethod
@@ -141,6 +151,8 @@ class PlannedShort:
             notes=d.get("notes", ""),
             status=d.get("status", "planned"),
             out_path=d.get("out_path"),
+            thumbnail_path=d.get("thumbnail_path"),
+            persona=d.get("persona"),
         )
 
 

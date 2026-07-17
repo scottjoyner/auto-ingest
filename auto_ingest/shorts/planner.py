@@ -37,27 +37,73 @@ SOURCE_KIND = "source"
 
 
 def _distribute_cues(title: str, hook: str, points: List[str], sources: List,
-                     duration: float) -> List[Cue]:
-    """Build timed cues across ``duration`` seconds."""
-    lines: List[tuple] = [(HOOK_KIND, hook)] if hook else []
-    lines += [(POINT_KIND, p) for p in points]
+                      duration: float, *, brief: Optional["Brief"] = None,
+                      short_index: int = 0, total_parts: int = 1,
+                      reveal_text: Optional[str] = None,
+                      myth_fact: Optional[tuple] = None) -> List[Cue]:
+    """Build timed cues across ``duration`` seconds.
+
+    Editorial stack (see ``hook_bank``):
+      * series intro lockup ("Part N of M") for multi-part runs;
+      * topic-typed cold-open hook + mid-video callback (curiosity gap);
+      * the research points + citable sources;
+      * a curiosity-gap karaoke reveal (question -> answer) to hold retention;
+        the answer is real graph-mined text when ``reveal_text`` is supplied;
+      * an optional myth/fact pair (real misconception + paper correction);
+      * a reserved end payoff threaded to the branded end card;
+      * a series outro that teases the next part (or wraps the run).
+    """
+    from auto_ingest.shorts.hook_bank import (
+        build_hook_cues,
+        build_payoff_cue,
+        build_series_intro,
+        build_series_outro,
+        curiosity_reveal,
+        myth_fact_pair,
+        topic_type_of,
+    )
+
+    b = brief or Brief(topic="", title=title, hook=hook)
+    ttype = (brief.topic_type if brief and brief.topic_type
+             else topic_type_of(b) if brief else "concept")
+
+    cues: List[Cue] = []
+    if total_parts > 1:
+        cues.append(build_series_intro(b, total_parts, short_index))
+    if hook or brief:
+        cues += build_hook_cues(
+            b, duration, short_index=short_index, total_parts=total_parts,
+            topic_type=ttype)
+    for i, p in enumerate(points):
+        start = 3.6 + i * SECS_PER_CUE
+        cues.append(Cue(start=round(start, 2), end=round(start + SECS_PER_CUE, 2),
+                         text=p, kind=POINT_KIND))
     if sources:
         src = "Sources: " + ", ".join(f"[{i + 1}] {s.title}" for i, s in enumerate(sources[:4]))
-        lines.append((SOURCE_KIND, src))
-
-    if not lines:
-        return []
-
-    n = len(lines)
-    # Evenly space cues; last cue ends near duration. Add a small lead-in.
-    lead = 0.4
-    span = max(duration - lead, 1.0)
-    step = span / n
-    cues: List[Cue] = []
-    for i, (kind, text) in enumerate(lines):
-        start = lead + i * step
-        end = start + min(step, SECS_PER_CUE)
-        cues.append(Cue(start=round(start, 2), end=round(end, 2), text=text, kind=kind))
+        cues.append(Cue(start=round(3.6 + len(points) * SECS_PER_CUE, 2),
+                         end=round(3.6 + (len(points) + 1) * SECS_PER_CUE, 2),
+                         text=src, kind=SOURCE_KIND))
+    # Curiosity-gap reveal: pose a question, then karaoke-unfold a twist answer.
+    # Placed AFTER the points/sources (not overlapping them) and before the end
+    # payoff so retention peaks late. The answer is real graph-mined text when
+    # ``reveal_text`` is supplied, else a templated twist line.
+    content_end = 3.6 + (len(points) + (1 if sources else 0)) * SECS_PER_CUE
+    if duration > 12.0 and content_end < duration - 4.0:
+        twist = reveal_text or (
+            f"And that's why {b.title or b.topic} matters more than it looks"
+            if not points else
+            f"Here's the part nobody mentions about {b.title or b.topic}")
+        question = f"So what's the catch with {b.title or b.topic}?"
+        cues += curiosity_reveal(question, twist, duration,
+                                 start=round(content_end + 0.2, 2))
+    # Optional real myth/fact pair (misconception -> paper correction).
+    if myth_fact:
+        mc, fc = myth_fact
+        cues += myth_fact_pair(mc, fc)
+    if duration > 8.0:
+        cues.append(build_payoff_cue(b, duration))
+    if total_parts > 1:
+        cues.append(build_series_outro(b, total_parts, short_index, duration))
     return cues
 
 
@@ -65,8 +111,12 @@ def plan_shorts(brief: Brief, anchors: List[Dict[str, object]], *,
                 short_count: int = 3, short_dur: float = 30.0,
                 shots_per_short: int = 3, seed: int = 1,
                 clip_dur: float = 6.0, min_gap_sec: float = 8.0,
-                topic_prefix: str = "") -> Plan:
-    """Create a :class:`Plan` of ``short_count`` shorts from a brief."""
+                topic_prefix: str = "", driver=None) -> Plan:
+    """Create a :class:`Plan` of ``short_count`` shorts from a brief.
+
+    If ``driver`` is supplied, real graph content is mined (best-effort, never
+    fatal) to power the reveal answer + an optional myth/fact pair.
+    """
     import random
     rnd = random.Random(seed)
 
@@ -74,6 +124,17 @@ def plan_shorts(brief: Brief, anchors: List[Dict[str, object]], *,
     points = list(brief.points) or [brief.hook]
     if not points:
         points = ["(no points curated)"]
+
+    # Mine real content once per topic (not per short) when a driver is given.
+    reveal_text = None
+    myth_fact = None
+    if driver is not None:
+        try:
+            from auto_ingest.shorts import content_miner
+            reveal_text = content_miner.reveal_twist_for_topic(driver, brief.topic)
+            myth_fact = content_miner.myth_fact_for_topic(driver, brief.topic)
+        except Exception as e:  # graph pressure / missing data -> templated fallback
+            log.info("Content mining skipped for %s: %s", brief.topic, e)
 
     shorts: List[PlannedShort] = []
     for s_idx in range(short_count):
@@ -87,6 +148,11 @@ def plan_shorts(brief: Brief, anchors: List[Dict[str, object]], *,
             points=window,
             sources=brief.sources if s_idx == short_count - 1 else [],
             duration=short_dur,
+            brief=brief,
+            short_index=s_idx,
+            total_parts=short_count,
+            reveal_text=reveal_text if s_idx == short_count - 1 else None,
+            myth_fact=myth_fact if s_idx == 0 else None,
         )
 
         shots = _pick_shots_deterministic(
@@ -276,8 +342,12 @@ def _kind_present(events: List[Dict[str, object]], kind: str) -> bool:
 
 
 def _mine_segment_events(driver, kind: str, limit: int, query: str) -> List[Dict[str, object]]:
-    with driver.session() as sess:
-        rows = sess.run(query, limit=limit).data()
+    # Resilient: run the query with a fresh driver per attempt so transient
+    # Neo4j memory/connection pressure doesn't kill the whole plan (S-G18).
+    from auto_ingest.shorts import db_retry
+    rows = db_retry.with_driver(
+        lambda drv: drv.session().run(query, limit=limit).data()
+    ) or []
     events: List[Dict[str, object]] = []
     for r in rows:
         clip_key = r.get("clip_key")
@@ -301,8 +371,10 @@ def _mine_segment_events(driver, kind: str, limit: int, query: str) -> List[Dict
 
 
 def _mine_speed_events(driver, per_kind: int, limit: int) -> List[Dict[str, object]]:
-    with driver.session() as sess:
-        rows = sess.run(
+    # Resilient variant of the same query (S-G18).
+    from auto_ingest.shorts import db_retry
+    rows = db_retry.with_driver(
+        lambda drv: drv.session().run(
             """
             MATCH (f:Frame)-[:BELONGS_TO]->(c:DashcamClip)
             WHERE c.view = 'F' AND f.mph >= $mph
@@ -312,6 +384,7 @@ def _mine_speed_events(driver, per_kind: int, limit: int) -> List[Dict[str, obje
             """,
             mph=SPEED_MPH_MIN, limit=limit,
         ).data()
+    ) or []
     events: List[Dict[str, object]] = []
     for r in rows:
         fps = r.get("fps") or 30.0
@@ -384,6 +457,13 @@ def plan_discussion(driver, clips, *, topic: str = "discussion",
     pool = backdrop.select_highway_pool(driver, limit=200)
     pool_shots = backdrop.pick_shots(pool, count=1, min_gap_sec=0.0,
                                      clip_dur=clip_dur, rng_seed=seed or 1)
+    # Mine real content for the reveal answer once (best-effort).
+    reveal_text = None
+    try:
+        from auto_ingest.shorts import content_miner
+        reveal_text = content_miner.reveal_twist_for_topic(driver, topic)
+    except Exception as e:
+        log.info("Discussion content mining skipped for %s: %s", topic, e)
     n = min(short_count, max(len(resolvable), 1))
     for s_idx in range(n):
         if s_idx < len(resolvable):
@@ -403,10 +483,19 @@ def plan_discussion(driver, clips, *, topic: str = "discussion",
                         t_sec=float(a.get("t_sec", 0.0)),
                         dur=clip_dur, mph=a.get("mph"))
             c = clips[s_idx % len(clips)]
-        cues = [
-            Cue(0.0, 2.4, brief.title, kind="hook"),
-            Cue(2.4, min(short_dur, 2.4 + clip_dur), c.text.strip()[:90], kind="point"),
-        ]
+        # Editorial stack: real-words hook + the utterance as the point, plus a
+        # curiosity reveal + payoff threaded to the end card.
+        cues = _distribute_cues(
+            title=brief.title,
+            hook=c.text.strip()[:90],
+            points=[c.text.strip()[:90]],
+            sources=[],
+            duration=short_dur,
+            brief=brief,
+            short_index=s_idx,
+            total_parts=n,
+            reveal_text=reveal_text if s_idx == n - 1 else None,
+        )
         shorts.append(PlannedShort(
             id=uuid.uuid5(uuid.NAMESPACE_URL, f"discussion:{topic}:{c.utterance_id}").hex[:10],
             brief_topic=topic,

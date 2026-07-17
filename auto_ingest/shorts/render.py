@@ -33,14 +33,22 @@ def _neo4j_creds():
 def render_short(item: PlannedShort, out_dir: Path, *,
                  profile_name: str = PROFILE_NAME, width: int = WIDTH,
                  height: int = HEIGHT, bitrate: str = "6M",
-                 overwrite: bool = False, tts: bool = False) -> Path:
+                 overwrite: bool = False, tts: bool = False,
+                 persona=None) -> Path:
     """Render one :class:`PlannedShort` to a 9:16 MP4. Returns the output path.
 
     When ``tts`` is set, the short's scripted cues are synthesized in the
     owner's voice (XTTS-v2 voice-clone) and muxed as the narration track. If
     TTS is unavailable the short is rendered silently rather than failing.
+
+    When ``persona`` is set (a :class:`PersonaConfig`, a source string, or
+    True for the env default), the rendered cinematic video gets an on-screen
+    personality layered on: the owner's cloned voice narrates, and a face-cam
+    (real talking head if a face source is configured on a GPU host, else a
+    stylized brand avatar) is composited in a corner. Degrades gracefully at
+    every stage.
     """
-    from shorts_builder import compose_scripted_short
+    from auto_ingest.shorts.compose import compose_scripted_short
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -67,16 +75,67 @@ def render_short(item: PlannedShort, out_dir: Path, *,
         except Exception as e:  # pragma: no cover - TTS is environment-dependent
             log.info("TTS narration skipped for %s: %s", item.id, e)
             narration_audio = None
+
+    # Base cinematic render (captions/scrim/kenburns) to the final path, or to
+    # a temp file when a persona overlay will be composited on top.
+    from auto_ingest.shorts import persona as persona_mod
+    cfg = _resolve_persona(persona)
+    base_path = out_path
+    if cfg is not None:
+        base_path = out_path.with_suffix(".base.mp4")
     compose_scripted_short(
-        shots, cues, out_path,
+        shots, cues, base_path,
         profile_name=profile_name, width=width, height=height, bitrate=bitrate,
         narration_audio=narration_audio,
         hashtag=item.brief_topic or "",
     )
     item.status = "rendered"
     item.out_path = str(out_path)
+
+    # Persona overlay: composite the face-cam onto the cinematic base.
+    if cfg is not None:
+        try:
+            persona_mod.compose_with_persona(
+                base_path, cues, cfg, out_path,
+                width=width, height=height, bitrate=bitrate,
+                narration_audio=narration_audio)
+        except Exception as e:  # persona stack is environment-dependent
+            log.info("Persona overlay skipped for %s (using base render): %s",
+                     item.id, e)
+        finally:
+            try:
+                if base_path.exists() and base_path != out_path:
+                    base_path.unlink()
+            except OSError:
+                pass
+
+    # Auto-thumbnail (cover frame + burned hook) for platform covers.
+    try:
+        from auto_ingest.shorts import thumbnail
+        thumb = out_path.with_suffix(".thumb.jpg")
+        thumbnail.make_thumbnail(
+            out_path, thumb, title=item.title, topic=item.brief_topic or "")
+        item.thumbnail_path = str(thumb)
+    except Exception as e:  # thumbnailing is best-effort
+        log.info("Thumbnail skipped for %s: %s", item.id, e)
     log.info("Rendered short %s -> %s", item.id, out_path)
     return out_path
+
+
+def _resolve_persona(persona):
+    """Normalize the ``persona`` arg into a PersonaConfig or None."""
+    if persona is None or persona is False:
+        return None
+    from auto_ingest.shorts import persona as persona_mod
+    if persona is True:
+        return persona_mod.PersonaConfig.from_env()
+    if isinstance(persona, persona_mod.PersonaConfig):
+        return persona
+    if isinstance(persona, str):
+        cfg = persona_mod.PersonaConfig.from_env()
+        cfg.source = persona  # type: ignore[assignment]
+        return cfg
+    return None
 
 
 def upsert_manifest(driver, plan: Plan, out_dir: Path) -> None:

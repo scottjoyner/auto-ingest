@@ -12,6 +12,7 @@ variations, ``render`` to produce video, and the manifest is upserted to Neo4j.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -65,9 +66,12 @@ def _cmd_plan(args) -> int:
         anchors = backdrop.select_highway_pool(driver, limit=args.pool)
     finally:
         driver.close()
+    # Pass the live driver so real graph content is mined (reveal + myth/fact)
+    # instead of falling back to templated text (S-G10).
     plan = planner.plan_shorts(
         brief, anchors, short_count=args.shorts, short_dur=args.dur,
         shots_per_short=args.shots_per_short, seed=args.seed,
+        driver=driver,
     )
     out = args.plans_dir or DEFAULT_PLANS_DIR
     path = Path(out) / f"{args.topic}__{plan.plan_id}.json"
@@ -276,9 +280,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
     ppv = sub.add_parser("publish", help="Publish workflow: queue/inspect/upload rendered shorts.")
-    ppv.add_argument("action", choices=["queue", "list", "upload", "auth", "youtube"], nargs="?",
-                     help="queue = stage; list = show staged; upload = push; "
-                          "auth/youtube = bootstrap a YouTube OAuth token (sign-in link)")
+    ppv.add_argument("action", choices=["queue", "list", "upload", "validate", "brand-check", "auth", "tiktok", "instagram", "metrics", "ab", "schedule"],
+                      help="queue = stage; list = show staged; upload = push; "
+                           "validate = check queue integrity; "
+                           "brand-check = verify brand assets/handles/bios are present; "
+                           "auth/tiktok/instagram = bootstrap an OAuth token (sign-in link); "
+                           "schedule = drive the posting calendar into the queue")
+    ppv.add_argument("target", nargs="?", default=None,
+                     help="Optional platform for 'auth' (e.g. youtube)")
     ppv.add_argument("--platform", default="youtube_shorts",
                      help="Single platform for queue/list (default youtube_shorts)")
     ppv.add_argument("--platforms", nargs="*", default=["youtube_shorts", "tiktok", "instagram"],
@@ -289,15 +298,160 @@ def build_parser() -> argparse.ArgumentParser:
                      default="/media/scott/NAS5/fileserver/dashcam_timelapse/_mix_run/narrated",
                      help="Root dir scanned by --disk")
     ppv.add_argument("--limit", type=int, default=0)
+    ppv.add_argument("--plans-dir", type=Path, default=DEFAULT_PLANS_DIR,
+                     help="Plan JSON dir used to enrich queue items (hook/thumbnail)")
     ppv.add_argument("--dry-run", action="store_true", default=True,
                      help="Report what would upload; no network calls (default)")
     ppv.add_argument("--no-dry-run", dest="dry_run", action="store_false",
                      help="Actually upload (requires platform credentials in env)")
     ppv.add_argument("--headless", action="store_true",
-                     help="auth: use manual code-paste instead of local browser server")
+                      help="auth: use manual code-paste instead of local browser server")
+    ppv.add_argument("--brand-dir", type=Path,
+                      default=Path(__file__).resolve().parent.parent.parent / "docs" / "brand",
+                      help="Brand assets/manifest dir for brand-check")
+    ppv.add_argument("--metrics-file", default=None,
+                      help="metrics: CSV/JSON file to ingest (with metrics ingest)")
+    ppv.add_argument("--metrics-store", type=Path, default=None,
+                      help="metrics: override the JSONL store path")
+    ppv.add_argument("--metrics-format", default="csv", choices=["csv", "json"],
+                      help="metrics: ingest file format (csv or json array)")
+    ppv.add_argument("--plan-file", type=Path, default=None,
+                      help="plan JSON for `metrics predict` (score + store virality)")
+    ppv.add_argument("--as-json", action="store_true",
+                      help="metrics: print report as JSON instead of readable text")
+    ppv.add_argument("--days", type=int, default=7,
+                     help="schedule: build a calendar this many days long (default 7)")
+    ppv.add_argument("--date", dest="date", default=None,
+                     help="schedule: YYYY-MM-DD (or day index) of the day to emit; "
+                          "defaults to today = day 1")
+    ppv.add_argument("--apply", action="store_true",
+                      help="schedule: actually enqueue the day's ready slots "
+                           "(via publish.queue_for_publish); without it, report-only")
+    # A/B testing args (used when action == 'ab'; sub-action via `target`).
+    ppv.add_argument("--key", default=None, help="ab/metrics: item key (short id)")
+    ppv.add_argument("--variants", type=int, default=2,
+                      help="ab: number of variants to generate (default 2)")
+    ppv.add_argument("--variant", type=int, default=None,
+                      help="ab: winning variant index (for 'choose')")
+    ppv.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR,
+                      help="ab: dir to write thumbnail variants into")
     ppv.set_defaults(func=_cmd_publish)
 
     return p
+
+
+def _brand_check(brand_dir: Path) -> "tuple[bool, list]":
+    """Verify brand assets + manifest are present and well-formed.
+
+    Returns (ok, issues). Pure: no network, no credentials. Checks the manifest
+    JSON (handles/bios present) and that each referenced asset file exists and
+    is a valid image of the expected dimensions.
+    """
+    from PIL import Image
+
+    ok = True
+    issues: list = []
+    brand_dir = Path(brand_dir)
+    manifest = brand_dir / "brand_manifest.json"
+    if not manifest.exists():
+        return False, [f"missing brand_manifest.json at {manifest}"]
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except Exception as e:
+        return False, [f"brand_manifest.json unreadable: {e}"]
+
+    for plat, handle in (data.get("handles") or {}).items():
+        if not handle:
+            ok = False
+            issues.append(f"handle missing for {plat}")
+    for plat, bio in (data.get("bios") or {}).items():
+        if not bio:
+            ok = False
+            issues.append(f"bio missing for {plat}")
+
+    expected = {"avatar": (1000, 1000), "banner_youtube": (2560, 1440)}
+    for key, (ew, eh) in expected.items():
+        rel = (data.get("assets") or {}).get(key)
+        if not rel:
+            ok = False
+            issues.append(f"asset path missing for {key}")
+            continue
+        p = brand_dir / rel
+        if not p.exists():
+            ok = False
+            issues.append(f"asset missing: {p}")
+            continue
+        try:
+            with Image.open(p) as im:
+                if im.size != (ew, eh):
+                    ok = False
+                    issues.append(f"{p.name} is {im.size}, expected {(ew, eh)}")
+        except Exception as e:
+            ok = False
+            issues.append(f"{p.name} not a valid image: {e}")
+    return ok, issues
+
+
+def _cmd_ab_plan(args) -> int:
+    from auto_ingest.shorts import abtest, uploader
+
+    items = uploader.load_queue()
+    item = next((i for i in items
+                 if i.key == args.key and i.platform == args.platform), None)
+    if item is None:
+        print(f"No queued short for key={args.key} platform={args.platform}")
+        return 1
+    out_dir = Path(args.out_dir)
+    mp4 = Path(item.out_path)
+    if not mp4.exists():
+        print(f"Rendered MP4 missing: {mp4}")
+        return 1
+    topic = item.topic.replace("_", " ")
+    title = (item.title or item.key).replace("_", " ")
+    n = args.variants
+    thumbs = abtest.make_thumbnail_variants(
+        mp4, out_dir / item.key, title=title, topic=topic, n=n)
+    # Title variants: build a Brief-like object from the queue item.
+    from auto_ingest.shorts.models import Brief
+    brief = Brief(topic=item.topic, title=item.title or item.key,
+                  hook=item.brief_hook or "", tags=[])
+    titles = abtest.title_variants(brief, n=n)
+    plan = abtest.plan_variants(item.key, args.platform, thumbs, titles)
+    print(f"Planned {len(thumbs)} thumbnail + {len(titles)} title variants "
+          f"for {item.key}/{args.platform}")
+    for i, (t, h) in enumerate(zip(plan.thumb_variants, plan.title_variants)):
+        print(f"  v{i}: thumb={t}\n       title={h}")
+    return 0
+
+
+def _cmd_ab_list(args) -> int:
+    from auto_ingest.shorts import abtest
+
+    plans = abtest.load_variants(short_id=args.key, platform=args.platform)
+    if not plans:
+        print("No A/B variant plans stored.")
+        return 0
+    for pl in plans:
+        winner = pl.winner if pl.winner is not None else "-"
+        print(f"{pl.short_id:18} {pl.platform:14} "
+              f"variants={len(pl.thumb_variants)} "
+              f"active={pl.active_variant} winner={winner}")
+        for i, (t, h) in enumerate(zip(pl.thumb_variants, pl.title_variants)):
+            mark = "*" if i == pl.active_variant else " "
+            print(f"  {mark}v{i}: thumb={t}  title={h}")
+    return 0
+
+
+def _cmd_ab_choose(args) -> int:
+    from auto_ingest.shorts import abtest
+
+    plan = abtest.choose_winner(args.key, args.platform, args.variant)
+    if plan is None:
+        print(f"No variant plan for key={args.key} platform={args.platform}")
+        return 1
+    print(f"Recorded winner=v{plan.winner} for {args.key}/{args.platform} "
+          f"at {plan.chosen_at}")
+    return 0
 
 
 def _cmd_publish(args) -> int:
@@ -316,18 +470,238 @@ def _cmd_publish(args) -> int:
             print(f"{it.platform:14} {it.key}  {it.topic}  -> {it.out_path}")
         print(f"{len(items)} queued short(s)")
         return 0
-    if args.action == "auth":
-        from auto_ingest.shorts import yt_auth
-        tok = yt_auth.bootstrap_token(headless=args.headless)
-        print(f"YouTube authenticated. Token at {tok}")
+    if args.action == "validate":
+        from auto_ingest.shorts import uploader
+        issues = uploader.validate_queue(platforms=args.platforms or None)
+        if not issues:
+            print(f"OK: queue intact ({len(uploader.load_queue())} items)")
+            return 0
+        for iss in issues:
+            print(f"[{iss['issue']}] {iss['platform']} {iss['key']} -> {iss['path']}")
+        print(f"{len(issues)} issue(s) found")
+        return 1
+    if args.action == "brand-check":
+        ok, issues = _brand_check(args.brand_dir)
+        if ok:
+            print(f"OK: brand assets + manifest intact at {args.brand_dir}")
+            return 0
+        for iss in issues:
+            print(f"[brand] {iss}")
+        print(f"{len(issues)} brand issue(s) found")
+        return 1
+    if args.action in ("auth", "youtube"):
+        plat = args.target or "youtube"
+        if plat == "youtube":
+            from auto_ingest.shorts import yt_auth
+            tok = yt_auth.bootstrap_token(headless=args.headless)
+        elif plat == "tiktok":
+            from auto_ingest.shorts import tiktok_auth
+            tok = tiktok_auth.bootstrap_token(headless=args.headless)
+        elif plat == "instagram":
+            from auto_ingest.shorts import instagram_auth
+            tok = instagram_auth.bootstrap_token(headless=args.headless)
+        else:
+            print(f"Unknown platform for auth: {plat}")
+            return 2
+        print(f"{plat} authenticated. Token at {tok}")
         return 0
+    if args.action == "tiktok":
+        from auto_ingest.shorts import tiktok_auth
+        tok = tiktok_auth.bootstrap_token(headless=args.headless)
+        print(f"TikTok authenticated. Token at {tok}")
+        return 0
+    if args.action == "instagram":
+        from auto_ingest.shorts import instagram_auth
+        tok = instagram_auth.bootstrap_token(headless=args.headless)
+        print(f"Instagram authenticated. Token at {tok}")
+        return 0
+    if args.action == "ab":
+        sub = args.target or "list"
+        if sub == "plan":
+            return _cmd_ab_plan(args)
+        if sub == "list":
+            return _cmd_ab_list(args)
+        if sub == "choose":
+            return _cmd_ab_choose(args)
+        print(f"Unknown ab sub-action: {sub} (use plan|list|choose)")
+        return 2
+    if args.action == "metrics":
+        return _cmd_publish_metrics(args)
+    if args.action == "schedule":
+        return _cmd_schedule(args)
     # upload
     from auto_ingest.shorts import uploader
+    from auto_ingest.shorts.publish_guard import LivePublishForbidden, require_live_mode
+    if args.dry_run:
+        items = uploader.load_queue()
+        if args.platforms:
+            items = [i for i in items if i.platform in args.platforms]
+        print(f"[dry-run] {len(items)} queued item(s) — what WOULD upload:\n")
+        for it in items:
+            rep = uploader.plan_report(it, plans_dir=args.plans_dir)
+            print(f"[{rep['platform']}] {rep['key']}")
+            print(f"  file:      {rep['file']}  (exists={rep['file_exists']})")
+            print(f"  title:     {rep['title']}")
+            print(f"  desc:      {rep['description']}")
+            print(f"  hashtags:  {rep['hashtags']}")
+            print(f"  caption:   {rep.get('caption', '')}")
+            print(f"  thumbnail: {rep['thumbnail']}  (uses_thumbnail={rep.get('uses_thumbnail')})")
+        print(f"\n[dry-run] {len(items)} item(s) reported. No network/creds used.")
+        return 0
+    try:
+        require_live_mode(where="upload")
+    except LivePublishForbidden as e:
+        print(f"[blocked] {e}")
+        return 2
     attempted = uploader.process_queue(
-        platforms=args.platforms, dry_run=args.dry_run)
-    mode = "dry-run" if args.dry_run else "LIVE"
-    print(f"[{mode}] upload: attempted {attempted} item(s)")
+        platforms=args.platforms, dry_run=False)
+    print(f"[LIVE] upload: attempted {attempted} item(s)")
     return 0
+
+
+def _cmd_schedule(args) -> int:
+    """Activate the posting scheduler: turn a calendar day into queue entries.
+
+    Safe by default — report-only unless ``--apply``. Never uploads, never
+    touches OAuth/creds. With ``--apply``, ready slots (a short_id that exists
+    on disk) are enqueued via the existing idempotent ``publish.queue_for_publish``.
+    """
+    import datetime as _dt
+
+    from auto_ingest.shorts import publish, scheduling, uploader
+
+    # Resolve the target day index. --date may be a YYYY-MM-DD (reinterpreted as
+    # day 1 = today) or a plain 1-based index; default = today = day 1.
+    day_index = 1
+    if args.date:
+        try:
+            _dt.date.fromisoformat(args.date)  # valid date -> treat as "today"
+            day_index = 1
+        except ValueError:
+            try:
+                day_index = int(args.date)
+            except ValueError:
+                print(f"--date must be YYYY-MM-DD or a day index (got {args.date!r})")
+                return 2
+    if day_index < 1:
+        print("--date day index must be >= 1")
+        return 2
+
+    plans = scheduling.build_calendar(days=args.days)
+    slots = [s for dp in plans if dp.day == day_index for s in dp.slots]
+    if not slots:
+        print(f"[schedule] no slots for day {day_index} (calendar has {len(plans)} days)")
+        return 0
+
+    queued = uploader.load_queue()
+    print(f"[schedule] day {day_index} — {len(slots)} slot(s) "
+          f"(apply={args.apply}):\n")
+    n_queued = 0
+    for s in slots:
+        found = None
+        if s.short_id:
+            found = next((q for q in queued if q.key == s.short_id
+                          and q.platform == s.platform), None)
+            title = found.title if found else s.short_id.replace("_", " ")
+            exists = found is not None and Path(found.out_path).exists()
+            status = "READY"
+        else:
+            title = f"({s.note or 'NEEDS_RENDER'})"
+            exists = False
+            status = "NEEDS_RENDER"
+
+        # Best-effort platform-native title without creds.
+        if found is not None:
+            title = uploader._title_for(s.platform,
+                                        uploader.QueueItem(
+                                            key=found.key, topic=found.topic,
+                                            title=found.title, out_path=found.out_path,
+                                            platform=found.platform))
+        print(f"  {s.time_local}  {s.platform:14}  {s.topic}")
+        print(f"      id:    {s.short_id or '—'}  ({status})")
+        print(f"      title: {title}")
+
+        if args.apply and s.short_id and exists:
+            pub = publish.Publishable(
+                key=found.key, topic=found.topic, title=found.title,
+                out_path=found.out_path, platform=found.platform)
+            publish.queue_for_publish(pub, platform=s.platform)
+            n_queued += 1
+            log.info("schedule: enqueued %s -> %s", s.short_id, s.platform)
+
+    mode = "APPLIED" if args.apply else "DRY-RUN"
+    print(f"\n[{mode}] day {day_index}: {len(slots)} slot(s), "
+          f"{n_queued} enqueued.")
+    return 0
+
+
+def _cmd_publish_metrics(args) -> int:
+    from auto_ingest.shorts import feedback, metrics
+
+    store = args.metrics_store
+    sub = args.target or "report"
+    if sub == "ingest":
+        if not args.metrics_file:
+            print("metrics ingest requires --metrics-file")
+            return 2
+        platform = args.platform
+        if args.metrics_format == "json":
+            rows = json.loads(Path(args.metrics_file).read_text(encoding="utf-8"))
+            n = metrics.ingest_dicts(platform, rows, path=store)
+        else:
+            n = metrics.ingest_platform_csv(platform, args.metrics_file, path=store)
+        print(f"Ingested {n} metric record(s) for {platform}")
+        return 0
+    if sub == "report":
+        recs = metrics.load_metrics(path=store)
+        if not recs:
+            print("No metrics recorded yet. Ingest with: "
+                  "publish metrics ingest --platform youtube --file x.csv")
+            return 0
+        rep = feedback.feedback_report(recs)
+        sugg = feedback.suggest_next(recs)
+        if args.as_json:
+            print(json.dumps({"report": rep, "suggestions": sugg}, indent=2))
+        else:
+            print("=== Performance by platform ===")
+            for p, v in rep["by_platform"].items():
+                print(f"  {p}: avg_views={v['avg_views']}  avg_retention={v['avg_retention']}%")
+            print("\n=== Top hooks/topics (by retention) ===")
+            for h in rep["top_hooks"]:
+                print(f"  {h['text']!r}: views={h['avg_views']} retention={h['avg_view_pct']}%")
+            print("\n=== Weak hooks/topics ===")
+            for h in rep["weak_hooks"]:
+                print(f"  {h['text']!r}: views={h['avg_views']} retention={h['avg_view_pct']}%")
+            print("\n=== Topic performance (avg views) ===")
+            for t, v in rep["topic_perf"].items():
+                print(f"  {t}: {v}")
+            pva = rep["pred_vs_actual"]
+            print(f"\nPredicted vs actual (MAE virality~views): {pva['mean_abs_error']} "
+                  f"over {pva['n']} matched posts")
+            print("\n=== Suggestions for next batch ===")
+            for s in sugg:
+                print(f"  - {s}")
+        return 0
+    if sub == "predict":
+        if not args.plan_file:
+            print("metrics predict requires --plan-file <plan.json>")
+            return 2
+        from auto_ingest.shorts import metrics as _m
+        plan = __import__("json").loads(Path(args.plan_file).read_text(encoding="utf-8"))
+        shorts = plan.get("shorts", [])
+        platform = args.platform or "youtube_shorts"
+        n = 0
+        for sd in shorts:
+            from auto_ingest.shorts.models import Plan
+            sh = Plan.from_dict({"shorts": [sd]}).shorts[0]
+            _m.store_prediction_for_short(sh, platform, topic=sh.brief_topic or "",
+                                          path=store)
+            n += 1
+        print(f"Stored virality predictions for {n} short(s) on {platform} "
+              f"(loop: virality.score_short -> metrics.publish_prediction)")
+        return 0
+    print(f"Unknown metrics sub-action: {sub} (use 'ingest', 'report', or 'predict')")
+    return 2
 
 
 def main(argv: List[str] | None = None) -> int:

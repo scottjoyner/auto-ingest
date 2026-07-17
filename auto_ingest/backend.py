@@ -13,6 +13,11 @@ Public API
                                     ("cuda", "cuda", "mps", "cpu"). Use this
                                     wherever a torch model is placed with
                                     ``model.to(...)`` / ``tensor.to(...)``.
+- ``recommended_torch_device() -> str`` Same concrete device string as
+                                    ``torch_device()`` but named for call
+                                    sites that ask "which device should I use"
+                                    (e.g. the speaker linker). Always one of
+                                    "cuda"/"mps"/"cpu", never None.
 - ``backend_info() -> dict``        Structured profile: backend, torch_device,
                                     and availability flags for each backend plus
                                     the GPU name (when known).
@@ -132,6 +137,18 @@ def torch_device() -> str:
         "mlx": "mps",     # Apple Silicon -> Metal Performance Shaders
         "onnx": "cpu",
     }.get(backend, "cpu")
+
+
+def recommended_torch_device() -> str:
+    """Return the torch device to place models on: 'cuda' | 'mps' | 'cpu'.
+
+    Thin, descriptive alias over ``torch_device()`` for call sites (e.g. the
+    speaker linker) that want an explicit "what device should I use" question.
+    Always resolves to a concrete, valid torch device string with CPU as the
+    safe fallback when no accelerator is present.
+    """
+    dev = torch_device()
+    return dev if dev in ("cuda", "mps", "cpu") else "cpu"
 
 
 def backend_info() -> Dict:

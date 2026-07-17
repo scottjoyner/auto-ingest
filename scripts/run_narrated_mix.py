@@ -54,13 +54,63 @@ def _plan_with_retry(fn, *, attempts: int = 20, base_wait: float = 45.0):
             return fn()
         except Exception as e:  # neo4j TransientError (OOM) is transient
             last = e
-            if "MemoryPoolOutOfMemory" in str(e) or "TransientError" in type(e).__name__:
+            etype = type(e).__name__
+            transient = (
+                "MemoryPoolOutOfMemory" in str(e)
+                or "TransientError" in etype
+                or "ServiceUnavailable" in etype   # defunct connection under load
+                or "SessionExpired" in etype
+            )
+            if transient:
                 wait = base_wait * (i + 1)
-                log.warning("Planning hit DB memory pressure; retry %d/%d in %.0fs",
-                            i + 1, attempts, wait)
+                log.warning("Planning hit DB pressure (%s); retry %d/%d in %.0fs",
+                            etype, i + 1, attempts, wait)
                 time.sleep(wait)
                 continue
             raise
+    log.error("Planning failed after %d retries: %s", attempts, last)
+    return None
+
+
+def _plan_with_fresh_driver(fn, *, attempts: int = 20, base_wait: float = 45.0):
+    """Like :func:`_plan_with_retry` but opens a fresh driver per attempt.
+
+    Under sustained host load the shared Neo4j transaction pool not only OOMs
+    but also defuncts the connection entirely; a dead driver poisons every
+    later query in the batch. Opening a new driver for each attempt lets the
+    retry loop recover instead of dying on the first dead socket.
+    """
+    import time
+
+    last = None
+    for i in range(attempts):
+        drv = None
+        try:
+            drv = _driver()
+            return fn(drv)
+        except Exception as e:
+            last = e
+            etype = type(e).__name__
+            transient = (
+                "MemoryPoolOutOfMemory" in str(e)
+                or "TransientError" in etype
+                or "ServiceUnavailable" in etype
+                or "SessionExpired" in etype
+            )
+            if transient:
+                wait = base_wait * (i + 1)
+                log.warning("DB pressure (%s); retry %d/%d in %.0fs",
+                            etype, i + 1, attempts, wait)
+                time.sleep(wait)
+                continue
+            log.error("Non-transient planning error: %s", e)
+            return None
+        finally:
+            if drv is not None:
+                try:
+                    drv.close()
+                except Exception:
+                    pass
     log.error("Planning failed after %d retries: %s", attempts, last)
     return None
 
@@ -73,7 +123,7 @@ def _cached_or_plan(cache_key: str, fn, force: bool = False):
             return Plan.load(path)
         except Exception as e:
             log.warning("Plan cache unreadable (%s); re-planning", e)
-    plan = _plan_with_retry(fn)
+    plan = _plan_with_fresh_driver(fn)
     if plan is not None:
         plan.save(path)
     return plan
@@ -101,58 +151,89 @@ def main(argv=None) -> int:
     out_root.mkdir(parents=True, exist_ok=True)
     os.environ.update(TTS_ENV)
 
-    drv = _driver()
-    try:
-        anchors = _plan_with_retry(
-            lambda: backdrop.select_highway_pool(drv, limit=400))
-        if not anchors:
-            log.error("No highway anchors resolved; aborting")
-            return 1
-        log.info("Resolved %d highway anchors", len(anchors))
+    # Each planning call opens its own fresh driver (via _plan_with_fresh_driver)
+    # so a defunct connection under load can't poison the rest of the batch.
+    anchors = _plan_with_fresh_driver(
+        lambda d: backdrop.select_highway_pool(d, limit=400))
+    if not anchors:
+        log.error("No highway anchors resolved; aborting")
+        return 1
+    log.info("Resolved %d highway anchors", len(anchors))
 
-        plans: list[Plan] = []
-        for seed in args.seeds:
-            def _montage(s=seed):
-                return planner.plan_montage(drv, count=3, dur=30.0, seed=s, limit=400)
-            p = _cached_or_plan(f"montage__{seed}", _montage, force=args.force_replan)
+    plans: list[Plan] = []
+    for seed in args.seeds:
+        def _montage(d, s=seed):
+            return planner.plan_montage(d, count=3, dur=30.0, seed=s, limit=400)
+        p = _cached_or_plan(f"montage__{seed}", _montage, force=args.force_replan)
+        if p:
+            plans.append(p)
+        def _high(d, s=seed):
+            return planner.plan_highlights(
+                d, kinds=("music", "review", "speed"),
+                per_kind=2, dur=20.0, seed=s, limit=400)
+        p = _cached_or_plan(f"highlights__{seed}", _high, force=args.force_replan)
+        if p:
+            plans.append(p)
+        for topic in args.topics:
+            n_clips = 0
+
+            def _disc(d, t=topic, s=seed):
+                clips = curator.discusses_topic(
+                    d, t, min_score=0.6, min_text_len=40, limit=40)
+                if not clips:
+                    return None
+                return planner.plan_discussion(
+                    d, clips, topic=t, short_count=3,
+                    short_dur=30.0, seed=s)
+
+            p = _cached_or_plan(f"discussion_{topic}__{seed}", _disc, force=args.force_replan)
+            if p:
+                n_clips = len(getattr(p, "shorts", []))
+                log.info("topic %s: discussion plan (%d shorts)", topic, n_clips)
+                plans.append(p)
+                continue
+
+            log.info("topic %s: 0 discussion clips -> research path", topic)
+            a = anchors
+
+            def _research(d, t=topic, s=seed, _a=a):
+                try:
+                    brief = curator.curate_brief(d, t)
+                except Exception as e:
+                    log.warning("research fallback skipped (LLM unavailable): %s", e)
+                    return None
+                if brief is None:
+                    log.warning("research fallback skipped (no brief for %s)", t)
+                    return None
+                return planner.plan_shorts(
+                    brief, _a, short_count=3, short_dur=30.0,
+                    seed=s, driver=d)
+
+            rp = _cached_or_plan(f"research_{topic}__{seed}", _research, force=args.force_replan)
+            if rp:
+                log.info("topic %s: research plan (%d shorts)", topic, len(rp.shorts))
+                plans.append(rp)
+        if args.trips:
+            def _trip(d, s=seed):
+                return planner.plan_trip_story(
+                    d, count=args.trips, short_dur=30.0,
+                    shots_per_trip=5, clip_dur=6.0, seed=s)
+            p = _cached_or_plan(f"trip__{seed}", _trip, force=args.force_replan)
             if p:
                 plans.append(p)
-            def _high(s=seed):
-                return planner.plan_highlights(
-                    drv, kinds=("music", "review", "speed"),
-                    per_kind=2, dur=20.0, seed=s, limit=400)
-            p = _cached_or_plan(f"highlights__{seed}", _high, force=args.force_replan)
-            if p:
-                plans.append(p)
-            for topic in args.topics:
-                def _disc(t=topic, s=seed):
-                    clips = curator.discusses_topic(
-                        drv, t, min_score=0.6, min_text_len=40, limit=40)
-                    if not clips:
-                        return None
-                    return planner.plan_discussion(
-                        drv, clips, topic=t, short_count=3,
-                        short_dur=30.0, seed=s)
-                p = _cached_or_plan(f"discussion_{topic}__{seed}", _disc, force=args.force_replan)
-                if p:
-                    plans.append(p)
-            if args.trips:
-                def _trip(s=seed):
-                    return planner.plan_trip_story(
-                        drv, count=args.trips, short_dur=30.0,
-                        shots_per_trip=5, clip_dur=6.0, seed=s)
-                p = _cached_or_plan(f"trip__{seed}", _trip, force=args.force_replan)
-                if p:
-                    plans.append(p)
-    finally:
-        drv.close()
 
     plans = [p for p in plans if p is not None]
     total = 0
+    from auto_ingest.shorts import virality as _vir
+
     for p in plans:
         log.info("Planned %s -> %d shorts", p.topic, len(p.shorts))
+        # Virality report: rank shorts so weak ones are visible before spend.
+        vr = _vir.score_plan(p)
+        log.info("VIRALITY %s: mean=%.1f best=%.1f worst=%.1f ranked=%s",
+                 p.topic, vr["mean"], vr["best"], vr["worst"], vr["ranked"])
         rendered = render.render_plan(
-            p, out_root / p.topic, tts=True, skip_used_clips=True,
+            p, out_root / p.topic, tts=False, skip_used_clips=True,
             skip_history=False, upsert=True, profile_name=args.profile)
         total += len(rendered)
         log.info("Rendered %d/%d for %s", len(rendered), len(p.shorts), p.topic)

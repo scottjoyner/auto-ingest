@@ -1,0 +1,25 @@
+{
+  "brand_name": "Research in the Fast Lane",
+  "handles": {
+    "youtube": "ResearchInTheFastLane",
+    "tiktok": "@researchfastlane",
+    "instagram": "@researchfastlane"
+  },
+  "bios": {
+    "youtube": "AI/ML research, explained before you scroll. Built from a real research graph + my own drives. Part of a series — new here.",
+    "tiktok": "papers in 30 seconds | AI/ML explainers from a real research graph | part of the series",
+    "instagram": "AI/ML, bite-sized. Research shorts from a real knowledge graph. Link in bio for the series."
+  },
+  "tagline": "AI/ML papers, explained before you scroll.",
+  "assets": {
+    "avatar": "avatar.png",
+    "banner_youtube": "banner_youtube.png"
+  },
+  "palette": {
+    "ink": [11, 14, 20],
+    "cyan": [0, 200, 255],
+    "white": [255, 255, 255],
+    "black": [0, 0, 0],
+    "amber": [255, 196, 0]
+  }
+}

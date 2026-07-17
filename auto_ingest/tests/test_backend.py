@@ -42,6 +42,13 @@ def test_real_host_detect():
     assert b in {"cuda", "rocm", "mlx", "onnx"}
 
 
+def test_real_host_recommended_torch_device():
+    _reload_clear()
+    dev = backend.recommended_torch_device()
+    # Must be a concrete, valid torch device string — never None/empty.
+    assert dev in {"cuda", "mps", "cpu"}
+
+
 def test_real_host_device_mapping():
     _reload_clear()
     dev = backend.torch_device()
@@ -93,6 +100,7 @@ def test_simulated_cuda():
         importlib.reload(backend)
         assert backend.detect_backend() == "cuda"
         assert backend.torch_device() == "cuda"
+        assert backend.recommended_torch_device() == "cuda"
         info = backend.backend_info()
         assert info["backend"] == "cuda"
         assert info["cuda_available"] is True
@@ -114,6 +122,7 @@ def test_simulated_rocm():
         importlib.reload(backend)
         assert backend.detect_backend() == "rocm"
         assert backend.torch_device() == "cuda"
+        assert backend.recommended_torch_device() == "cuda"
         info = backend.backend_info()
         assert info["backend"] == "rocm"
         assert info["rocm_available"] is True
@@ -133,6 +142,7 @@ def test_simulated_mlx():
         importlib.reload(backend)
         assert backend.detect_backend() == "mlx"
         assert backend.torch_device() == "mps"
+        assert backend.recommended_torch_device() == "mps"
         info = backend.backend_info()
         assert info["backend"] == "mlx"
         assert info["mlx_available"] is True
@@ -158,6 +168,7 @@ def test_simulated_onnx():
         importlib.reload(backend)
         assert backend.detect_backend() == "onnx"
         assert backend.torch_device() == "cpu"
+        assert backend.recommended_torch_device() == "cpu"
         info = backend.backend_info()
         assert info["backend"] == "onnx"
         assert info["onnx_available"] is True

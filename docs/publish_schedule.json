@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "niche": "ai_ml_research_shorts",
+  "brand": {
+    "name": "Research in the Fast Lane",
+    "handle_stem": "researchfastlane",
+    "youtube": "ResearchInTheFastLane",
+    "tiktok": "@researchfastlane",
+    "instagram": "@researchfastlane"
+  },
+  "platforms": ["youtube_shorts", "tiktok", "instagram"],
+  "cadence": {
+    "posts_per_day_per_platform": [2, 3],
+    "total_per_day_range": [6, 9],
+    "windows_local": {
+      "youtube_shorts": ["12:00", "18:00", "21:00"],
+      "tiktok": ["11:00", "17:00", "20:00"],
+      "instagram": ["12:30", "19:00", "21:30"]
+    }
+  },
+  "warmup_days": {
+    "1-3": {"posts_per_day_total": 1, "platforms": ["youtube_shorts"]},
+    "4-7": {"posts_per_day_total": 3, "platforms": ["youtube_shorts", "tiktok", "instagram"]},
+    "8-14": {"posts_per_day_total": 6, "platforms": ["youtube_shorts", "tiktok", "instagram"]},
+    "15+": {"posts_per_day_total": 9, "platforms": ["youtube_shorts", "tiktok", "instagram"]}
+  },
+  "pillars": ["concept", "paper_bust", "myth_fact", "own_words", "series"],
+  "topic_rotation_7day": [
+    "large_language_models",
+    "diffusion_models",
+    "graph_neural_networks",
+    "reinforcement_learning",
+    "computer_vision",
+    "retrieval_augmented_generation",
+    "robotics"
+  ],
+  "filler_topics": ["montage", "highlights", "trip_story"],
+  "rotation_rule": "Assign topic_rotation_7day[day_index % 7] as the lead topic for that day; interleave filler_topics for the 3rd daily slot when 3 posts/platform are scheduled.",
+  "isolation": {
+    "dedicated_email": true,
+    "dedicated_virtual_number": true,
+    "separate_browser_profile": true,
+    "no_cross_interaction": true,
+    "personal_accounts_excluded": true
+  }
+}

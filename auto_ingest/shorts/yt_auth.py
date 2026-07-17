@@ -85,8 +85,8 @@ def bootstrap_token(secret_path: Optional[Path] = None,
 
 def load_credentials(token_path: Optional[Path] = None):
     """Load saved creds, refreshing if expired (requires refresh_token)."""
-    from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
 
     token = Path(token_path) if token_path else TOKEN_DEFAULT
     if not token.exists():
@@ -103,6 +103,13 @@ def load_credentials(token_path: Optional[Path] = None):
             "scopes": creds.scopes,
         }, indent=2))
     return creds
+
+
+def safe_to_run() -> bool:
+    """True only when live publishing is explicitly opted in and this platform
+    has credentials present (see ``publish_guard.safe_to_run``)."""
+    from auto_ingest.shorts.publish_guard import safe_to_run as _safe
+    return _safe()
 
 
 if __name__ == "__main__":

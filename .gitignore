@@ -4,10 +4,11 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+# local env files (may contain real secrets) — .env.example stays tracked as a template
 .env
+.env-ssd
 logs/
 .venv/
-.env/
 .env
 
 # speaker-linking generated caches
