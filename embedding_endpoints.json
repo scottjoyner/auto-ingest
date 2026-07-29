@@ -1,0 +1,72 @@
+{
+  "_comment": "Fleet embedding-endpoint registry. Consumed by get_embedding_endpoint() so KG embedding crons never hardcode one host. Any node can serve embeddings (llama-server from SSD + nomic GGUF on SSD); clients fail over to the first reachable endpoint in priority order. Update this file (on SSD, shared across fleet) when you bring a node up/down as an embedding server. The nomic GGUF lives at /media/scott/SSD_4TB/models/nomic-embed-text-v1.5.Q4_K_M.gguf and the portable llama-server binary at /media/scott/SSD_4TB/fleet-tools/llama-server-linux-x86_64-avx2/llama-server.",
+  "model": "text-embedding-nomic-embed-text-v1.5",
+  "endpoints": [
+    {
+      "name": "x1-370 (hub, primary)",
+      "url": "http://100.64.43.123:1234/v1/embeddings",
+      "health": "http://100.64.43.123:1234/v1/models",
+      "priority": 1,
+      "note": "LM Studio on the hub. Currently taken down for model benchmarking — do not rely on it right now."
+    },
+    {
+      "name": "destroyer (LIVE)",
+      "url": "http://100.81.57.77:1234/v1/embeddings",
+      "health": "http://100.81.57.77:1234/v1/models",
+      "priority": 2,
+      "note": "LM Studio running with nomic loaded. ACTIVE — verified backfill through it."
+    },
+    {
+      "name": "deathstar (LIVE)",
+      "url": "http://100.78.106.121:1235/v1/embeddings",
+      "health": "http://100.78.106.121:1235/v1/models",
+      "priority": 3,
+      "note": "llama-server from SSD on :1235 (headless, separate from its ornith-35b GUI). ACTIVE."
+    },
+    {
+      "name": "lenovo (LIVE)",
+      "url": "http://100.105.137.98:1235/v1/embeddings",
+      "health": "http://100.105.137.98:1235/v1/models",
+      "priority": 4,
+      "note": "llama-server from SSD on :1235 (separate from its refinedtoolcall GUI). ACTIVE."
+    },
+    {
+      "name": "joyner (LIVE)",
+      "url": "http://100.83.215.83:1235/v1/embeddings",
+      "health": "http://100.83.215.83:1235/v1/models",
+      "priority": 5,
+      "note": "llama-server from SSD on :1235 (separate from its refinedtoolcall GUI). ACTIVE. Low RAM (5.4G) — fine for nomic Q4."
+    },
+    {
+      "name": "beelink (LIVE)",
+      "url": "http://100.85.72.121:1235/v1/embeddings",
+      "health": "http://100.85.72.121:1235/v1/models",
+      "priority": 6,
+      "note": "llama-server from SSD on :1235. Onboarded via hub lateral (key pushed via password). ACTIVE."
+    },
+    {
+      "name": "xwing tunnel (legacy)",
+      "url": "http://127.0.0.1:1235/v1/embeddings",
+      "health": "http://127.0.0.1:1235/v1/models",
+      "priority": 9,
+      "note": "SSH tunnel xwing->hub. Dead while hub LM Studio is down."
+    }
+  ],
+  "pending_nodes": [
+    {
+      "name": "macbookair",
+      "ip": "100.85.64.117",
+      "blocker": "arm64 Mac, no SSD/NAS mount, GUI-only LM Studio (no CLI), linux-x86_64 binary incompatible. To onboard: mount SSD_4TB on the mac + use an arm64 llama-server (or LM Studio headless serve). Reachable from hub as scottjoyner."
+    },
+    {
+      "name": "optiplex",
+      "ip": "100.69.158.114",
+      "blocker": "SSH timed out — node offline or firewall. Verify it is up."
+    },
+    {
+      "name": "raspberrypi",
+      "ip": "100.114.88.89",
+      "blocker": "Only 3.7G RAM, no lm-studio. Too weak for reliable embedding serving; skip unless needed."
+    }
+  ]
+}

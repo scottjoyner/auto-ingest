@@ -262,7 +262,7 @@ def get_neo4j_config():
             cfg_pass = _resolve_env(matched.get('neo4j_password'), None)
 
     return {
-        'uri': os.environ.get('NEO4J_URI') or cfg_uri or 'bolt://localhost:7687',
+        'uri': os.environ.get('NEO4J_URI') or cfg_uri or 'bolt://100.64.43.123:7687',
         'user': os.environ.get('NEO4J_USER') or cfg_user or 'neo4j',
         'password': get_neo4j_password(cfg_pass),
     }
@@ -290,7 +290,7 @@ def get_neo4j_env():
     """
     cfg = get_neo4j_config()
     return (
-        cfg.get("uri", os.environ.get("NEO4J_URI", "bolt://localhost:7687")),
+        cfg.get("uri", os.environ.get("NEO4J_URI", "bolt://100.64.43.123:7687")),
         cfg.get("user", os.environ.get("NEO4J_USER", "neo4j")),
         cfg.get("password", os.environ.get("NEO4J_PASSWORD", "")),
         get_neo4j_db(),
@@ -386,7 +386,7 @@ def get_neo4j_driver(database=None):
     except Exception:
         return None
     cfg = get_neo4j_config()
-    uri = cfg.get('uri') or os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
+    uri = cfg.get('uri') or os.environ.get('NEO4J_URI', 'bolt://100.64.43.123:7687')
     user = cfg.get('user') or os.environ.get('NEO4J_USER', 'neo4j')
     password = cfg.get('password') or os.environ.get('NEO4J_PASSWORD', '')
     return GraphDatabase.driver(uri, auth=(user, password))
