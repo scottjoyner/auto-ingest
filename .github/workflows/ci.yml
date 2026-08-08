@@ -150,5 +150,8 @@ jobs:
       - name: Build production image
         run: docker build --pull -t auto-ingest:ci .
 
+      - name: Verify installed dependency graph
+        run: docker run --rm auto-ingest:ci python -m pip check
+
       - name: Smoke image entrypoint
         run: docker run --rm auto-ingest:ci python -m content_os --help
