@@ -21,7 +21,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install "pydantic>=2.6" "PyYAML>=6.0" "neo4j>=5.24" \
                       "fastapi" "python-multipart" "httpx" "numpy" \
-                      "opencv-python-headless" "pytest>=8.0" "pytest-cov>=6.0" \
+                      "opencv-python-headless" "pillow" "pytest>=8.0" "pytest-cov>=6.0" \
                       "ruff>=0.5" "pydantic-settings"
 
       - name: Ruff
@@ -64,7 +64,7 @@ jobs:
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install "pydantic>=2.6" "PyYAML>=6.0" "neo4j>=5.24" \
                       "fastapi" "python-multipart" "httpx" "numpy" \
-                      "opencv-python-headless" "pytest>=8.0" "pytest-cov>=6.0" \
+                      "opencv-python-headless" "pillow" "pytest>=8.0" "pytest-cov>=6.0" \
                       "pydantic-settings" "moviepy>=1.0"
           .venv/bin/python -m pytest tests/ -q -m "not integration and not ml and not e2e and not destructive"
 
