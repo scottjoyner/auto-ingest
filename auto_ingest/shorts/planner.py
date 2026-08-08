@@ -83,10 +83,6 @@ def _distribute_cues(title: str, hook: str, points: List[str], sources: List,
         cues.append(Cue(start=round(3.6 + len(points) * SECS_PER_CUE, 2),
                          end=round(3.6 + (len(points) + 1) * SECS_PER_CUE, 2),
                          text=src, kind=SOURCE_KIND))
-    # Curiosity-gap reveal: pose a question, then karaoke-unfold a twist answer.
-    # Placed AFTER the points/sources (not overlapping them) and before the end
-    # payoff so retention peaks late. The answer is real graph-mined text when
-    # ``reveal_text`` is supplied, else a templated twist line.
     content_end = 3.6 + (len(points) + (1 if sources else 0)) * SECS_PER_CUE
     if duration > 12.0 and content_end < duration - 4.0:
         twist = reveal_text or (
@@ -96,7 +92,6 @@ def _distribute_cues(title: str, hook: str, points: List[str], sources: List,
         question = f"So what's the catch with {b.title or b.topic}?"
         cues += curiosity_reveal(question, twist, duration,
                                  start=round(content_end + 0.2, 2))
-    # Optional real myth/fact pair (misconception -> paper correction).
     if myth_fact:
         mc, fc = myth_fact
         cues += myth_fact_pair(mc, fc)
@@ -112,20 +107,12 @@ def plan_shorts(brief: Brief, anchors: List[Dict[str, object]], *,
                 shots_per_short: int = 3, seed: int = 1,
                 clip_dur: float = 6.0, min_gap_sec: float = 8.0,
                 topic_prefix: str = "", driver=None) -> Plan:
-    """Create a :class:`Plan` of ``short_count`` shorts from a brief.
-
-    If ``driver`` is supplied, real graph content is mined (best-effort, never
-    fatal) to power the reveal answer + an optional myth/fact pair.
-    """
-    import random
+    """Create a :class:`Plan` of ``short_count`` shorts from a brief."""
     rnd = random.Random(seed)
-
-    # Choose how many points per short and rotate through them.
     points = list(brief.points) or [brief.hook]
     if not points:
         points = ["(no points curated)"]
 
-    # Mine real content once per topic (not per short) when a driver is given.
     reveal_text = None
     myth_fact = None
     if driver is not None:
@@ -133,20 +120,14 @@ def plan_shorts(brief: Brief, anchors: List[Dict[str, object]], *,
             from auto_ingest.shorts import content_miner
             reveal_text = content_miner.reveal_twist_for_topic(driver, brief.topic)
             myth_fact = content_miner.myth_fact_for_topic(driver, brief.topic)
-        except Exception as e:  # graph pressure / missing data -> templated fallback
+        except Exception as e:
             log.info("Content mining skipped for %s: %s", brief.topic, e)
 
-    # Disjoint, evenly-strided partition of ``points`` across the shorts so
-    # every point appears in exactly one short and none are dropped. Stride is
-    # ceil(len(points)/short_count); short s gets points[start:start+stride]
-    # (clamped to the end). Deterministic given ``seed`` (no RNG used here).
     stride = (len(points) + short_count - 1) // max(short_count, 1)
-
     shorts: List[PlannedShort] = []
     for s_idx in range(short_count):
         start = s_idx * stride
         window = points[start:start + stride] or points[:1]
-
         cues = _distribute_cues(
             title=brief.title,
             hook=brief.hook if s_idx == 0 else "",
@@ -159,16 +140,13 @@ def plan_shorts(brief: Brief, anchors: List[Dict[str, object]], *,
             reveal_text=reveal_text if s_idx == short_count - 1 else None,
             myth_fact=myth_fact if s_idx == 0 else None,
         )
-
         shots = _pick_shots_deterministic(
             anchors, count=shots_per_short, min_gap_sec=min_gap_sec,
             clip_dur=clip_dur, rng=rnd,
         )
-
         title = brief.title
         if short_count > 1:
             title = f"{topic_prefix}{brief.title} — Part {s_idx + 1}"
-
         shorts.append(PlannedShort(
             id=uuid.uuid5(uuid.NAMESPACE_URL, f"{brief.topic}:{seed}:{s_idx}").hex[:10],
             brief_topic=brief.topic,
@@ -189,13 +167,7 @@ def plan_montage(driver, *, count: int = 3, dur: float = 30.0,
                  mood: Optional[str] = None, limit: int = 400,
                  seed: Optional[int] = None, shots_per_short: int = 3,
                  clip_dur: float = 6.0, min_gap_sec: float = 8.0) -> Plan:
-    """Plan ``count`` pure-footage ambient montages (no research narration).
-
-    Picks highway clips via :func:`backdrop.select_highway_pool` +
-    :func:`backdrop.pick_shots`, then builds light mood/metadata captions
-    (e.g. "72 mph • I-15 • 2:14 PM") from each shot's ``mph``/time. Uses the
-    same Plan/PlannedShort/Cue model so the normal renderer handles output.
-    """
+    """Plan ``count`` pure-footage ambient montages (no research narration)."""
     rnd = random.Random(seed)
     anchors = backdrop.select_highway_pool(driver, limit=limit)
     if not anchors:
@@ -203,7 +175,6 @@ def plan_montage(driver, *, count: int = 3, dur: float = 30.0,
 
     road, vibe = MOOD_PRESETS.get(mood, MOOD_PRESETS[None])
     base_clock = datetime(2025, 1, 1, 12, 0, 0) + timedelta(minutes=int(rnd.random() * 600))
-
     shorts: List[PlannedShort] = []
     for s_idx in range(count):
         seed_i = int(rnd.random() * 1e9)
@@ -262,19 +233,8 @@ def _montage_cues(shots: List[Shot], dur: float, *, road: str, vibe: str,
 def plan_highlights(driver, *, kinds: tuple = ("music", "review", "speed"),
                     per_kind: int = 2, dur: float = 20.0, limit: int = 400,
                     seed: Optional[int] = None) -> Plan:
-    """Plan punchy event-highlight shorts mined from graph event flags.
-
-    Three event kinds are mined:
-      * ``music``  — Segment WHERE is_lyrics=true OR music_overlap=true
-      * ``review`` — Segment WHERE review_needed=true
-      * ``speed``  — highway DashcamClip frames with mph > SPEED_MPH_MIN
-
-    Each found event becomes one :class:`PlannedShort` backed by highway B-roll
-    (resolved via :func:`backdrop._fr_path_for_key`) with a short auto-caption.
-    Kinds with no events are silently skipped.
-    """
+    """Plan punchy event-highlight shorts mined from graph event flags."""
     root = __import__("auto_ingest.shorts.backdrop", fromlist=["_dashcam_root"])._dashcam_root()
-
     events: List[Dict[str, object]] = []
     if "music" in kinds:
         events += _mine_segment_events(driver, "music", limit, _MUSIC_QUERY)
@@ -290,7 +250,6 @@ def plan_highlights(driver, *, kinds: tuple = ("music", "review", "speed"),
         if used.get(k, 0) >= per_kind:
             continue
         used[k] = used.get(k, 0) + 1
-
         clip_key = ev["clip_key"]
         fr = backdrop._fr_path_for_key(clip_key, root)
         shot = Shot(
@@ -347,12 +306,7 @@ def _kind_present(events: List[Dict[str, object]], kind: str) -> bool:
 
 
 def _read_rows(driver, operation):
-    """Run a graph read through an injected driver or production retry layer.
-
-    Tests, transactions, and callers that already own a driver must stay on that
-    driver. Only callers that pass ``None`` should create fresh retry drivers.
-    This prevents hidden live connections and preserves deterministic injection.
-    """
+    """Use an injected driver when supplied, otherwise production retry."""
     if driver is not None:
         return operation(driver) or []
     from auto_ingest.shorts import db_retry
@@ -439,27 +393,15 @@ def _pick_shots_deterministic(anchors, *, count, min_gap_sec, clip_dur, rng) -> 
                       clip_dur=clip_dur, rng_seed=seed)
 
 
-
 def plan_discussion(driver, clips, *, topic: str = "discussion",
                     short_count: int = 3, short_dur: float = 12.0,
                     clip_dur: float = 8.0, seed: Optional[int] = None) -> Plan:
-    """Plan shorts from real spoken DiscussionClips, time-aligned to the dashcam
-    moment each line was said.
-
-    Each clip carries ``clip_key`` (-> DashcamClip) and ``start_sec`` (offset
-    within that clip), so the B-roll shot is taken AT the utterance, not a random
-    highway anchor. Captions are the viewer's own words. Falls back to the
-    highway pool for any clip whose source footage is not resolvable here.
-    """
+    """Plan shorts from real spoken DiscussionClips, time-aligned to dashcam."""
     from auto_ingest.shorts import backdrop, curator
     from auto_ingest.shorts.curator import DiscussionClip
 
     root = backdrop._dashcam_root()
     brief = curator.brief_from_discussions(topic, list(clips))
-
-    # Resolve each clip's source footage; keep only those we can show
-    # time-aligned. Audio-sourced utterances (no clip_key) fall back to the
-    # highway pool below.
     resolvable: List[DiscussionClip] = []
     for c in clips:
         if not c.clip_key:
@@ -472,7 +414,6 @@ def plan_discussion(driver, clips, *, topic: str = "discussion",
     pool = backdrop.select_highway_pool(driver, limit=200)
     pool_shots = backdrop.pick_shots(pool, count=1, min_gap_sec=0.0,
                                      clip_dur=clip_dur, rng_seed=seed or 1)
-    # Mine real content for the reveal answer once (best-effort).
     reveal_text = None
     try:
         from auto_ingest.shorts import content_miner
@@ -489,8 +430,6 @@ def plan_discussion(driver, clips, *, topic: str = "discussion",
             shot = Shot(clip_key=c.clip_key, fr_path=str(fr),
                         t_sec=t0, dur=clip_dur, mph=None)
         else:
-            # Audio-sourced utterance (no dashcam clip): use a generic
-            # highway anchor as B-roll instead of the exact moment.
             a = pool_shots[0] if pool_shots else {}
             src = "highway-pool (audio source, no clip_key)"
             shot = Shot(clip_key=str(a.get("clip_key", "")),
@@ -498,8 +437,6 @@ def plan_discussion(driver, clips, *, topic: str = "discussion",
                         t_sec=float(a.get("t_sec", 0.0)),
                         dur=clip_dur, mph=a.get("mph"))
             c = clips[s_idx % len(clips)]
-        # Editorial stack: real-words hook + the utterance as the point, plus a
-        # curiosity reveal + payoff threaded to the end card.
         cues = _distribute_cues(
             title=brief.title,
             hook=c.text.strip()[:90],
@@ -530,6 +467,7 @@ def plan_discussion(driver, clips, *, topic: str = "discussion",
     log.info("Planned %d discussion short(s) for %s (time-aligned)", len(shorts), topic)
     return plan
 
+
 def iterate_plan(prev: Plan, anchors: List[Dict[str, object]], *,
                  short_count: Optional[int] = None, short_dur: Optional[float] = None,
                  seed: Optional[int] = None, shots_per_short: Optional[int] = None,
@@ -538,12 +476,9 @@ def iterate_plan(prev: Plan, anchors: List[Dict[str, object]], *,
     """Produce the next iteration of a plan (new seed / counts, drop rejects)."""
     reject = set(reject_ids or [])
     kept = [s for s in prev.shorts if s.id not in reject and s.status != "rejected"]
-    # Carry over rendered shorts so we don't re-plan what already exists.
     carried = [s for s in kept if s.status == "rendered"]
-
     new_count = short_count or max(1, len(prev.shorts) - len(carried))
     new_seed = seed if seed is not None else prev.iteration + 7
-
     fresh = plan_shorts(
         prev.brief,
         anchors,
@@ -564,27 +499,15 @@ def _max_dur(plan: Plan) -> float:
     return max((s.duration() for s in plan.shorts), default=30.0) or 30.0
 
 
-
 def plan_trip_story(driver, *, trip_key: Optional[str] = None,
                    count: int = 3, short_dur: float = 30.0,
                    shots_per_trip: int = 4, clip_dur: float = 6.0,
                    seed: Optional[int] = None) -> Plan:
-    """Plan 'Trip Story' shorts that follow a real journey.
-
-    Picks ``count`` Trips and sequences their DashcamClips (via
-    ``DashcamClip-[:IN_TRIP]->Trip``) in time order as B-roll, overlaying
-    the ``Stop`` geofences passed along the way ('Scott 6 MI Raleigh
-    house', ...) as captions. Reuses the same Plan/PlannedShort/Cue model
-    so the normal renderer handles output. No research / no LLM.
-
-    ``trip_key`` selects one specific Trip (by uniqueKey); otherwise the
-    ``count`` longest Trips (by clipCount) are used.
-    """
+    """Plan Trip Story shorts that follow a real journey."""
     from auto_ingest.shorts import backdrop
 
     root = backdrop._dashcam_root()
     trips = _select_trips(driver, trip_key=trip_key, count=count)
-
     shorts: List[PlannedShort] = []
     for t in trips:
         clips = _trip_clips(driver, t["key"], limit=shots_per_trip)
@@ -604,8 +527,8 @@ def plan_trip_story(driver, *, trip_key: Optional[str] = None,
             geo = c.get("geofence") or c.get("location") or ""
             label = f"{geo}" if geo else (c.get("time_label") or f"clip {i + 1}")
             cues.append(Cue(start=round(lead + i * step, 2),
-                         end=round(lead + i * step + min(step, clip_dur), 2),
-                         text=label[:80], kind="trip"))
+                            end=round(lead + i * step + min(step, clip_dur), 2),
+                            text=label[:80], kind="trip"))
         if not shots:
             continue
         title = (t.get("geofence") or t.get("tracker") or "Trip Story")
@@ -639,10 +562,6 @@ def _select_trips(driver, *, trip_key: Optional[str], count: int) -> List[Dict[s
                 k=trip_key,
             ).data()
         else:
-            # Dashcam Trips (footage via IN_TRIP) are disjoint from the
-            # phone-tracker Trips that carry located Stops, so pick trips
-            # that actually HAVE dashcam clips; places are layered on via
-            # time-nearest Stop in _trip_clips.
             rows = sess.run(
                 "MATCH (c:DashcamClip)-[:IN_TRIP]->(t:Trip) "
                 "WITH t, count(DISTINCT c) AS clips "
@@ -656,12 +575,7 @@ def _select_trips(driver, *, trip_key: Optional[str], count: int) -> List[Dict[s
 
 
 def _clip_start_from_key(key: str) -> Optional[float]:
-    """Best-effort absolute start time (epoch seconds) parsed from a clip key.
-
-    Dashcam clip keys look like ``2025_0710_204641_F`` (YYYY_MMDD_HHMMSS),
-    which embeds the true start instant even though ``DashcamClip.startTime``
-    is NULL in this graph. Returns None if it can't be parsed.
-    """
+    """Best-effort absolute start time (epoch seconds) parsed from a clip key."""
     import datetime as _dt
     parts = key.replace("_F", "").replace("_R", "").split("_")
     if len(parts) >= 3:
@@ -686,7 +600,6 @@ def _nearest_place(lat: float, lon: float, places: List[Dict[str, object]],
         plat, plon = p.get("lat"), p.get("lon")
         if plat is None or plon is None:
             continue
-        # Haversine-ish great-circle distance in miles (good enough for labels).
         r = 3959.0
         phi1, phi2 = math.radians(lat), math.radians(plat)
         dphi = math.radians(plat - lat)
@@ -702,9 +615,6 @@ def _nearest_place(lat: float, lon: float, places: List[Dict[str, object]],
 
 def _trip_clips(driver, trip_key: str, *, limit: int) -> List[Dict[str, object]]:
     with driver.session() as sess:
-        # Clips carry their geo-trace as Frames (lat/lon/mph). DashcamClip
-        # startTime is NULL, but the clip KEY embeds the true start instant,
-        # so we order chronologically and pull each clip's averaged position.
         clips = sess.run(
             """
             MATCH (c:DashcamClip)-[:IN_TRIP]->(t:Trip {uniqueKey:$k})
@@ -721,7 +631,6 @@ def _trip_clips(driver, trip_key: str, *, limit: int) -> List[Dict[str, object]]
             "p.lat AS lat, p.lon AS lon",
         ).data()
 
-    # Order chronologically by the clip key's embedded timestamp.
     def _start(r):
         return _clip_start_from_key(r.get("clip_key") or "")
     clips.sort(key=lambda r: _start(r) or 0.0)
@@ -754,7 +663,7 @@ def _trip_clips(driver, trip_key: str, *, limit: int) -> List[Dict[str, object]]
     return out
 
 
-def _nearest_stop(cstart, stop_ts):  # retained for API compat; unused
+def _nearest_stop(cstart, stop_ts):
     if not stop_ts or cstart is None:
         return {}
     best = min(stop_ts, key=lambda x: abs(float(x[0]) - float(cstart)))
