@@ -8,6 +8,15 @@ on:
 jobs:
   static-and-unit:
     runs-on: ubuntu-latest
+    env:
+      FILESERVER_ROOT: /tmp/auto-ingest/fileserver
+      HOT_STORAGE_ROOT: /tmp/auto-ingest/hot
+      COLD_STORAGE_ROOT: /tmp/auto-ingest/cold
+      AUDIO_ROOT: /tmp/auto-ingest/audio
+      DASHCAM_ROOT: /tmp/auto-ingest/dashcam
+      BODYCAM_ROOT: /tmp/auto-ingest/bodycam
+      TRANSCRIPT_ROOT: /tmp/auto-ingest/transcripts
+      NEXTCLOUD_ROOT: /tmp/auto-ingest/nextcloud
     steps:
       - uses: actions/checkout@v4
 
@@ -15,6 +24,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Prepare portable test roots
+        run: |
+          mkdir -p "$FILESERVER_ROOT" "$HOT_STORAGE_ROOT" "$COLD_STORAGE_ROOT" \
+                   "$AUDIO_ROOT" "$DASHCAM_ROOT" "$BODYCAM_ROOT" \
+                   "$TRANSCRIPT_ROOT" "$NEXTCLOUD_ROOT"
+          touch "$FILESERVER_ROOT/.keep" "$HOT_STORAGE_ROOT/.keep" "$COLD_STORAGE_ROOT/.keep"
 
       - name: Install lightweight test dependencies
         run: |
