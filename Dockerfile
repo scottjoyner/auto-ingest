@@ -24,8 +24,8 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
 # used by 01_precompute_music_segments.py, not by the supported container
 # services, and otherwise pulls tensorflow[and-cuda] plus multi-GB NVIDIA wheels.
 #
-# Also ignore the stale typing_extensions pin and reinstall a version satisfying
-# Pydantic/Pydantic-core after the snapshot is applied.
+# Also ignore stale environment-specific pins that make a fresh Linux image
+# internally inconsistent. pip check below remains the final dependency gate.
 RUN sed -E \
       -e '/^openai-whisper/d' \
       -e '/^nvidia-/d' \
@@ -35,6 +35,7 @@ RUN sed -E \
       -e '/^inaSpeechSegmenter([<=>]|$)/d' \
       -e '/^triton([<=>]|$)/d' \
       -e '/^typing_extensions([<=>]|$)/d' \
+      -e '/^ninja([<=>]|$)/d' \
       /app/requirements.txt > /tmp/reqs.txt \
     && pip install --no-cache-dir -r /tmp/reqs.txt \
        --extra-index-url https://download.pytorch.org/whl/cpu \
