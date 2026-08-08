@@ -1,8 +1,4 @@
-"""Real Neo4j contract tests for the PhoneLog spatial migration.
-
-These tests run only in the integration CI lane. They intentionally mutate
-isolated fixture nodes and prove the migration is correct and idempotent.
-"""
+"""Real Neo4j contract tests for the PhoneLog spatial migration."""
 from __future__ import annotations
 
 import importlib.util
@@ -33,7 +29,6 @@ def driver():
     password = os.environ.get("NEO4J_TEST_PASSWORD")
     if not uri or not password:
         pytest.skip("NEO4J_TEST_URI/NEO4J_TEST_PASSWORD are required")
-
     drv = GraphDatabase.driver(uri, auth=(user, password))
     drv.verify_connectivity()
     yield drv
@@ -50,8 +45,11 @@ def fixture_graph(driver):
                 fixture_id: 'flat', latitude: 35.2271, longitude: -80.8431
             })
             CREATE (:PhoneLog:HardeningFixture {
-                fixture_id: 'geometry',
-                geometry: {coordinates: [-80.8500, 35.2300]}
+                fixture_id: 'coordinates', coordinates: [-80.8500, 35.2300]
+            })
+            CREATE (:PhoneLog:HardeningFixture {
+                fixture_id: 'legacy-geometry-string',
+                geometry: "{'type': 'Point', 'coordinates': [-80.86, 35.24]}"
             })
             CREATE (:PhoneLog:HardeningFixture {fixture_id: 'no-coordinates'})
             """
@@ -61,16 +59,13 @@ def fixture_graph(driver):
         session.run("MATCH (n:HardeningFixture) DETACH DELETE n").consume()
 
 
-def test_phonelog_spatial_migration_is_correct_and_idempotent(driver, monkeypatch):
-    monkeypatch.setenv("NEO4J_DB", "neo4j")
+def test_phonelog_spatial_migration_is_correct_and_idempotent(driver):
     migration = _load_migration_module()
     migration.NEO4J_DB = "neo4j"
 
-    before = migration.count_missing_loc(driver)
-    assert before >= 3
-
-    migrated = migration.migrate_batch(driver, batch_size=100, dry_run=False)
-    assert migrated >= 2
+    assert migration.count_missing_loc(driver) >= 4
+    assert migration.count_eligible(driver) == 2
+    assert migration.migrate_batch(driver, batch_size=100, dry_run=False) == 2
 
     with driver.session(database="neo4j") as session:
         rows = session.run(
@@ -88,26 +83,31 @@ def test_phonelog_spatial_migration_is_correct_and_idempotent(driver, monkeypatc
     assert by_id["flat"]["has_loc"] is True
     assert by_id["flat"]["latitude"] == pytest.approx(35.2271)
     assert by_id["flat"]["longitude"] == pytest.approx(-80.8431)
-    assert by_id["geometry"]["has_loc"] is True
-    assert by_id["geometry"]["latitude"] == pytest.approx(35.2300)
-    assert by_id["geometry"]["longitude"] == pytest.approx(-80.8500)
+    assert by_id["coordinates"]["has_loc"] is True
+    assert by_id["coordinates"]["latitude"] == pytest.approx(35.2300)
+    assert by_id["coordinates"]["longitude"] == pytest.approx(-80.8500)
+    assert by_id["legacy-geometry-string"]["has_loc"] is False
     assert by_id["no-coordinates"]["has_loc"] is False
 
-    # A second pass must not rewrite already-migrated fixture rows.
-    second = migration.migrate_batch(driver, batch_size=100, dry_run=False)
-    assert second == 0
+    assert migration.migrate_batch(driver, batch_size=100, dry_run=False) == 0
+    assert migration.count_eligible(driver) == 0
 
 
-def test_phonelog_spatial_dry_run_does_not_write(driver, monkeypatch):
-    monkeypatch.setenv("NEO4J_DB", "neo4j")
+def test_phonelog_spatial_dry_run_does_not_write(driver):
     migration = _load_migration_module()
     migration.NEO4J_DB = "neo4j"
 
-    would_migrate = migration.migrate_batch(driver, batch_size=100, dry_run=True)
-    assert would_migrate >= 2
-
+    assert migration.migrate_batch(driver, batch_size=100, dry_run=True) == 2
     with driver.session(database="neo4j") as session:
         changed = session.run(
             "MATCH (pl:PhoneLog:HardeningFixture) WHERE pl.loc IS NOT NULL RETURN count(pl) AS n"
         ).single()["n"]
     assert changed == 0
+
+
+def test_batch_safety_cap_is_enforced():
+    migration = _load_migration_module()
+    with pytest.raises(ValueError):
+        migration.validate_batch_size(0)
+    with pytest.raises(ValueError):
+        migration.validate_batch_size(migration.MAX_BATCH_SIZE + 1)
