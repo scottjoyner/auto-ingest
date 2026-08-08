@@ -1,6 +1,6 @@
 # auto-ingest configuration
-# This file defines the fileserver root path for each machine.
-# Each script should load this config and use the appropriate path.
+# Machine-specific profiles may contain explicit fleet endpoints. The generic
+# `any` profile must stay portable and safe for CI/new hosts.
 
 machine_paths:
   # x1-370 (home Tailscale node — Neo4j server lives here)
@@ -13,13 +13,11 @@ machine_paths:
     hot_ssd_root: /media/scott/SSD_4TB/audio
     nas_mirror_root: /media/scott/NAS5
 
-  # Any device on the LAN — uses shared SSD_4TB and NAS5 mounts
-  # Mount points:
-  #   SSD_4TB: /media/scott/SSD_4TB (NFS export from x1-370)
-  #   NAS5:    /media/scott/NAS5 (CIFS //100.64.43.123/fileserver; do not use legacy NAS3)
+  # Generic/unmatched host profile. Network-specific Neo4j routing must be
+  # supplied explicitly with NEO4J_URI rather than inherited accidentally.
   any:
     fileserver_root: /media/scott/SSD_4TB/fileserver
-    neo4j_uri: bolt://100.64.43.123:7687
+    neo4j_uri: bolt://localhost:7687
     neo4j_user: neo4j
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: ""
@@ -27,7 +25,6 @@ machine_paths:
     nas_mirror_root: /media/scott/NAS5
 
   # deathstar-XPS-8920 — local 8TB HDD first-cache/processing layer plus NAS5 cold storage
-  # NAS5 is durable/cold; process from /mnt/8TB_2025 when possible, then mirror/archive.
   deathstar:
     fileserver_root: /mnt/8TB_2025/fileserver
     neo4j_uri: bolt://100.64.43.123:7687
@@ -39,60 +36,33 @@ machine_paths:
 
 # Knowledge Map System configuration (added 2026-05-30)
 knowledge_map:
-  # Active working vault used by Hermes and knowledge_map.
-  # /home/scott/knowledge is the stable symlinked entry point.
   central_vault_path: /home/scott/knowledge
-
-  # Local working copy for sync tools and scripts.
   local_vault_path: /home/scott/nas-knowledge
-
-  # Durable NAS mirror for the vault and derived artifacts.
   mirror_vault_path: /media/scott/NAS5/shared-knowledge
-
-  # Canonical vault model (G2 consolidation, DEEP_DIVE §3.7).
-  #
-  # The mirror (NAS5/shared-knowledge) is THE single canonical writer. Every
-  # host keeps a local clone and PULLS from the mirror; nobody SSH-pushes
-  # their local vault to peers. Peers are discovered by Tailscale hostname
-  # only — never by raw IP. See docs/VAULT_SYNC.md.
   canonical_vault_path: /media/scott/NAS5/shared-knowledge
 
-  # Tailscale hostnames of every peer that holds a local vault clone.
-  # Append/remove a hostname here to grow/shrink the fleet. No IPs allowed.
-  # `self` is a reserved sentinel for the machine running the sync and is
-  # skipped (it is the local writer, not a remote peer).
+  # Tailscale hostnames only; no raw peer IPs.
   vault_peers:
     - deathstar
     - demo-1
     - destroyer
     - optiplex
 
-  # Local clone anchor on each peer (resolved on the peer itself). Used by
-  # sync_vault_to_canonical.sh when pulling a peer's clone. Keep it a path,
-  # not an IP.
   peer_vault_path: /home/scott/nas-knowledge
 
-  # Sync behavior tuning.
   vault_sync:
     ssh_user: scott
     git_branch: main
     rsync_opts: "-a --delete"
-    # Per-peer reachability probe before attempting sync; a down machine
-    # must NOT break the whole sync run.
     peer_timeout_sec: 8
-    # Where this host publishes its local clone so peers can pull it. The
-    # canonical mirror is the single writer; this is only used to seed the
-    # mirror from the local clone.
     push_to_canonical: true
 
-  # Git configuration for versioning
   git:
     enabled: true
     repo_url: "git@github.com:scottjoyner/knowledge-vault.git"
     branch: "main"
     auto_commit: true
 
-  # Sync settings
   sync:
     neo4j_to_vault:
       enabled: true
@@ -111,21 +81,8 @@ knowledge_map:
       frequency: "1h"
       scan_modified_only: true
 
-# Auto-detection: the script will check the hostname and pick the matching config.
-# If no match, it falls back to the first entry in machine_paths.
-
-# Usage in Python scripts:
-#   import yaml
-#   with open('config.yaml') as f:
-#       cfg = yaml.safe_load(f)
-#   # Auto-detect machine
-#   import socket
-#   hostname = socket.gethostname()
-#   machine = None
-#   for key, vals in cfg['machine_paths'].items():
-#       if vals['hostname_pattern'] in hostname:
-#           machine = vals
-#           break
-#   if not machine:
-#       machine = list(cfg['machine_paths'].values())[0]
-#   fileserver_root = machine['fileserver_root']
+# Resolution contract:
+# 1. explicit environment overrides
+# 2. hostname-matching machine profile
+# 3. `any` generic profile
+# 4. built-in localhost/default fallbacks
