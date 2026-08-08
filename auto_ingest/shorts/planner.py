@@ -346,13 +346,24 @@ def _kind_present(events: List[Dict[str, object]], kind: str) -> bool:
     return any(e["kind"] == kind for e in events)
 
 
-def _mine_segment_events(driver, kind: str, limit: int, query: str) -> List[Dict[str, object]]:
-    # Resilient: run the query with a fresh driver per attempt so transient
-    # Neo4j memory/connection pressure doesn't kill the whole plan (S-G18).
+def _read_rows(driver, operation):
+    """Run a graph read through an injected driver or production retry layer.
+
+    Tests, transactions, and callers that already own a driver must stay on that
+    driver. Only callers that pass ``None`` should create fresh retry drivers.
+    This prevents hidden live connections and preserves deterministic injection.
+    """
+    if driver is not None:
+        return operation(driver) or []
     from auto_ingest.shorts import db_retry
-    rows = db_retry.with_driver(
-        lambda drv: drv.session().run(query, limit=limit).data()
-    ) or []
+    return db_retry.with_driver(operation) or []
+
+
+def _mine_segment_events(driver, kind: str, limit: int, query: str) -> List[Dict[str, object]]:
+    rows = _read_rows(
+        driver,
+        lambda drv: drv.session().run(query, limit=limit).data(),
+    )
     events: List[Dict[str, object]] = []
     for r in rows:
         clip_key = r.get("clip_key")
@@ -376,9 +387,8 @@ def _mine_segment_events(driver, kind: str, limit: int, query: str) -> List[Dict
 
 
 def _mine_speed_events(driver, per_kind: int, limit: int) -> List[Dict[str, object]]:
-    # Resilient variant of the same query (S-G18).
-    from auto_ingest.shorts import db_retry
-    rows = db_retry.with_driver(
+    rows = _read_rows(
+        driver,
         lambda drv: drv.session().run(
             """
             MATCH (f:Frame)-[:BELONGS_TO]->(c:DashcamClip)
@@ -388,8 +398,8 @@ def _mine_speed_events(driver, per_kind: int, limit: int) -> List[Dict[str, obje
             LIMIT $limit
             """,
             mph=SPEED_MPH_MIN, limit=limit,
-        ).data()
-    ) or []
+        ).data(),
+    )
     events: List[Dict[str, object]] = []
     for r in rows:
         fps = r.get("fps") or 30.0
