@@ -1,176 +1,199 @@
-# Auto-Ingest System
+# Auto-Ingest
 
-Containerized pipeline that ingests dashcam, audio, and bodycam recordings into a Neo4j knowledge graph. Features distributed workers, a NAS-drop job queue, REST API for triggering jobs, and scheduled cron workers.
+Auto-Ingest is the ingestion and enrichment pipeline for dashcam, audio, bodycam, personal media, and knowledge-graph data. It writes into an externally configured Neo4j database and supports local CLI execution, NAS-backed distributed workers, scheduled jobs, media enrichment, speaker linking, and downstream content workflows.
 
-## Documentation
+The primary goal of the current hardening work is to make those paths deterministic, resumable, observable, and safe to operate against a large production graph.
 
-| Document | Description |
-|----------|-------------|
-| [System Design](docs/system_design.md) | Architecture, service topology, data model, deployment guide |
-| [Deployment Runbook](docs/deployment_runbook.md) | File-by-file operational guide |
-| [Content OS Architecture](docs/architecture.md) | Content workflow engine design |
-| [Docker Skill](deploy/skills/auto-ingest-docker/SKILL.md) | Deploy, manage, and monitor Docker services |
-| [Job Management Skill](deploy/skills/auto-ingest-job-management/SKILL.md) | Enqueue jobs, manage queue, API endpoints |
-| [Troubleshooting Skill](deploy/skills/auto-ingest-troubleshooting/SKILL.md) | Known issues, diagnostics, fixes |
+## Canonical entrypoint
 
-## Quick Start
+`bin/auto-ingest` is the preferred machine-agnostic CLI. Paths and credentials are resolved through `config.yaml` plus environment variables; compute selection is handled by `auto_ingest/backend.py`.
+
+```bash
+bin/auto-ingest run-all
+bin/auto-ingest link-speakers
+bin/auto-ingest caps
+bin/auto-ingest status
+bin/auto-ingest ingest
+bin/auto-ingest whoami
+bin/auto-ingest tiktok
+bin/auto-ingest worker
+bin/auto-ingest claims
+bin/auto-ingest reap
+```
+
+`run_all_optimized.sh` is a deprecated compatibility shim over `bin/auto-ingest run-all`.
+
+## Runtime topology
+
+The current `docker-compose.yml` contains six application services:
+
+| Service | Schedule | Purpose |
+|---|---:|---|
+| `ingest-service` | loop / 5 min | Runs the main ingestion pipeline |
+| `ingest-worker` | loop / 30 sec | Claims and processes NAS-backed jobs |
+| `sync-service` | loop / 10 min | Syncs legacy input locations into canonical storage |
+| `content-service` | loop / 30 min | Runs Content OS status/workflow checks |
+| `ingest-cron` | cron | Scheduled ingestion path |
+| `content-cron` | cron | Scheduled content workflow path |
+
+Neo4j is **not** provisioned by this Compose file. Set `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, and `NEO4J_DB` to the target graph service.
+
+The deprecated unauthenticated HTTP job-trigger API has been removed. Do not depend on port `8766` or `/api/enqueue`; use the CLI, `deploy/create_job.sh`, or the claim/job workflow instead.
+
+## Quick start
 
 ```bash
 cd /home/scott/git/auto-ingest
-
-# Configure environment
 cp deploy/path_profiles.env.example .env
-# Edit .env for your host
+# edit .env for this host
 
-# Build and start all services
+docker compose config
 docker compose up -d --build
-
-# Verify
 docker compose ps
-curl http://localhost:8766/api/health
-curl http://localhost:8766/api/status
 ```
 
-### Machine-agnostic CLI (new primary entrypoint)
-
-`bin/auto-ingest` is the preferred local entrypoint. It is machine-agnostic: all
-paths/credentials come from `config.yaml` + env (no hardcoded paths/creds). It
-auto-detects compute via `auto_ingest/backend.py` (CUDA / ROCm / MLX / ONNX) and
-routes torch/faiss/YOLO device selection accordingly.
+Inspect health and logs with:
 
 ```bash
-bin/auto-ingest run-all            # copy→diarize→ingest→reconcile→classify→link→yolo
-bin/auto-ingest link-speakers      # global speaker linking
-bin/auto-ingest caps               # probe hardware/backend profile
-bin/auto-ingest status             # graph / linkage status
-bin/auto-ingest ingest             # iPhone media -> graph
-bin/auto-ingest whoami             # anchor the "me" speaker
-bin/auto-ingest tiktok             # vertical shorts
-bin/auto-ingest worker             # idle-gated background worker
+./deploy/manage.sh health
+docker compose logs --tail=200 ingest-service
+docker compose logs --tail=200 ingest-worker
 ```
 
-> `run_all_optimized.sh` is a **deprecated** shim over `bin/auto-ingest run-all`.
+## Job flow
 
-## Trigger Jobs
+Distributed ingestion uses durable job/claim semantics rather than an unauthenticated trigger API.
 
 ```bash
-# Via HTTP API
-curl -X POST http://localhost:8766/api/enqueue \
-  -H 'Content-Type: application/json' \
-  -d '{"kind": "dashcam"}'
-
-# Via shell script
 ./deploy/create_job.sh dashcam
 ./deploy/create_job.sh audio
 ./deploy/create_job.sh bodycam
 ./deploy/create_job.sh all
 
-# Check status
-curl http://localhost:8766/api/status
+bin/auto-ingest claims
+bin/auto-ingest reap
 ```
 
-## Services
+Target lifecycle for hardening work:
 
-| Service | Port | Poll | Purpose |
-|---------|------|------|---------|
-| job-api | 8766 | — | HTTP API for enqueueing jobs |
-| ingest-service | — | 5 min | Runs `run_ingest_all.sh` continuously |
-| ingest-worker | — | 30s | Claims `.job` files from `/nas/drop/` |
-| sync-service | — | daily | Syncs legacy drop + all top-level deathstar 8TB roots |
-| content-service | — | 30 min | Content OS CLI status loop |
-| ingest-cron | — | 5 min | Scheduled ingest cron |
-| content-cron | — | 30 min | Scheduled content cron |
-| neo4j | 7474/7687 | — | Graph database (20M+ nodes) |
-
-## Architecture
-
-```
-+-------------------+     +------------------+     +-----------------+
-|  Job Trigger API  |     |  Ingest Service  |     |  Sync Service   |
-|  (HTTP on :8766)  |     |  (loop 5 min)    |     |  (daily sync)    |
-+-------------------+     +------------------+     +-----------------+
-         |                        |                        |
-         v                        v                        v
-+-------------------+     +------------------+     +-----------------+
-|  .job Queue       |<----|  Ingest Worker   |<----|  Legacy Drop     |
-|  /nas/drop/       |     |  (loop 30s)      |     |  /incoming/      |
-|   claimed/        |     |                  |     |   deathstar/     |
-|   done/           |     |                  |     +-----------------+
-|   failed/         |     |                  |
-+-------------------+     |                  |
-                            |                  |
-                            v                  v
-                     +------------------+     +-----------------+
-                     |  Neo4j Graph DB  |     |  Content OS     |
-                     |  :7687 (:7474)   |     |  (cron 30 min)  |
-                     +------------------+     +-----------------+
+```text
+DISCOVERED -> READY -> CLAIMED -> RUNNING -> VALIDATING -> DONE
+                         |           |
+                         +-> RETRYABLE / BLOCKED / QUARANTINED / DEAD
 ```
 
-## Data Model
+Execution paths should converge on the same stage contracts so a CLI run, local worker, fleet worker, and scheduled run produce equivalent state transitions and provenance.
 
-Core Neo4j node types:
+## Production safety
 
-| Label | Count | Description |
-|-------|-------|-------------|
-| PhoneLog | 20M | Phone call/SMS records |
-| DashcamEmbedding | 4.2M | Dashcam video embeddings |
-| YOLODetection | 4.1M | Vehicle/object detections |
-| Frame | 3.7M | Video frames |
-| Utterance | 420K | Speech utterances |
-| Segment | 361K | Transcript segments |
-| Speaker | 233K | Speaker entities |
-| Transcription | 64K | Transcription records |
+High-volume graph and filesystem operations must be treated as recoverable migrations rather than ad-hoc scripts. New migration/backfill work should provide, where applicable:
 
-## Key Files
+- dry-run or preflight cardinality reporting;
+- bounded transaction/batch sizes;
+- checkpoint/resume behavior;
+- idempotency;
+- validation of source data before writes;
+- explicit failure reporting and non-zero exit codes;
+- post-run verification;
+- backup/recovery guidance for destructive operations.
 
-| File | Purpose |
-|------|---------|
-| `docker-compose.yml` | Service definitions |
-| `Dockerfile` | Container image |
-| `deploy/job_trigger_api.py` | HTTP API server |
-| `deploy/worker_ingest.sh` | Distributed worker |
-| `deploy/sync_from_legacy_drop.sh` | Legacy sync |
-| `deploy/create_job.sh` | Job creation helper |
-| `deploy/start-cron.sh` | Cron daemon starter |
-| `deploy/cron/ingest.crontab` | Ingest schedule |
-| `deploy/cron/content_generation.crontab` | Content schedule |
-| `deploy/path_profiles.env.example` | Environment template |
-| `run_ingest_all.sh` | Main ingest runner |
-| `ingest_transcriptsv5_3.py` | Python ingest script |
-| `bin/auto-ingest` | Machine-agnostic CLI (primary entrypoint); `run-all` chains copy→diarize→ingest→reconcile→classify→link→yolo. All config from `config.yaml` + env. |
-| `run_all_optimized.sh` | Deprecated shim over `bin/auto-ingest run-all` |
-| `auto_ingest/backend.py` | Auto-detects CUDA/ROCm/MLX/ONNX compute; routes torch/faiss/YOLO device selection |
-
-## Management
+For example, the PhoneLog spatial migration can be checked before mutation:
 
 ```bash
-cd /home/scott/git/auto-ingest
-
-# Start/stop
-docker compose up -d          # start all
-docker compose down            # stop all
-docker compose up -d --build  # rebuild and start
-
-# Logs
-docker compose logs -f ingest-worker
-docker compose logs -f ingest-service
-docker compose logs -f sync-service
-
-# Neo4j
-docker exec neo4j cypher-shell -u neo4j -p knowledge_graph_2026 "RETURN 1"
-docker exec neo4j cypher-shell -u neo4j -p knowledge_graph_2026 \
-  "MATCH (n) RETURN labels(n) AS label, count(*) AS cnt ORDER BY cnt DESC LIMIT 10"
-
-# Queue
-ls -lah /nas/drop/ /nas/drop/claimed/ /nas/drop/done/ /nas/drop/failed/
+python scripts/migrate_phonelog_spatial.py --dry-run
+python scripts/migrate_phonelog_spatial.py --batch-size 5000
 ```
 
-## Troubleshooting
+The migration rejects oversized batches, skips invalid coordinates, and is safe to resume.
 
-See [Troubleshooting Skill](deploy/skills/auto-ingest-troubleshooting/SKILL.md) for:
-- Neo4j connection failures
-- libGL/libvpx errors
-- Legacy drop sync issues
-- Job queue problems
-- Cron job failures
-- Diagnostic commands
+## Testing
+
+Tests are separated into execution layers with pytest markers:
+
+```bash
+# fast, dependency-light tests
+python -m pytest tests -m "not integration and not ml and not e2e and not destructive"
+
+# real service tests require their service-specific environment
+python -m pytest tests/integration -m integration
+```
+
+CI validates:
+
+- Ruff and secret/configuration regression guards;
+- fast unit/compatibility tests;
+- `docker compose config` and expected service topology;
+- a real Neo4j service with isolated migration fixtures;
+- production Docker image build and entrypoint smoke execution.
+
+See `docs/PRODUCTION_HARDENING_PLAN.md` for the active hardening roadmap.
+
+## Configuration
+
+Shared fallback configuration must remain machine-agnostic. In particular, the default Neo4j URI is local:
+
+```text
+bolt://localhost:7687
+```
+
+Fleet-specific Tailscale hosts/addresses belong in explicit machine profiles or environment variables, not shared runtime defaults.
+
+Important environment variables include:
+
+```text
+NEO4J_URI
+NEO4J_USER
+NEO4J_PASSWORD
+NEO4J_DB
+FILESERVER_ROOT
+HOT_STORAGE_ROOT
+COLD_STORAGE_ROOT
+SCAN_ROOTS
+DASHCAM_ROOT
+AUDIO_ROOT
+BODYCAM_ROOT
+TRANSCRIPT_ROOT
+DROP_ROOT
+```
+
+## Storage and data model
+
+The production graph is large, so queries and migrations must be bounded. Representative graph domains include:
+
+- PhoneLog/location data;
+- dashcam/frame/YOLO detections and embeddings;
+- transcription/segment/utterance data;
+- speaker identity and voiceprint linkage;
+- media, trips, places, and personal recall;
+- papers, concepts, entities, and knowledge bridges;
+- ingest jobs, claims, stages, and provenance.
+
+Do not infer current production cardinalities from documentation; use live diagnostics before migration or capacity decisions.
+
+## Key files
+
+| Path | Purpose |
+|---|---|
+| `bin/auto-ingest` | primary CLI |
+| `auto_ingest_config.py` | shared configuration resolution |
+| `auto_ingest/backend.py` | compute/backend detection |
+| `docker-compose.yml` | application service topology |
+| `Dockerfile` | production image |
+| `deploy/worker_ingest.sh` | distributed NAS worker |
+| `deploy/create_job.sh` | durable job creation helper |
+| `deploy/start-cron.sh` | cron runner |
+| `scripts/migrate_phonelog_spatial.py` | bounded PhoneLog spatial migration |
+| `tests/integration/` | real external-service contract tests |
+| `docs/PRODUCTION_HARDENING_PLAN.md` | active hardening plan |
+
+## Documentation
+
+- `docs/system_design.md` — system architecture and data model
+- `docs/deployment_runbook.md` — operational deployment guidance
+- `docs/architecture.md` — Content OS architecture
+- `docs/PRODUCTION_HARDENING_PLAN.md` — current reliability/test/recovery work
+- `deploy/skills/auto-ingest-troubleshooting/SKILL.md` — operational troubleshooting
+
+## Current hardening direction
+
+The repository has substantial capability but historically accumulated multiple execution paths, legacy scripts, and production assumptions. The hardening branch is deliberately prioritizing safety and contracts over new features: real integration tests, Docker validation, architecture reconciliation, migration safety, scheduler convergence, observability, and recovery behavior.
