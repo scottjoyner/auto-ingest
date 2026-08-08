@@ -2,7 +2,7 @@
 """Backfill ``PhoneLog.loc`` spatial points safely and idempotently.
 
 The migration is intentionally bounded and resumable. It only mutates nodes
-with valid source coordinates and can be re-run after interruption.
+with valid normalized coordinates and can be re-run after interruption.
 """
 from __future__ import annotations
 
@@ -10,6 +10,11 @@ import argparse
 import logging
 import sys
 
+from auto_ingest.ops.migration_safety import (
+    SafetyViolation,
+    preflight_summary,
+    validate_batch_size as validate_bounded_batch,
+)
 from auto_ingest_config import get_neo4j_env
 
 NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, NEO4J_DB = get_neo4j_env()
@@ -21,10 +26,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 # PhoneLog.geometry is historically a string representation, not a Neo4j map.
-# Normalization in PhoneLog.cy materializes either flat latitude/longitude or a
-# primitive `coordinates: [longitude, latitude]` array. Only use those typed
-# properties here so this migration works without APOC and cannot type-error on
-# the legacy geometry string.
+# PhoneLog normalization materializes either flat latitude/longitude or the
+# primitive coordinates array [longitude, latitude].
 COORDINATE_PROJECTION = """
     WITH pl,
         coalesce(pl.latitude, pl.coordinates[1]) AS lat,
@@ -37,13 +40,8 @@ COORDINATE_PROJECTION = """
 
 
 def validate_batch_size(batch_size: int) -> int:
-    if batch_size < 1:
-        raise ValueError("batch size must be at least 1")
-    if batch_size > MAX_BATCH_SIZE:
-        raise ValueError(
-            f"batch size {batch_size:,} exceeds safety cap {MAX_BATCH_SIZE:,}"
-        )
-    return batch_size
+    """Compatibility wrapper around the shared production safety contract."""
+    return validate_bounded_batch(batch_size, max_batch_size=MAX_BATCH_SIZE)
 
 
 def count_missing_loc(driver) -> int:
@@ -102,7 +100,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         validate_batch_size(args.batch_size)
-    except ValueError as exc:
+    except SafetyViolation as exc:
         parser.error(str(exc))
     if args.max_batches < 0:
         parser.error("--max-batches cannot be negative")
@@ -120,8 +118,15 @@ def main() -> int:
         driver.verify_connectivity()
         missing_before = count_missing_loc(driver)
         eligible_before = count_eligible(driver)
-        logger.info("PhoneLog missing loc: %,d", missing_before)
-        logger.info("PhoneLog eligible: %,d", eligible_before)
+        plan = preflight_summary(
+            operation="phonelog_spatial",
+            total_candidates=missing_before,
+            eligible_candidates=eligible_before,
+            batch_size=args.batch_size,
+            max_batch_size=MAX_BATCH_SIZE,
+            dry_run=args.dry_run,
+        )
+        logger.info("Preflight: %s", plan)
 
         if args.dry_run:
             first = migrate_batch(driver, args.batch_size, dry_run=True)
@@ -130,16 +135,28 @@ def main() -> int:
 
         total = 0
         batches = 0
-        while eligible_before:
+        remaining = eligible_before
+        while remaining:
             if args.max_batches and batches >= args.max_batches:
+                logger.warning(
+                    "Stopped at explicit max-batches=%d with %,d eligible nodes remaining",
+                    args.max_batches,
+                    remaining,
+                )
                 break
             migrated = migrate_batch(driver, args.batch_size)
             if not migrated:
                 break
             total += migrated
             batches += 1
-            logger.info("Batch %d migrated %,d (total %,d)", batches, migrated, total)
-            eligible_before = count_eligible(driver)
+            remaining = count_eligible(driver)
+            logger.info(
+                "Batch %d migrated %,d (total %,d; remaining %,d)",
+                batches,
+                migrated,
+                total,
+                remaining,
+            )
 
         logger.info("Migration complete; migrated %,d", total)
         logger.info("Remaining eligible: %,d", count_eligible(driver))
