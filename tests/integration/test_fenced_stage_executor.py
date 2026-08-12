@@ -8,9 +8,9 @@ from neo4j import GraphDatabase
 
 from auto_ingest import ingest_claim
 from auto_ingest.stage_executor import (
-    LeaseLost,
     STATE_ARTIFACT_COMMITTED,
     STATE_COMMITTED,
+    LeaseLost,
     execute_stage,
     read_journal,
     recover_artifact,
