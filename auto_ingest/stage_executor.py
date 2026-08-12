@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from auto_ingest import ingest_claim
-from auto_ingest.artifacts import ArtifactIdentity, artifact_relative_path, build_identity, sha256_bytes
+from auto_ingest.artifacts import (
+    ArtifactIdentity,
+    artifact_relative_path,
+    build_identity,
+    sha256_bytes,
+)
 from auto_ingest.commit_protocol import atomic_commit_bytes, verify_artifact
 
 STATE_PREPARING = "PREPARING"
