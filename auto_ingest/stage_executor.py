@@ -1,8 +1,9 @@
 """Canonical fenced stage execution with crash-recoverable artifact commits.
 
 The executor coordinates a lease generation, deterministic artifact identity,
-atomic filesystem publication, a durable journal, and a graph commit callback.
-A stale worker cannot mark a stage complete after lease takeover.
+atomic filesystem publication, a durable journal, and fenced Neo4j artifact
+registration. A stale worker cannot register an artifact or mark a stage
+complete after lease takeover.
 """
 from __future__ import annotations
 
@@ -11,12 +12,11 @@ import os
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Any
+from typing import Any, Callable, Mapping
 
+from auto_ingest import ingest_claim
 from auto_ingest.artifacts import ArtifactIdentity, artifact_relative_path, build_identity, sha256_bytes
 from auto_ingest.commit_protocol import atomic_commit_bytes, verify_artifact
-from auto_ingest import ingest_claim
-
 
 STATE_PREPARING = "PREPARING"
 STATE_ARTIFACT_COMMITTED = "ARTIFACT_COMMITTED"
@@ -31,6 +31,7 @@ class LeaseLost(RuntimeError):
 @dataclass(frozen=True)
 class StageCommit:
     job_key: str
+    owner: str
     stage: str
     artifact_id: str
     artifact_path: str
@@ -49,6 +50,11 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(temp, path)
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     except Exception:
         temp.unlink(missing_ok=True)
         raise
@@ -63,6 +69,36 @@ def read_journal(root: str | Path, artifact_id: str) -> dict | None:
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def register_artifact_fenced(driver, commit: StageCommit, *, stage_version: str) -> bool:
+    """Fence-check the lease and register artifact provenance in one transaction."""
+    with driver.session() as session:
+        rec = session.run(
+            """
+            MATCH (j:IngestJob {key:$job_key})
+            WHERE j.owner=$owner AND coalesce(j.fence_token,0)=$fence_token
+            MERGE (a:IngestArtifact {artifact_id:$artifact_id})
+            ON CREATE SET a.created_at=timestamp()
+            SET a.stage=$stage,
+                a.stage_version=$stage_version,
+                a.path=$path,
+                a.sha256=$sha256,
+                a.fence_token=$fence_token,
+                a.updated_at=timestamp()
+            MERGE (j)-[:PRODUCED]->(a)
+            RETURN a.artifact_id AS artifact_id
+            """,
+            job_key=commit.job_key,
+            owner=commit.owner,
+            fence_token=commit.fence_token,
+            artifact_id=commit.artifact_id,
+            stage=commit.stage,
+            stage_version=stage_version,
+            path=commit.artifact_path,
+            sha256=commit.artifact_sha256,
+        ).single()
+    return rec is not None
 
 
 def execute_stage(
@@ -82,7 +118,7 @@ def execute_stage(
     graph_commit: Callable[[Any, StageCommit], None] | None = None,
     fault: Callable[[str], None] | None = None,
 ) -> StageCommit:
-    """Execute one stage under a fenced lease and commit its artifact safely.
+    """Execute one artifact-producing stage under a fenced lease.
 
     Fault hook checkpoints: ``after_claim``, ``after_prepare``,
     ``after_artifact``, ``after_graph``, ``after_stage_state``.
@@ -125,13 +161,9 @@ def execute_stage(
     if fault:
         fault("after_artifact")
 
-    # Prove the lease generation is still ours immediately before graph commit.
-    status = ingest_claim.stage_status(driver, job_key)
-    if not status or status["owner"] != owner or status["fence_token"] != token:
-        raise LeaseLost(f"lease generation lost before graph commit for {job_key}")
-
     result = StageCommit(
         job_key=job_key,
+        owner=owner,
         stage=stage,
         artifact_id=artifact_id,
         artifact_path=str(final_path),
@@ -139,6 +171,9 @@ def execute_stage(
         fence_token=token,
         reused=committed.reused,
     )
+    if not register_artifact_fenced(driver, result, stage_version=stage_version):
+        raise LeaseLost(f"lease generation lost before artifact registration for {job_key}")
+
     if graph_commit is not None:
         graph_commit(driver, result)
     if fault:
