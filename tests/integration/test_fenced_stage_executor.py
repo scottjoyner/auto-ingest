@@ -34,15 +34,24 @@ def driver():
     drv.close()
 
 
+def _cleanup(driver):
+    with driver.session(database="neo4j") as s:
+        s.run(
+            """
+            MATCH (j:IngestJob)-[:PRODUCED]->(a:IngestArtifact)
+            WHERE j.key STARTS WITH 'ci-fenced:'
+            DETACH DELETE a
+            """
+        ).consume()
+        s.run("MATCH (n) WHERE n.fixture_scope='fenced-stage-ci' DETACH DELETE n").consume()
+        s.run("MATCH (j:IngestJob) WHERE j.key STARTS WITH 'ci-fenced:' DETACH DELETE j").consume()
+
+
 @pytest.fixture(autouse=True)
 def cleanup(driver):
-    with driver.session(database="neo4j") as s:
-        s.run("MATCH (n) WHERE n.fixture_scope='fenced-stage-ci' DETACH DELETE n").consume()
-        s.run("MATCH (j:IngestJob) WHERE j.key STARTS WITH 'ci-fenced:' DETACH DELETE j").consume()
+    _cleanup(driver)
     yield
-    with driver.session(database="neo4j") as s:
-        s.run("MATCH (n) WHERE n.fixture_scope='fenced-stage-ci' DETACH DELETE n").consume()
-        s.run("MATCH (j:IngestJob) WHERE j.key STARTS WITH 'ci-fenced:' DETACH DELETE j").consume()
+    _cleanup(driver)
 
 
 def test_stale_worker_cannot_commit_after_lease_takeover(driver):
@@ -103,13 +112,18 @@ def test_stage_executor_commits_artifact_graph_and_state(driver, tmp_path: Path)
             "MATCH (a:Artifact {artifact_id:$id, fixture_scope:'fenced-stage-ci'}) RETURN count(a) AS n",
             id=result.artifact_id,
         ).single()["n"]
+        registered = s.run(
+            "MATCH (:IngestJob {key:$key})-[:PRODUCED]->(a:IngestArtifact {artifact_id:$id}) RETURN count(a) AS n",
+            key=key,
+            id=result.artifact_id,
+        ).single()["n"]
     assert count == 1
+    assert registered == 1
 
 
 def test_crash_after_artifact_is_recoverable_and_retry_reuses_bytes(driver, tmp_path: Path):
     key = "ci-fenced:crash"
     ingest_claim.create_job(driver, key)
-    captured = {}
 
     def fail(point):
         if point == "after_artifact":
@@ -135,14 +149,8 @@ def test_crash_after_artifact_is_recoverable_and_retry_reuses_bytes(driver, tmp_
     assert record["state"] == STATE_ARTIFACT_COMMITTED
     assert recover_artifact(tmp_path, journals[0].stem) == STATE_ARTIFACT_COMMITTED
 
-    # Expire/take over the original crashed lease, then rerun. Deterministic
-    # identity means the already-durable bytes are reused instead of duplicated.
-    status = ingest_claim.stage_status(driver, key)
     with driver.session(database="neo4j") as s:
-        s.run(
-            "MATCH (j:IngestJob {key:$key}) SET j.claimed_at=0",
-            key=key,
-        ).consume()
+        s.run("MATCH (j:IngestJob {key:$key}) SET j.claimed_at=0", key=key).consume()
 
     result = execute_stage(
         driver,
