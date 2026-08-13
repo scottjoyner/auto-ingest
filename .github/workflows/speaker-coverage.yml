@@ -1,0 +1,32 @@
+name: Speaker Coverage
+
+on:
+  pull_request:
+
+jobs:
+  speaker-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test runtime
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy PyYAML pytest coverage pytest-timeout soundfile
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.8.0 torchaudio==2.8.0
+      - name: Run speaker coverage
+        run: |
+          coverage erase
+          coverage run --branch -m pytest tests/test_global_speaker_pure_coverage.py tests/test_global_speaker_cluster_coverage.py tests/test_global_speaker_main_coverage.py -q -m ml --timeout=60
+          coverage report -m --include='auto_ingest/diarize/link_global_speakers.py'
+          coverage json -o speaker-coverage.json --include='auto_ingest/diarize/link_global_speakers.py'
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: speaker-coverage
+          path: speaker-coverage.json
+          if-no-files-found: warn

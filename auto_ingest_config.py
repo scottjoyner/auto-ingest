@@ -29,6 +29,11 @@ import yaml
 # ---------------------------------------------------------------------------
 _BAKED_IN_NEO4J_PASSWORD = "knowledge_graph_2026"
 
+# Shared runtime defaults must stay machine-agnostic. Fleet-specific addresses
+# belong in config.yaml machine profiles or explicit environment variables.
+DEFAULT_NEO4J_URI = "bolt://localhost:7687"
+DEFAULT_NEO4J_USER = "neo4j"
+
 
 def get_neo4j_password(config_value: str | None = None) -> str:
     """Resolve the Neo4j password from the standard sources.
@@ -250,8 +255,10 @@ def get_neo4j_config():
                 matched = vals
                 break
         if matched is None:
-            vals_list = list(cfg.get('machine_paths', {}).values())
-            matched = vals_list[0] if vals_list else None
+            # Generic/shared configuration must win over an arbitrary machine
+            # profile when the current hostname has no explicit match.
+            machine_paths = cfg.get('machine_paths', {})
+            matched = machine_paths.get('any')
 
         if matched:
             cfg_uri = matched.get('neo4j_uri')
@@ -262,8 +269,8 @@ def get_neo4j_config():
             cfg_pass = _resolve_env(matched.get('neo4j_password'), None)
 
     return {
-        'uri': os.environ.get('NEO4J_URI') or cfg_uri or 'bolt://100.64.43.123:7687',
-        'user': os.environ.get('NEO4J_USER') or cfg_user or 'neo4j',
+        'uri': os.environ.get('NEO4J_URI') or cfg_uri or DEFAULT_NEO4J_URI,
+        'user': os.environ.get('NEO4J_USER') or cfg_user or DEFAULT_NEO4J_USER,
         'password': get_neo4j_password(cfg_pass),
     }
 
@@ -290,8 +297,8 @@ def get_neo4j_env():
     """
     cfg = get_neo4j_config()
     return (
-        cfg.get("uri", os.environ.get("NEO4J_URI", "bolt://100.64.43.123:7687")),
-        cfg.get("user", os.environ.get("NEO4J_USER", "neo4j")),
+        cfg.get("uri") or DEFAULT_NEO4J_URI,
+        cfg.get("user") or DEFAULT_NEO4J_USER,
         cfg.get("password", os.environ.get("NEO4J_PASSWORD", "")),
         get_neo4j_db(),
     )
@@ -386,8 +393,8 @@ def get_neo4j_driver(database=None):
     except Exception:
         return None
     cfg = get_neo4j_config()
-    uri = cfg.get('uri') or os.environ.get('NEO4J_URI', 'bolt://100.64.43.123:7687')
-    user = cfg.get('user') or os.environ.get('NEO4J_USER', 'neo4j')
+    uri = cfg.get('uri') or DEFAULT_NEO4J_URI
+    user = cfg.get('user') or DEFAULT_NEO4J_USER
     password = cfg.get('password') or os.environ.get('NEO4J_PASSWORD', '')
     return GraphDatabase.driver(uri, auth=(user, password))
 

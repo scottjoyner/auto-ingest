@@ -6,8 +6,18 @@ on:
   pull_request:
 
 jobs:
-  lint-and-test:
+  static-and-unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FILESERVER_ROOT: /tmp/auto-ingest/fileserver
+      HOT_STORAGE_ROOT: /tmp/auto-ingest/hot
+      COLD_STORAGE_ROOT: /tmp/auto-ingest/cold
+      AUDIO_ROOT: /tmp/auto-ingest/audio
+      DASHCAM_ROOT: /tmp/auto-ingest/dashcam
+      BODYCAM_ROOT: /tmp/auto-ingest/bodycam
+      TRANSCRIPT_ROOT: /tmp/auto-ingest/transcripts
+      NEXTCLOUD_ROOT: /tmp/auto-ingest/nextcloud
     steps:
       - uses: actions/checkout@v4
 
@@ -16,24 +26,22 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install lightweight test deps (no ML stack)
-        # The full requirements.txt pulls torch/transformers/ultralytics (CPU/CUDA).
-        # CI only needs the dependency-free surface + the test deps so the suite
-        # stays green without the ML stack (W-49). moviepy is installed separately
-        # in the venv below so the render/persona tests actually execute.
+      - name: Prepare portable test roots
+        run: |
+          mkdir -p "$FILESERVER_ROOT" "$HOT_STORAGE_ROOT" "$COLD_STORAGE_ROOT" \
+                   "$AUDIO_ROOT" "$DASHCAM_ROOT" "$BODYCAM_ROOT" \
+                   "$TRANSCRIPT_ROOT" "$NEXTCLOUD_ROOT"
+          touch "$FILESERVER_ROOT/.keep" "$HOT_STORAGE_ROOT/.keep" "$COLD_STORAGE_ROOT/.keep"
+
+      - name: Install lightweight test dependencies
         run: |
           python -m pip install --upgrade pip
           pip install "pydantic>=2.6" "PyYAML>=6.0" "neo4j>=5.24" \
-                      "fastapi" "python-multipart" "httpx" "numpy" \
-                      "opencv-python-headless" "pytest>=8.0" "pytest-cov>=6.0" \
-                      "ruff>=0.5" "pydantic-settings"
+                      "fastapi" "python-multipart" "httpx" "numpy" "pandas" \
+                      "opencv-python-headless" "pillow" "pytest>=8.0" "pytest-cov>=6.0" \
+                      "pytest-timeout>=2.3" "ruff>=0.5" "pydantic-settings"
 
-      - name: Ruff (lint)
-        # Ruff is adopted for the package + tests. A small set of files carry
-        # pre-existing import-order/unused-import issues that are tracked separately
-        # (shorts_builder.py, test_api_graph.py, test_birdcam.py, test_light.py,
-        # events.py, outbox.py) and intentionally excluded here so CI stays green.
-        # New files must be ruff-clean.
+      - name: Ruff
         run: |
           ruff check auto_ingest tests \
             --extend-exclude=tests/test_api_graph.py \
@@ -41,24 +49,164 @@ jobs:
             --extend-exclude=tests/test_light.py \
             --extend-exclude=auto_ingest/tests/test_light.py \
             --extend-exclude=auto_ingest/events.py \
-            --extend-exclude=auto_ingest/outbox.py            --extend-exclude=auto_ingest/diarize/link_global_speakers.py \
+            --extend-exclude=auto_ingest/outbox.py \
+            --extend-exclude=auto_ingest/diarize/link_global_speakers.py \
             --extend-exclude=auto_ingest/diarize/link_global_speakers_2.py \
-            --extend-exclude=auto_ingest/diarize/speaker_linker.py            --extend-exclude=scripts/scott_graph_mcp.py
+            --extend-exclude=auto_ingest/diarize/speaker_linker.py \
+            --extend-exclude=scripts/scott_graph_mcp.py
 
-      - name: No hardcoded Neo4j password (must route through NEO4J_PASSWORD_DEFAULT)
+      - name: Secret regression guard
         run: python tools/lint_no_hardcoded_secrets.py
 
-      - name: Pytest (system python — moviepy tests skip/degrade)
+      - name: Configuration portability contract
+        env:
+          NEO4J_URI: ""
         run: |
-          python -m pytest tests/ -q
+          python - <<'PY'
+          import auto_ingest_config as cfg
+          cfg._find_config_path = lambda: None
+          resolved = cfg.get_neo4j_config()
+          assert resolved["uri"] == "bolt://localhost:7687", resolved
+          assert not resolved["uri"].startswith("bolt://100."), resolved
+          assert cfg.DEFAULT_NEO4J_URI == "bolt://localhost:7687"
+          PY
 
-      - name: Build venv with moviepy for render/persona tests
+      - name: Control-plane CLI and import smoke
+        run: |
+          python -m auto_ingest.orchestration --help
+          python -m auto_ingest.profile_runner --help
+          python -m auto_ingest.operations --help
+          python -m auto_ingest.worker_loop --help
+          python -m auto_ingest.file_queue --help
+          python -m auto_ingest.watchdog --help
+          python -m auto_ingest.metrics --help
+          python -m auto_ingest.readiness --help
+          python - <<'PY'
+          from auto_ingest.full_pipeline import build_tasks
+          from auto_ingest.transcript_entrypoint import build_command
+          assert len(build_tasks()) == 10
+          assert callable(build_command)
+          PY
+
+      - name: Fast tests + coverage inventory
+        run: >-
+          python -m pytest tests/ -vv --durations=20 --timeout=60
+          -m "not integration and not ml and not e2e and not destructive"
+          --cov --cov-branch --cov-report=term-missing --cov-report=json:coverage.json
+
+      - name: Upload coverage inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-fast
+          path: coverage.json
+          if-no-files-found: warn
+
+      - name: Render/persona compatibility tests
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install "pydantic>=2.6" "PyYAML>=6.0" "neo4j>=5.24" \
-                      "fastapi" "python-multipart" "httpx" "numpy" \
-                      "opencv-python-headless" "pytest>=8.0" "pytest-cov>=6.0" \
-                      "pydantic-settings" "moviepy>=1.0"
-          .venv/bin/python -m pytest tests/ -q
+                      "fastapi" "python-multipart" "httpx" "numpy" "pandas" \
+                      "opencv-python-headless" "pillow" "pytest>=8.0" "pytest-cov>=6.0" \
+                      "pytest-timeout>=2.3" "pydantic-settings" "moviepy==1.0.3"
+          .venv/bin/python -m pytest tests/ -q --durations=20 --timeout=60 \
+            -m "not integration and not ml and not e2e and not destructive"
+
+  compose-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Compose model
+        run: docker compose --env-file deploy/ci.env config --quiet
+
+      - name: Verify canonical service topology
+        run: |
+          services="$(docker compose --env-file deploy/ci.env config --services)"
+          printf '%s\n' "$services"
+          for required in ingest-worker content-service ingest-cron content-cron; do
+            echo "$services" | grep -qx "$required"
+          done
+          for forbidden in ingest-service sync-service job-api; do
+            if echo "$services" | grep -qx "$forbidden"; then
+              echo "non-canonical service unexpectedly present: $forbidden"
+              exit 1
+            fi
+          done
+
+      - name: Verify scheduled ingest routes through fenced controllers
+        run: |
+          grep -q "auto_ingest.profile_runner --profile sync" deploy/cron/ingest.crontab
+          grep -q "auto_ingest.watchdog" deploy/cron/ingest.crontab
+          grep -q "auto_ingest.full_pipeline" deploy/cron/ingest.crontab
+          grep -q "auto_ingest.profile_runner --profile dashcam" deploy/cron/ingest.crontab
+          ! grep -q "run_ingest_all.sh" deploy/cron/ingest.crontab
+          grep -q "auto_ingest.transcript_orchestration" run_ingest_all.sh
+          grep -q "auto_ingest.file_queue work --once" deploy/worker_ingest.sh
+          ! grep -q 'bash "$claim"' deploy/worker_ingest.sh
+
+  neo4j-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      neo4j:
+        image: neo4j:5-community
+        env:
+          NEO4J_AUTH: neo4j/test-password-123
+        ports:
+          - 7687:7687
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p test-password-123 'RETURN 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install integration dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "neo4j>=5.24" "pytest>=8.0" "pytest-timeout>=2.3" "PyYAML>=6.0"
+
+      - name: Run real Neo4j contract tests
+        env:
+          NEO4J_TEST_URI: bolt://127.0.0.1:7687
+          NEO4J_TEST_USER: neo4j
+          NEO4J_TEST_PASSWORD: test-password-123
+          NEO4J_URI: bolt://127.0.0.1:7687
+          NEO4J_USER: neo4j
+          NEO4J_PASSWORD: test-password-123
+          NEO4J_DB: neo4j
+        run: python -m pytest tests/integration -vv --durations=20 --timeout=60 -m integration
+
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build production image
+        run: docker build --pull -t auto-ingest:ci .
+
+      - name: Verify installed dependency graph
+        run: docker run --rm auto-ingest:ci python -m pip check
+
+      - name: Smoke production control-plane entrypoints
+        run: |
+          docker run --rm auto-ingest:ci python -m content_os --help
+          docker run --rm auto-ingest:ci python -m auto_ingest.orchestration --help
+          docker run --rm auto-ingest:ci python -m auto_ingest.profile_runner --help
+          docker run --rm auto-ingest:ci python -m auto_ingest.operations --help
+          docker run --rm auto-ingest:ci python -m auto_ingest.worker_loop --help
+          docker run --rm auto-ingest:ci python -m auto_ingest.file_queue --help
+          docker run --rm auto-ingest:ci python -m auto_ingest.watchdog --help
+          docker run --rm auto-ingest:ci python -m auto_ingest.metrics --help
+          docker run --rm auto-ingest:ci python -m auto_ingest.readiness --help

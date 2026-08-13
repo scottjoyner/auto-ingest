@@ -1,4 +1,4 @@
-import argparse, uvicorn
+import argparse
 from birdcam.config import load_settings
 from birdcam.detector.yolo import YoloDetector
 from birdcam.api import create_app
@@ -32,7 +32,9 @@ def main():
         elif a.graph_cmd=="list-events": print(repo.list_events(camera_id=a.camera_id))
         elif a.graph_cmd=="event": print(repo.get_event(a.event_id))
     elif a.cmd=="detect-file": Worker(s, YoloDetector(s.model_name_or_path,s.detection_class,s.confidence_threshold), repo).run_file(a.input)
-    elif a.cmd=="api": uvicorn.run(create_app(repo), host=a.host, port=a.port)
+    elif a.cmd=="api":
+        import uvicorn
+        uvicorn.run(create_app(repo), host=a.host, port=a.port)
     else: Worker(s, YoloDetector(s.model_name_or_path,s.detection_class,s.confidence_threshold), repo).run_file(s.stream_url)
 
 if __name__ == '__main__': main()

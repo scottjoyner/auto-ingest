@@ -1,0 +1,52 @@
+# Version control / editor state
+.git
+.github
+.vscode
+.idea
+
+# Python caches and local environments
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+coverage.xml
+htmlcov
+.venv
+venv
+env
+
+# Local secrets and host-specific environment
+.env
+.env.*
+!.env.example
+!deploy/*.env.example
+
+# Runtime logs / temp / generated artifacts
+logs
+log
+*.log
+*.pid
+*.tmp
+*.bak
+*.bkp*
+tmp
+temp
+
+# Test/build outputs that are not required by the runtime image
+.pytest_cache
+build
+dist
+*.egg-info
+
+# Local large data/model caches must always be mounted at runtime, never baked.
+data
+models
+model-cache
+.cache
+huggingface
+
+# OS metadata
+.DS_Store
+Thumbs.db

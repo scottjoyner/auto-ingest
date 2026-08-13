@@ -1,11 +1,17 @@
 # Auto-Ingest Cron Configuration
-# Daily batch jobs for dashcam and transcription ingestion
+# Recurring production work enters fenced persisted controllers. Window-scoped
+# job keys make duplicate triggers idempotent while allowing later windows.
 
-# Sync legacy drop every 5 minutes (lightweight)
-*/5 * * * * cd /app && /usr/bin/env bash deploy/sync_from_legacy_drop.sh >> /var/log/cron-sync.log 2>&1
+# Sync legacy drop every 5 minutes. Named profiles bind their semantic task plan
+# before retrying so a changed command cannot silently resume old progress.
+*/5 * * * * cd /app && /usr/bin/env python3 -m auto_ingest.profile_runner --profile sync >> /var/log/cron-sync.log 2>&1
 
-# Run main ingest pipeline every 30 minutes
-*/30 * * * * cd /app && /usr/bin/env bash run_ingest_all.sh >> /var/log/cron-ingest.log 2>&1
+# Recover abandoned orchestration leases every 10 minutes. This is bounded and
+# quarantines repeated stale failures rather than creating an infinite retry loop.
+*/10 * * * * cd /app && /usr/bin/env python3 -m auto_ingest.watchdog --stale-after-sec 600 --limit 100 --max-stale-recoveries 3 >> /var/log/cron-watchdog.log 2>&1
 
-# Daily dashcam embeddings batch at 2 AM (catches any missed data)
-0 2 * * * cd /app && /usr/bin/env python3 bulk_ingest_dashcam.py --years 2026 >> /var/log/cron-dashcam-daily.log 2>&1
+# Main ingest pipeline every 30 minutes, persisted at individual heavy stages.
+*/30 * * * * cd /app && /usr/bin/env python3 -m auto_ingest.full_pipeline >> /var/log/cron-ingest.log 2>&1
+
+# Daily dashcam embeddings batch at 2 AM.
+0 2 * * * cd /app && /usr/bin/env python3 -m auto_ingest.profile_runner --profile dashcam >> /var/log/cron-dashcam-daily.log 2>&1

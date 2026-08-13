@@ -14,19 +14,37 @@ COPY pyproject.toml README.md /app/
 COPY content_os /app/content_os
 COPY requirements.txt /app/requirements.txt
 
-# Install content-os package
+# Install content-os package first so its declared dependency floor is known.
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir -e .
 
-# Install requirements in stages:
-# 1) Non-nvidia, non-whisper packages (CPU PyTorch index)
-# 2) openai-whisper with no-build-isolation (needs pkg_resources)
-RUN sed '/^openai-whisper\|^nvidia-/d' /app/requirements.txt > /tmp/reqs.txt \
+# The repository requirements file is a broad workstation snapshot, not a
+# container lockfile. Build the production CPU image without mutually exclusive
+# GPU runtimes and the legacy TensorFlow/inaSpeechSegmenter path. The latter is
+# used by 01_precompute_music_segments.py, not by the supported container
+# services, and otherwise pulls tensorflow[and-cuda] plus multi-GB NVIDIA wheels.
+#
+# Also ignore stale environment-specific pins that make a fresh Linux image
+# internally inconsistent. pip check below remains the final dependency gate.
+RUN sed -E \
+      -e '/^openai-whisper/d' \
+      -e '/^nvidia-/d' \
+      -e '/^onnxruntime-gpu/d' \
+      -e '/^tensorflow([<=>]|$)/d' \
+      -e '/^tf_keras([<=>]|$)/d' \
+      -e '/^inaSpeechSegmenter([<=>]|$)/d' \
+      -e '/^triton([<=>]|$)/d' \
+      -e '/^typing_extensions([<=>]|$)/d' \
+      -e '/^ninja([<=>]|$)/d' \
+      /app/requirements.txt > /tmp/reqs.txt \
     && pip install --no-cache-dir -r /tmp/reqs.txt \
        --extra-index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir --no-build-isolation openai-whisper
+    && pip install --no-cache-dir 'typing_extensions>=4.14.1' \
+    && pip install --no-cache-dir --no-build-isolation openai-whisper \
+    && pip check
 
-# Copy all project files
+# Copy all project files only after dependency resolution so source edits do not
+# invalidate the expensive dependency layer.
 COPY . /app
 
 CMD ["python", "-m", "content_os", "--help"]

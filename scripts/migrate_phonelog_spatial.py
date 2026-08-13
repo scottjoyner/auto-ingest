@@ -1,191 +1,172 @@
 #!/usr/bin/env python3
+"""Backfill ``PhoneLog.loc`` spatial points safely and idempotently.
+
+The migration is intentionally bounded and resumable. It only mutates nodes
+with valid normalized coordinates and can be re-run after interruption.
 """
-PhoneLog spatial point migration script.
+from __future__ import annotations
 
-Backfills the `loc` POINT property on PhoneLog nodes that are missing it,
-using existing latitude/longitude or geometry.coordinates fields.
-
-Usage:
-    python scripts/migrate_phonelog_spatial.py [--dry-run] [--batch-size N]
-
-This script:
-1. Finds PhoneLog nodes without `loc` property
-2. Extracts lat/lon from available sources (priority: loc -> latitude/longitude -> geometry.coordinates)
-3. Creates proper Neo4j POINT with CRS 'wgs-84'
-4. Runs in batches to avoid OOM on 21M+ node graph
-
-Safety:
-- Dry-run mode shows what would be done without writing
-- Batch processing prevents transaction timeouts
-- Idempotent (safe to re-run)
-"""
-import os
-import sys
 import argparse
 import logging
-from pathlib import Path
+import sys
 
-try:
-    from auto_ingest_config import get_neo4j_password
-    NEO4J_PASSWORD = get_neo4j_password()
-except Exception:
-    NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD") or os.environ.get("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
+from auto_ingest.ops.migration_safety import (
+    SafetyViolation,
+    preflight_summary,
+    validate_batch_size as validate_bounded_batch,
+)
+from auto_ingest_config import get_neo4j_env
 
-NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
-NEO4J_DB = os.environ.get("NEO4J_DB", "neo4j")
+NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, NEO4J_DB = get_neo4j_env()
+
+DEFAULT_BATCH_SIZE = 5_000
+MAX_BATCH_SIZE = 100_000
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+# PhoneLog.geometry is historically a string representation, not a Neo4j map.
+# PhoneLog normalization materializes either flat latitude/longitude or the
+# primitive coordinates array [longitude, latitude].
+COORDINATE_PROJECTION = """
+    WITH pl,
+        coalesce(pl.latitude, pl.coordinates[1]) AS lat,
+        coalesce(pl.longitude, pl.coordinates[0]) AS lon
+    WHERE lat IS NOT NULL
+      AND lon IS NOT NULL
+      AND lat >= -90 AND lat <= 90
+      AND lon >= -180 AND lon <= 180
+"""
 
-def count_missing_loc(driver):
-    """Count how many PhoneLog nodes are missing the loc property."""
+
+def validate_batch_size(batch_size: int) -> int:
+    """Compatibility wrapper around the shared production safety contract."""
+    return validate_bounded_batch(batch_size, max_batch_size=MAX_BATCH_SIZE)
+
+
+def count_missing_loc(driver) -> int:
     with driver.session(database=NEO4J_DB) as session:
-        result = session.run("""
-            MATCH (pl:PhoneLog)
-            WHERE pl.loc IS NULL
-            RETURN count(pl) AS missing
-        """)
-        return result.single()["missing"]
+        return session.run(
+            "MATCH (pl:PhoneLog) WHERE pl.loc IS NULL RETURN count(pl) AS missing"
+        ).single()["missing"]
 
 
-def migrate_batch(driver, batch_size: int, dry_run: bool = False):
-    """
-    Migrate one batch of PhoneLog nodes to add loc spatial point.
-    
-    Returns number of nodes migrated in this batch.
-    """
+def count_eligible(driver) -> int:
     with driver.session(database=NEO4J_DB) as session:
-        # Find nodes missing loc but having lat/lon data
-        query = """
-            MATCH (pl:PhoneLog)
-            WHERE pl.loc IS NULL
-              AND (pl.latitude IS NOT NULL OR pl.geometry IS NOT NULL)
-            WITH pl LIMIT $batch_size
-            // Extract coordinates from available sources
-            WITH pl,
-                coalesce(pl.latitude, 
-                    CASE WHEN pl.geometry IS NOT NULL AND pl.geometry.coordinates IS NOT NULL 
-                         THEN pl.geometry.coordinates[1] 
-                         ELSE NULL END
-                ) AS lat,
-                coalesce(pl.longitude,
-                    CASE WHEN pl.geometry IS NOT NULL AND pl.geometry.coordinates IS NOT NULL
-                         THEN pl.geometry.coordinates[0]
-                         ELSE NULL END
-                ) AS lon
-            WHERE lat IS NOT NULL AND lon IS NOT NULL
-            // Create spatial point
-            SET pl.loc = point({latitude: lat, longitude: lon, crs: 'wgs-84'})
-            RETURN count(pl) AS migrated
-        """
-        
-        if dry_run:
-            # Count what would be migrated without actually doing it
-            count_query = """
-                MATCH (pl:PhoneLog)
-                WHERE pl.loc IS NULL
-                  AND (pl.latitude IS NOT NULL OR pl.geometry IS NOT NULL)
-                WITH pl LIMIT $batch_size
-                WITH pl,
-                    coalesce(pl.latitude, 
-                        CASE WHEN pl.geometry IS NOT NULL AND pl.geometry.coordinates IS NOT NULL 
-                             THEN pl.geometry.coordinates[1] 
-                             ELSE NULL END
-                    ) AS lat,
-                    coalesce(pl.longitude,
-                        CASE WHEN pl.geometry IS NOT NULL AND pl.geometry.coordinates IS NOT NULL
-                             THEN pl.geometry.coordinates[0]
-                             ELSE NULL END
-                    ) AS lon
-                WHERE lat IS NOT NULL AND lon IS NOT NULL
-                RETURN count(pl) AS would_migrate
+        result = session.run(
             """
-            result = session.run(count_query, batch_size=batch_size)
+            MATCH (pl:PhoneLog)
+            WHERE pl.loc IS NULL
+              AND (pl.latitude IS NOT NULL OR pl.coordinates IS NOT NULL)
+            """
+            + COORDINATE_PROJECTION
+            + "RETURN count(pl) AS eligible"
+        )
+        return result.single()["eligible"]
+
+
+def migrate_batch(driver, batch_size: int, dry_run: bool = False) -> int:
+    batch_size = validate_batch_size(batch_size)
+    prefix = """
+        MATCH (pl:PhoneLog)
+        WHERE pl.loc IS NULL
+          AND (pl.latitude IS NOT NULL OR pl.coordinates IS NOT NULL)
+        WITH pl LIMIT $batch_size
+    """
+    with driver.session(database=NEO4J_DB) as session:
+        if dry_run:
+            result = session.run(
+                prefix + COORDINATE_PROJECTION + "RETURN count(pl) AS would_migrate",
+                batch_size=batch_size,
+            )
             return result.single()["would_migrate"]
-        else:
-            result = session.run(query, batch_size=batch_size)
-            return result.single()["migrated"]
+        result = session.run(
+            prefix
+            + COORDINATE_PROJECTION
+            + """
+              SET pl.loc = point({latitude: lat, longitude: lon, crs: 'wgs-84'})
+              RETURN count(pl) AS migrated
+            """,
+            batch_size=batch_size,
+        )
+        return result.single()["migrated"]
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Migrate PhoneLog nodes to add spatial loc property")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be done without writing")
-    parser.add_argument("--batch-size", type=int, default=5000, help="Nodes per batch (default: 5000)")
-    parser.add_argument("--max-batches", type=int, default=0, help="Maximum batches to process (0 = unlimited)")
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Migrate PhoneLog spatial loc property")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--max-batches", type=int, default=0)
     args = parser.parse_args()
-    
-    logger.info(f"Connecting to {NEO4J_URI}/{NEO4J_DB}...")
+    try:
+        validate_batch_size(args.batch_size)
+    except SafetyViolation as exc:
+        parser.error(str(exc))
+    if args.max_batches < 0:
+        parser.error("--max-batches cannot be negative")
+
     driver = None
-    
     try:
         from neo4j import GraphDatabase
-        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-        
-        # Verify connection
-        with driver.session() as session:
-            session.run("RETURN 1")
-        logger.info("Connected successfully")
-        
-        # Check current state
+
+        logger.info("Connecting to %s/%s", NEO4J_URI, NEO4J_DB)
+        driver = GraphDatabase.driver(
+            NEO4J_URI,
+            auth=(NEO4J_USER, NEO4J_PASSWORD),
+            connection_timeout=15,
+        )
+        driver.verify_connectivity()
         missing_before = count_missing_loc(driver)
-        logger.info(f"PhoneLog nodes missing `loc`: {missing_before:,}")
-        
-        if missing_before == 0:
-            logger.info("All PhoneLog nodes already have `loc` property. Nothing to do.")
-            return 0
-        
+        eligible_before = count_eligible(driver)
+        plan = preflight_summary(
+            operation="phonelog_spatial",
+            total_candidates=missing_before,
+            eligible_candidates=eligible_before,
+            batch_size=args.batch_size,
+            max_batch_size=MAX_BATCH_SIZE,
+            dry_run=args.dry_run,
+        )
+        logger.info("Preflight: %s", plan)
+
         if args.dry_run:
-            logger.info("DRY RUN MODE - no changes will be made")
-            # Estimate how many batches needed
-            estimated_batches = (missing_before + args.batch_size - 1) // args.batch_size
-            logger.info(f"Estimated batches needed: {estimated_batches}")
-            logger.info(f"Batch size: {args.batch_size:,}")
-            
-            # Show first batch estimate
-            migrated = migrate_batch(driver, args.batch_size, dry_run=True)
-            logger.info(f"First batch would migrate: {migrated:,} nodes")
-            logger.info("Dry run complete. Run without --dry-run to apply changes.")
+            first = migrate_batch(driver, args.batch_size, dry_run=True)
+            logger.info("DRY RUN first batch would migrate %,d", first)
             return 0
-        
-        # Actual migration
-        logger.info(f"Migrating in batches of {args.batch_size:,}...")
-        total_migrated = 0
-        batch_num = 0
-        
-        while True:
-            batch_num += 1
-            migrated = migrate_batch(driver, args.batch_size, dry_run=False)
-            
-            if migrated == 0:
-                logger.info(f"Batch {batch_num}: No more nodes to migrate")
+
+        total = 0
+        batches = 0
+        remaining = eligible_before
+        while remaining:
+            if args.max_batches and batches >= args.max_batches:
+                logger.warning(
+                    "Stopped at explicit max-batches=%d with %,d eligible nodes remaining",
+                    args.max_batches,
+                    remaining,
+                )
                 break
-            
-            total_migrated += migrated
-            logger.info(f"Batch {batch_num}: Migrated {migrated:,} nodes (total: {total_migrated:,})")
-            
-            if args.max_batches > 0 and batch_num >= args.max_batches:
-                logger.info(f"Reached max batches limit ({args.max_batches}). Stopping.")
+            migrated = migrate_batch(driver, args.batch_size)
+            if not migrated:
                 break
-        
-        # Verify results
-        missing_after = count_missing_loc(driver)
-        logger.info(f"\nMigration complete!")
-        logger.info(f"  Before: {missing_before:,} nodes missing `loc`")
-        logger.info(f"  After:  {missing_after:,} nodes missing `loc`")
-        logger.info(f"  Migrated: {total_migrated:,} nodes")
-        
-        if missing_after > 0:
-            logger.warning(f"  Still {missing_after:,} nodes without loc (may lack lat/lon data)")
-        
+            total += migrated
+            batches += 1
+            remaining = count_eligible(driver)
+            logger.info(
+                "Batch %d migrated %,d (total %,d; remaining %,d)",
+                batches,
+                migrated,
+                total,
+                remaining,
+            )
+
+        logger.info("Migration complete; migrated %,d", total)
+        logger.info("Remaining eligible: %,d", count_eligible(driver))
+        logger.info("Remaining missing loc: %,d", count_missing_loc(driver))
         return 0
-        
-    except Exception as e:
-        logger.error(f"Error during migration: {e}", exc_info=True)
+    except Exception:
+        logger.exception("PhoneLog spatial migration failed")
         return 1
     finally:
-        if driver:
+        if driver is not None:
             driver.close()
 
 
