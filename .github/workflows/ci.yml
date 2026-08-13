@@ -71,6 +71,12 @@ jobs:
           assert cfg.DEFAULT_NEO4J_URI == "bolt://localhost:7687"
           PY
 
+      - name: Control-plane CLI smoke
+        run: |
+          python -m auto_ingest.orchestration --help
+          python -m auto_ingest.operations --help
+          python -m auto_ingest.worker_loop --help
+
       - name: Fast tests
         run: >-
           python -m pytest tests/ -vv --durations=20 --timeout=60
@@ -97,17 +103,26 @@ jobs:
       - name: Validate Compose model
         run: docker compose --env-file deploy/ci.env config --quiet
 
-      - name: Verify expected service topology
+      - name: Verify canonical service topology
         run: |
           services="$(docker compose --env-file deploy/ci.env config --services)"
           printf '%s\n' "$services"
-          for required in ingest-service ingest-worker sync-service content-service ingest-cron content-cron; do
+          for required in ingest-worker content-service ingest-cron content-cron; do
             echo "$services" | grep -qx "$required"
           done
-          if echo "$services" | grep -qx job-api; then
-            echo "deprecated job-api unexpectedly present"
-            exit 1
-          fi
+          for forbidden in ingest-service sync-service job-api; do
+            if echo "$services" | grep -qx "$forbidden"; then
+              echo "non-canonical service unexpectedly present: $forbidden"
+              exit 1
+            fi
+          done
+
+      - name: Verify scheduled ingest routes through orchestrator
+        run: |
+          grep -q "auto_ingest.orchestration run --profile sync" deploy/cron/ingest.crontab
+          grep -q "auto_ingest.orchestration run --profile full" deploy/cron/ingest.crontab
+          grep -q "auto_ingest.orchestration run --profile dashcam" deploy/cron/ingest.crontab
+          ! grep -q "run_ingest_all.sh" deploy/cron/ingest.crontab
 
   neo4j-integration:
     runs-on: ubuntu-latest
@@ -160,5 +175,9 @@ jobs:
       - name: Verify installed dependency graph
         run: docker run --rm auto-ingest:ci python -m pip check
 
-      - name: Smoke image entrypoint
-        run: docker run --rm auto-ingest:ci python -m content_os --help
+      - name: Smoke production control-plane entrypoints
+        run: |
+          docker run --rm auto-ingest:ci python -m content_os --help
+          docker run --rm auto-ingest:ci python -m auto_ingest.orchestration --help
+          docker run --rm auto-ingest:ci python -m auto_ingest.operations --help
+          docker run --rm auto-ingest:ci python -m auto_ingest.worker_loop --help
