@@ -1,0 +1,9 @@
+extend = "pyproject.toml"
+
+[lint.extend-per-file-ignores]
+"tests/test_captions_pipeline_coverage.py" = ["E702", "F401"]
+"tests/test_compose_pipeline_coverage.py" = ["E702", "F401"]
+"tests/test_events_fleet_coverage.py" = ["F401"]
+"tests/test_global_speaker_main_coverage.py" = ["F401"]
+"tests/test_runtime_core_gap_coverage.py" = ["E702"]
+"tests/test_yolo_pipeline_coverage.py" = ["E701", "E702", "F401"]
