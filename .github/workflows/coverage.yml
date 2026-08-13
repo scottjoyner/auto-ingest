@@ -53,6 +53,21 @@ jobs:
           --output coverage-functions.json
           --min-total 0 --min-function 0 --top 100
 
+      - name: Build source snapshot for coverage debugging
+        run: |
+          tar \
+            --exclude=.git \
+            --exclude=.venv \
+            --exclude='__pycache__' \
+            --exclude='*.mp4' \
+            --exclude='*.mov' \
+            --exclude='*.wav' \
+            --exclude='*.jpg' \
+            --exclude='*.jpeg' \
+            --exclude='*.png' \
+            --exclude='*.zip' \
+            -czf source-snapshot.tar.gz .
+
       - name: Upload coverage evidence
         uses: actions/upload-artifact@v4
         with:
@@ -60,6 +75,7 @@ jobs:
           path: |
             coverage.json
             coverage-functions.json
+            source-snapshot.tar.gz
 
       # This becomes the final hard gate after the deficit is eliminated:
       # python tools/coverage_audit.py coverage.json --min-total 90 --min-function 90
