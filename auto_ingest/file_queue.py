@@ -88,8 +88,14 @@ def ensure_dirs(root: str | Path) -> dict[str, Path]:
     return dirs
 
 
-def enqueue(root: str | Path, profile: str, *, metadata: dict | None = None,
-            job_id: str | None = None, now: int | None = None) -> Path:
+def enqueue(
+    root: str | Path,
+    profile: str,
+    *,
+    metadata: dict | None = None,
+    job_id: str | None = None,
+    now: int | None = None,
+) -> Path:
     if profile not in PROFILES:
         raise QueueJobError(f"unknown profile: {profile!r}")
     dirs = ensure_dirs(root)
@@ -101,7 +107,6 @@ def enqueue(root: str | Path, profile: str, *, metadata: dict | None = None,
         created_at=int(time.time() if now is None else now),
         metadata=dict(metadata or {}),
     )
-    # Validate our own serialized shape before publication.
     QueueJob.from_dict(job.to_dict())
     final = dirs["root"] / f"{jid}.job.json"
     fd, temp_name = tempfile.mkstemp(prefix=f".{jid}.", suffix=".tmp", dir=dirs["root"])
@@ -119,9 +124,10 @@ def enqueue(root: str | Path, profile: str, *, metadata: dict | None = None,
 
 
 def load_job(path: str | Path) -> QueueJob:
+    """Load a typed queue payload before or after its atomic claim rename."""
     p = Path(path)
-    if p.suffix != ".json" or not p.name.endswith(".job.json"):
-        raise QueueJobError("only *.job.json typed queue items are accepted")
+    if p.suffix != ".json":
+        raise QueueJobError("only JSON typed queue items are accepted")
     try:
         value = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -134,7 +140,6 @@ def load_job(path: str | Path) -> QueueJob:
 def claim_one(root: str | Path, *, owner: str | None = None) -> Path | None:
     dirs = ensure_dirs(root)
     worker = owner or f"{socket.gethostname()}-{os.getpid()}"
-    # Explicitly reject old executable .job files rather than ever running them.
     for legacy in sorted(dirs["root"].glob("*.job")):
         target = dirs["rejected"] / f"{legacy.name}.legacy-shell-rejected"
         try:
@@ -182,15 +187,18 @@ def process_claimed(
     elif rc == 3:
         target = dirs["failed"] / f"{job.job_id}.quarantined.json"
     else:
-        # RETRY remains represented in Neo4j; put the typed item back so a later
-        # worker can acquire it. This move is atomic within the same filesystem.
         target = dirs["root"] / f"{job.job_id}.job.json"
     os.replace(claimed, target)
     return rc
 
 
-def work_once(driver, root: str | Path, *, owner: str | None = None,
-              runner: Callable[..., int] = run_profile) -> int:
+def work_once(
+    driver,
+    root: str | Path,
+    *,
+    owner: str | None = None,
+    runner: Callable[..., int] = run_profile,
+) -> int:
     claimed = claim_one(root, owner=owner)
     if claimed is None:
         return 0
@@ -199,6 +207,7 @@ def work_once(driver, root: str | Path, *, owner: str | None = None,
 
 def _driver():
     from neo4j import GraphDatabase
+
     from auto_ingest_config import get_neo4j_config
 
     cfg = get_neo4j_config()
