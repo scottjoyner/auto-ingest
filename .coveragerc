@@ -2,16 +2,10 @@
 branch = True
 relative_files = True
 source =
-    .
-omit =
-    tests/*
-    */tests/*
-    .venv/*
-    venv/*
-    build/*
-    dist/*
-    */__pycache__/*
-    site-packages/*
+    auto_ingest
+    content_os
+    birdcam
+    auto_ingest_config
 
 [report]
 show_missing = True
