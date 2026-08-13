@@ -8,6 +8,12 @@ if [[ ! -f "$CRON_FILE" ]]; then
   exit 1
 fi
 
+# Ingest cron is allowed to bootstrap the non-destructive runtime schema only
+# after duplicate preflight checks pass. Content-only cron leaves this disabled.
+if [[ "${SCHEMA_ENSURE:-0}" == "1" ]]; then
+  python3 -m auto_ingest.operations schema-ensure
+fi
+
 cp "$CRON_FILE" /etc/cron.d/app-cron
 chmod 0644 /etc/cron.d/app-cron
 crontab /etc/cron.d/app-cron
