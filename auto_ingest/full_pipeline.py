@@ -1,9 +1,9 @@
 """Canonical stage-level full ingest pipeline.
 
-Unlike the historical ``bin/auto-ingest run-all`` chain, each heavy stage is a
-persisted orchestration task. Successful stages are not replayed after a later
-failure; retries resume at the first incomplete task and remain fenced to the
-current lease generation.
+Each heavy stage is a persisted orchestration task. Successful stages are not
+replayed after a later failure; retries resume at the first incomplete task.
+The persisted plan fingerprint prevents mixed-generation resumes when commands
+or stage settings change after partial progress.
 """
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ import time
 from pathlib import Path
 from typing import Sequence
 
-from auto_ingest.orchestration import Task, run_profile
+from auto_ingest.orchestration import Task, ensure_job, run_profile
+from auto_ingest.pipeline_contract import bind_plan
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -97,16 +98,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("full pipeline configuration is environment-driven")
     driver = _driver()
     try:
+        key = os.environ.get("FULL_INGEST_JOB_KEY") or default_job_key()
+        tasks = build_tasks()
+        ensure_job(driver, key, "full-stages")
+        bind_plan(driver, key, tasks)
         return run_profile(
             driver,
             "full-stages",
-            job_key=os.environ.get("FULL_INGEST_JOB_KEY") or default_job_key(),
+            job_key=key,
             owner=os.environ.get("FULL_INGEST_OWNER")
             or f"full:{socket.gethostname()}:{os.getpid()}",
             ttl_sec=int(os.environ.get("FULL_INGEST_LEASE_TTL_SEC", "300")),
             heartbeat_sec=int(os.environ.get("FULL_INGEST_HEARTBEAT_SEC", "30")),
             max_attempts=int(os.environ.get("FULL_INGEST_MAX_ATTEMPTS", "3")),
-            tasks=build_tasks(),
+            tasks=tasks,
         )
     finally:
         driver.close()
