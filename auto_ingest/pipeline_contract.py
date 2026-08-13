@@ -1,14 +1,16 @@
 """Persisted execution-plan contracts for resumable pipelines.
 
 A partially completed job must not silently resume under a different task graph.
-The deterministic plan hash binds task names, commands, timeouts, and declared
-versions. Plan drift is safe before any task commits, but becomes an explicit
-operator decision after progress exists.
+The deterministic plan hash binds task names, semantic commands, timeouts, and
+declared versions. Host-specific Python executable paths are normalized so the
+same logical plan can fail over across machines without a false drift alarm.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -25,17 +27,28 @@ class PlannedTask:
     version: str = "1"
 
 
+def _normalize_command(command: Iterable[object]) -> list[str]:
+    values = [str(v) for v in command]
+    if not values:
+        raise ValueError("pipeline task command must be non-empty")
+    first = values[0]
+    base = os.path.basename(first).lower()
+    if re.fullmatch(r"python(?:3(?:\.\d+)?)?", base):
+        values[0] = "<python>"
+    return values
+
+
 def plan_payload(tasks: Iterable[object]) -> list[dict]:
     payload: list[dict] = []
     for task in tasks:
         name = str(getattr(task, "name"))
-        command = tuple(str(v) for v in getattr(task, "command"))
+        command = _normalize_command(getattr(task, "command"))
         timeout = int(getattr(task, "timeout_sec"))
         version = str(getattr(task, "version", "1"))
         payload.append(
             {
                 "name": name,
-                "command": list(command),
+                "command": command,
                 "timeout_sec": timeout,
                 "version": version,
             }
