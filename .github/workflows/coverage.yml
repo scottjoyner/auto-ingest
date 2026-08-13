@@ -52,6 +52,22 @@ jobs:
                    "$TRANSCRIPT_ROOT" "$NEXTCLOUD_ROOT" "$STATE_ROOT"
           touch "$FILESERVER_ROOT/.keep" "$HOT_STORAGE_ROOT/.keep" "$COLD_STORAGE_ROOT/.keep"
 
+      - name: Snapshot exact PR source
+        run: |
+          tar \
+            --exclude=.git \
+            --exclude=.venv \
+            --exclude='__pycache__' \
+            --exclude='*.mp4' \
+            --exclude='*.mov' \
+            --exclude='*.wav' \
+            --exclude='*.jpg' \
+            --exclude='*.jpeg' \
+            --exclude='*.png' \
+            --exclude='*.zip' \
+            --exclude='*.tar.gz' \
+            -czf /tmp/source-snapshot.tar.gz .
+
       - name: Install coverage test dependencies
         run: |
           python -m pip install --upgrade pip
@@ -81,22 +97,6 @@ jobs:
           python tools/coverage_audit.py coverage.json
           --output coverage-functions.json
           --min-total 0 --min-function 0 --top 100
-
-      - name: Build source snapshot for coverage debugging
-        run: |
-          tar \
-            --exclude=.git \
-            --exclude=.venv \
-            --exclude='__pycache__' \
-            --exclude='*.mp4' \
-            --exclude='*.mov' \
-            --exclude='*.wav' \
-            --exclude='*.jpg' \
-            --exclude='*.jpeg' \
-            --exclude='*.png' \
-            --exclude='*.zip' \
-            --exclude='*.tar.gz' \
-            -czf /tmp/source-snapshot.tar.gz .
 
       - name: Upload coverage evidence
         if: always()
