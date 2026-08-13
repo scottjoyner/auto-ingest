@@ -12,10 +12,20 @@ def test_worker_tasks_do_not_put_passwords_on_argv(monkeypatch):
 def test_worker_tasks_include_canonical_resumable_stages(monkeypatch):
     monkeypatch.setenv("CONTENT", "1")
     monkeypatch.setenv("LINK_CHUNK", "123")
+    monkeypatch.setenv("DROP_ROOT", "/tmp/typed-drop")
     tasks = build_worker_tasks()
     names = [task.name for task in tasks]
-    assert names[:3] == ["speaker-link", "dashcam-compress", "content"]
-    link = tasks[0].command
+    assert names[:4] == [
+        "fallback-queue",
+        "speaker-link",
+        "dashcam-compress",
+        "content",
+    ]
+    queue = tasks[0].command
+    assert "auto_ingest.file_queue" in queue
+    assert "--once" in queue
+    assert "/tmp/typed-drop" in queue
+    link = tasks[1].command
     assert "--state-file" in link
     assert "--max-speakers" in link
     assert "123" in link
