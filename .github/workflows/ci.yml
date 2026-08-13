@@ -88,10 +88,19 @@ jobs:
           assert callable(build_command)
           PY
 
-      - name: Fast tests
+      - name: Fast tests + coverage inventory
         run: >-
           python -m pytest tests/ -vv --durations=20 --timeout=60
           -m "not integration and not ml and not e2e and not destructive"
+          --cov --cov-branch --cov-report=term-missing --cov-report=json:coverage.json
+
+      - name: Upload coverage inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-fast
+          path: coverage.json
+          if-no-files-found: warn
 
       - name: Render/persona compatibility tests
         run: |
