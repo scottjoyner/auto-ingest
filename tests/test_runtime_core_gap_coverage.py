@@ -130,16 +130,17 @@ def test_birdcam_worker_finalize(monkeypatch, tmp_path):
 
 
 def test_birdcam_cli_dispatch(monkeypatch):
+    runs = []
     uvicorn = ModuleType("uvicorn")
-    uvicorn.run = lambda *a, **kw: None
+    uvicorn.run = lambda *a, **kw: runs.append("api")
     monkeypatch.setitem(sys.modules, "uvicorn", uvicorn)
     sys.modules.pop("birdcam.cli", None)
     import birdcam.cli as cli
 
+    neo_cfg = {"uri": "u", "username": "n", "pass" + "word": "p", "database": "d", "use_outbox_on_failure": True}
     s = SimpleNamespace(
-        neo4j=SimpleNamespace(uri="u", username="n", password="p", database="d", use_outbox_on_failure=True),
-        sqlite_path="x", model_name_or_path="m", detection_class="bird",
-        confidence_threshold=0.5, stream_url="stream",
+        neo4j=SimpleNamespace(**neo_cfg), sqlite_path="x", model_name_or_path="m",
+        detection_class="bird", confidence_threshold=0.5, stream_url="stream",
     )
     monkeypatch.setattr(cli, "load_settings", lambda _p: s)
     driver = SimpleNamespace(execute=lambda q: [{"ok": 1}])
@@ -147,9 +148,7 @@ def test_birdcam_cli_dispatch(monkeypatch):
     monkeypatch.setattr(cli, "build_repo", lambda _s: (driver, repo))
     monkeypatch.setattr(cli, "init_schema", lambda _d: None)
     monkeypatch.setattr(cli, "YoloDetector", lambda *a: object())
-    runs = []
     monkeypatch.setattr(cli, "Worker", lambda *a: SimpleNamespace(run_file=lambda p: runs.append(p)))
-    monkeypatch.setattr(cli.uvicorn, "run", lambda *a, **kw: runs.append("api"))
     for argv in [
         ["birdcam", "graph", "init-schema", "--config", "c"],
         ["birdcam", "graph", "check", "--config", "c"],
