@@ -5,7 +5,7 @@ import json
 import sys
 from argparse import Namespace
 from datetime import datetime
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -130,6 +130,10 @@ def test_birdcam_worker_finalize(monkeypatch, tmp_path):
 
 
 def test_birdcam_cli_dispatch(monkeypatch):
+    uvicorn = ModuleType("uvicorn")
+    uvicorn.run = lambda *a, **kw: None
+    monkeypatch.setitem(sys.modules, "uvicorn", uvicorn)
+    sys.modules.pop("birdcam.cli", None)
     import birdcam.cli as cli
 
     s = SimpleNamespace(
