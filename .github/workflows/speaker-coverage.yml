@@ -20,7 +20,7 @@ jobs:
       - name: Run speaker coverage
         run: |
           coverage erase
-          coverage run --branch -m pytest tests/test_global_speaker_pure_coverage.py tests/test_global_speaker_cluster_coverage.py -q -m ml --timeout=60
+          coverage run --branch -m pytest tests/test_global_speaker_pure_coverage.py tests/test_global_speaker_cluster_coverage.py tests/test_global_speaker_main_coverage.py -q -m ml --timeout=60
           coverage report -m --include='auto_ingest/diarize/link_global_speakers.py'
           coverage json -o speaker-coverage.json --include='auto_ingest/diarize/link_global_speakers.py'
       - name: Upload evidence
