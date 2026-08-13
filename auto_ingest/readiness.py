@@ -30,6 +30,7 @@ def readiness(driver) -> dict:
 
 def _driver():
     from neo4j import GraphDatabase
+
     from auto_ingest_config import get_neo4j_config
 
     cfg = get_neo4j_config()
