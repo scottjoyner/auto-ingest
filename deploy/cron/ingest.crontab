@@ -5,6 +5,10 @@
 # Sync legacy drop every 5 minutes.
 */5 * * * * cd /app && /usr/bin/env python3 -m auto_ingest.orchestration run --profile sync >> /var/log/cron-sync.log 2>&1
 
+# Recover abandoned orchestration leases every 10 minutes. This is bounded and
+# quarantines repeated stale failures rather than creating an infinite retry loop.
+*/10 * * * * cd /app && /usr/bin/env python3 -m auto_ingest.watchdog --stale-after-sec 600 --limit 100 --max-stale-recoveries 3 >> /var/log/cron-watchdog.log 2>&1
+
 # Main ingest pipeline every 30 minutes, persisted at individual heavy stages.
 */30 * * * * cd /app && /usr/bin/env python3 -m auto_ingest.full_pipeline >> /var/log/cron-ingest.log 2>&1
 
