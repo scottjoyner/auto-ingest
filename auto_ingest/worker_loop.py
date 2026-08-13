@@ -17,7 +17,23 @@ REPO = Path(__file__).resolve().parent.parent
 
 def build_worker_tasks() -> tuple[Task, ...]:
     link_chunk = os.environ.get("LINK_CHUNK", "200")
+    drop_root = os.environ.get("DROP_ROOT", "/nas/drop")
     tasks: list[Task] = [
+        # Safe local/NAS fallback queue. This only accepts typed *.job.json
+        # profiles and explicitly rejects legacy executable *.job shell files.
+        Task(
+            "fallback-queue",
+            (
+                sys.executable,
+                "-m",
+                "auto_ingest.file_queue",
+                "work",
+                "--once",
+                "--root",
+                drop_root,
+            ),
+            3600,
+        ),
         Task(
             "speaker-link",
             (
