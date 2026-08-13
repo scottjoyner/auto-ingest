@@ -66,16 +66,19 @@ jobs:
             --exclude='*.jpeg' \
             --exclude='*.png' \
             --exclude='*.zip' \
-            -czf source-snapshot.tar.gz .
+            --exclude='*.tar.gz' \
+            -czf /tmp/source-snapshot.tar.gz .
 
       - name: Upload coverage evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-evidence
+          if-no-files-found: warn
           path: |
             coverage.json
             coverage-functions.json
-            source-snapshot.tar.gz
+            /tmp/source-snapshot.tar.gz
 
-      # This becomes the final hard gate after the deficit is eliminated:
+      # Final hard gate after the deficit is eliminated:
       # python tools/coverage_audit.py coverage.json --min-total 90 --min-function 90
