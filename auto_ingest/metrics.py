@@ -81,6 +81,7 @@ def render_prometheus(metrics: dict) -> str:
 
 def _driver():
     from neo4j import GraphDatabase
+
     from auto_ingest_config import get_neo4j_config
 
     cfg = get_neo4j_config()
