@@ -3,7 +3,8 @@
 This is the preferred entrypoint for reusable named profiles. It binds the
 current semantic task graph to the persisted job before acquiring a lease, so a
 retry cannot silently mix completed work from one profile generation with a
-changed command graph.
+changed command graph. The historical ``full`` alias resolves to the canonical
+stage-level graph rather than the legacy monolithic run-all task.
 """
 from __future__ import annotations
 
@@ -13,6 +14,14 @@ from typing import Sequence
 
 from auto_ingest.orchestration import PROFILES, default_job_key, ensure_job, run_profile
 from auto_ingest.pipeline_contract import bind_plan
+
+
+def profile_tasks(profile: str):
+    if profile == "full":
+        from auto_ingest.full_pipeline import build_tasks
+
+        return build_tasks()
+    return PROFILES[profile]
 
 
 def run_bound_profile(
@@ -28,7 +37,7 @@ def run_bound_profile(
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}")
     key = job_key or default_job_key(profile)
-    tasks = PROFILES[profile]
+    tasks = profile_tasks(profile)
     ensure_job(driver, key, profile)
     bind_plan(driver, key, tasks)
     return run_profile(
