@@ -9,18 +9,24 @@ import time
 from pathlib import Path
 from typing import Sequence
 
-from auto_ingest.orchestration import Task, run_profile
+from auto_ingest.orchestration import Task, ensure_job, run_profile
+from auto_ingest.pipeline_contract import bind_plan
 from auto_ingest.resources import ResourcePolicy, admission, snapshot
 
 REPO = Path(__file__).resolve().parent.parent
 
 
+def state_root() -> Path:
+    root = Path(os.environ.get("STATE_ROOT", str(REPO / ".state")))
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def build_worker_tasks() -> tuple[Task, ...]:
     link_chunk = os.environ.get("LINK_CHUNK", "200")
     drop_root = os.environ.get("DROP_ROOT", "/nas/drop")
+    state = state_root()
     tasks: list[Task] = [
-        # Safe local/NAS fallback queue. This only accepts typed *.job.json
-        # profiles and explicitly rejects legacy executable *.job shell files.
         Task(
             "fallback-queue",
             (
@@ -37,17 +43,17 @@ def build_worker_tasks() -> tuple[Task, ...]:
         Task(
             "speaker-link",
             (
-                str(REPO / "bin" / "auto-ingest"),
+                "bin/auto-ingest",
                 "link-speakers",
                 "--faiss",
                 "--state-file",
-                str(REPO / "linker_state.json"),
+                str(state / "linker_state.json"),
                 "--max-speakers",
                 link_chunk,
             ),
             7200,
         ),
-        Task("dashcam-compress", ("bash", str(REPO / "run_compress_dashcam.sh")), 14400),
+        Task("dashcam-compress", ("bash", "run_compress_dashcam.sh"), 14400),
     ]
     if os.environ.get("CONTENT", "1") != "0":
         tasks.append(
@@ -55,9 +61,9 @@ def build_worker_tasks() -> tuple[Task, ...]:
                 "content",
                 (
                     sys.executable,
-                    str(REPO / "worker_content.py"),
+                    "worker_content.py",
                     "--state",
-                    str(REPO / "content_state.json"),
+                    str(state / "content_state.json"),
                     "--limit",
                     os.environ.get("CONTENT_LIMIT", "5"),
                 ),
@@ -65,8 +71,6 @@ def build_worker_tasks() -> tuple[Task, ...]:
             )
         )
 
-    # The media ingester itself resolves Nextcloud URL/user/token from config.yaml
-    # when no explicit URL is passed, keeping credentials out of argv/process lists.
     try:
         from auto_ingest_config import get_nextcloud_webdav
 
@@ -78,7 +82,7 @@ def build_worker_tasks() -> tuple[Task, ...]:
             Task(
                 "nextcloud-media",
                 (
-                    str(REPO / "bin" / "auto-ingest"),
+                    "bin/auto-ingest",
                     "ingest",
                     "--source",
                     "nextcloud",
@@ -88,7 +92,7 @@ def build_worker_tasks() -> tuple[Task, ...]:
                     "--limit",
                     os.environ.get("NC_LIMIT", "40"),
                     "--state",
-                    str(REPO / "nc_ingest_state.json"),
+                    str(state / "nc_ingest_state.json"),
                 ),
                 14400,
             )
@@ -120,12 +124,15 @@ def run_cycle(
     ts = time.time() if now is None else now
     window = max(60, int(os.environ.get("WORKER_WINDOW_SEC", "300")))
     key = f"worker-cycle:{socket.gethostname()}:{int(ts) // window}"
+    tasks = build_worker_tasks()
+    ensure_job(driver, key, "worker")
+    bind_plan(driver, key, tasks)
     return run_profile(
         driver,
         "worker",
         job_key=key,
         owner=f"worker:{socket.gethostname()}:{os.getpid()}",
-        tasks=build_worker_tasks(),
+        tasks=tasks,
         ttl_sec=int(os.environ.get("WORKER_LEASE_TTL_SEC", "300")),
         heartbeat_sec=int(os.environ.get("WORKER_HEARTBEAT_SEC", "30")),
         max_attempts=int(os.environ.get("WORKER_MAX_ATTEMPTS", "3")),
@@ -164,7 +171,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         min_memory_available_mb=args.min_memory_mb,
         min_disk_free_gb=args.min_disk_gb,
     )
-    stop = REPO / "worker.stop"
+    stop = state_root() / "worker.stop"
     driver = _driver()
     try:
         while not stop.exists():
