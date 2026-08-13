@@ -8,8 +8,9 @@ branch data with Python AST function spans and can enforce both:
 * repository-wide branch-aware coverage >= --min-total
 * every non-empty function's branch-aware coverage >= --min-function
 
-Only lines that coverage.py considers executable participate. Functions with no
-measurable executable lines (for example protocol/typing declarations) are
+Branch coverage is counted using individual coverage.py branch arcs, not merely
+the number of source lines containing branches. Only executable lines reported
+by coverage.py participate. Functions with no measurable executable lines are
 reported as N/A rather than counted as failures.
 """
 from __future__ import annotations
@@ -17,7 +18,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -54,9 +55,15 @@ def _function_nodes(tree: ast.AST) -> Iterable[tuple[str, ast.AST]]:
     yield from walk(tree, [])
 
 
-def _branch_lines(file_data: dict) -> tuple[set[int], set[int]]:
-    executed = {int(src) for src, _dst in file_data.get("executed_branches", [])}
-    missing = {int(src) for src, _dst in file_data.get("missing_branches", [])}
+def _branch_arcs(file_data: dict) -> tuple[set[tuple[int, int]], set[tuple[int, int]]]:
+    executed = {
+        (int(src), int(dst))
+        for src, dst in file_data.get("executed_branches", [])
+    }
+    missing = {
+        (int(src), int(dst))
+        for src, dst in file_data.get("missing_branches", [])
+    }
     return executed, missing
 
 
@@ -76,21 +83,22 @@ def audit(coverage_json: str | Path, repo_root: str | Path = ".") -> dict:
         executed = set(map(int, data.get("executed_lines", [])))
         missing = set(map(int, data.get("missing_lines", [])))
         executable = executed | missing
-        executed_branch_lines, missing_branch_lines = _branch_lines(data)
+        executed_arcs, missing_arcs = _branch_arcs(data)
 
         for qualname, node in _function_nodes(tree):
             start = int(getattr(node, "lineno", 0))
             end = int(getattr(node, "end_lineno", start))
             fn_lines = {line for line in executable if start <= line <= end}
             fn_covered = fn_lines & executed
-            branch_sources = {
-                line
-                for line in executed_branch_lines | missing_branch_lines
-                if start <= line <= end
+            fn_executed_arcs = {
+                arc for arc in executed_arcs if start <= arc[0] <= end
             }
-            covered_branch_sources = branch_sources & executed_branch_lines
-            denominator = len(fn_lines) + len(branch_sources)
-            numerator = len(fn_covered) + len(covered_branch_sources)
+            fn_missing_arcs = {
+                arc for arc in missing_arcs if start <= arc[0] <= end
+            }
+            all_arcs = fn_executed_arcs | fn_missing_arcs
+            denominator = len(fn_lines) + len(all_arcs)
+            numerator = len(fn_covered) + len(fn_executed_arcs)
             percent = (100.0 * numerator / denominator) if denominator else None
             functions.append(
                 FunctionCoverage(
@@ -100,8 +108,8 @@ def audit(coverage_json: str | Path, repo_root: str | Path = ".") -> dict:
                     end=end,
                     statements=len(fn_lines),
                     covered_statements=len(fn_covered),
-                    branches=len(branch_sources),
-                    covered_branches=len(covered_branch_sources),
+                    branches=len(all_arcs),
+                    covered_branches=len(fn_executed_arcs),
                     percent=percent,
                 )
             )
