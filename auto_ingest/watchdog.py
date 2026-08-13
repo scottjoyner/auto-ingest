@@ -16,8 +16,13 @@ from typing import Sequence
 ACTIVE_STATES = ("CLAIMED", "RUNNING", "VALIDATING")
 
 
-def stale_jobs(driver, *, stale_after_sec: int = 600, limit: int = 100,
-               now_ms: int | None = None) -> list[dict]:
+def stale_jobs(
+    driver,
+    *,
+    stale_after_sec: int = 600,
+    limit: int = 100,
+    now_ms: int | None = None,
+) -> list[dict]:
     if stale_after_sec < 1 or limit < 1:
         raise ValueError("stale_after_sec and limit must be positive")
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
@@ -78,15 +83,16 @@ def recover_stale(
                 j.owner='',
                 j.claimed_at=0,
                 j.heartbeat_at=0,
-                j.current_task=CASE
-                    WHEN next_count >= $max_recoveries THEN j.current_task
-                    ELSE j.current_task END,
                 j.lifecycle_state=CASE
                     WHEN next_count >= $max_recoveries THEN 'QUARANTINED'
                     ELSE 'RETRY' END,
+                j.status=CASE
+                    WHEN next_count >= $max_recoveries THEN 'failed'
+                    ELSE 'pending' END,
                 j.updated_at=$now
             RETURN j.key AS key,
                    j.lifecycle_state AS state,
+                   j.status AS status,
                    next_count AS recovery_count,
                    abandoned_owner,
                    abandoned_fence
