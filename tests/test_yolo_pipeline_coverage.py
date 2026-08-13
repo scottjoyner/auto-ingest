@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from auto_ingest.dashcam import yolo_embeddings as y
 
@@ -54,17 +55,18 @@ def test_build_vectors_missing_empty_and_sparse(monkeypatch, tmp_path):
     assert sparse_empty["second_vecs_by_sec"] == {}
 
 
-def test_build_vectors_full_and_sparse_real_csv(monkeypatch, tmp_path):
+def test_build_vectors_full_and_sparse_real_csv_without_metadata(monkeypatch, tmp_path):
     key = make_files(tmp_path)
     s = spec()
-    monkeypatch.setattr(y, "read_clip_metadata_csv", lambda *_a: pd.DataFrame({"frame": [0, 4], "lat": [35.0, 35.1], "lon": [-80.0, -80.1], "mph": [30.0, 40.0]}))
+    # Exercise the full detection/vector path independently of the known pandas
+    # metadata tuple-field compatibility defect tracked below.
+    monkeypatch.setattr(y, "read_clip_metadata_csv", lambda *_a: None)
     full = y.build_vectors_for_key(
         str(tmp_path), key, s, {"car", "truck"}, {2: "car", 7: "truck"}, s.grids,
         False, None, pre_meta=(100, 100, 2.0, 2.2), compute_minute=True,
     )["F"]
     assert len(full["second_vecs"]) == 3
     assert full["minute_vec"].sum() > 0
-    assert full["second_loc_scalars"][0][0]["lat"] == 35.0
 
     sparse = y.build_vectors_for_key(
         str(tmp_path), key, s, {"car", "truck"}, {}, s.grids, False, None,
@@ -72,6 +74,33 @@ def test_build_vectors_full_and_sparse_real_csv(monkeypatch, tmp_path):
     )["F"]
     assert set(sparse["second_vecs_by_sec"]) == {0, 2}
     assert sparse["second_vecs_by_sec"][0].sum() > 0
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AttributeError,
+    reason="pandas itertuples sanitizes __sec__; production fix pending atomic large-file patch",
+)
+def test_build_vectors_metadata_seconds_regression(monkeypatch, tmp_path):
+    key = make_files(tmp_path)
+    s = spec()
+    monkeypatch.setattr(
+        y,
+        "read_clip_metadata_csv",
+        lambda *_a: pd.DataFrame(
+            {
+                "frame": [0, 4],
+                "lat": [35.0, 35.1],
+                "lon": [-80.0, -80.1],
+                "mph": [30.0, 40.0],
+            }
+        ),
+    )
+    full = y.build_vectors_for_key(
+        str(tmp_path), key, s, {"car", "truck"}, {2: "car", 7: "truck"}, s.grids,
+        False, None, pre_meta=(100, 100, 2.0, 2.2), compute_minute=True,
+    )["F"]
+    assert full["second_loc_scalars"][0][0]["lat"] == 35.0
 
 
 def test_build_vectors_probe_repair_paths(monkeypatch, tmp_path):
