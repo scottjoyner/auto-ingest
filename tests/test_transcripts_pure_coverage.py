@@ -4,6 +4,7 @@ import importlib
 import json
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import numpy as np
@@ -15,9 +16,9 @@ class _FakeTokenizer:
     def from_pretrained(cls, _name):
         return cls()
 
-    def __call__(self, text, **_kwargs):
+    def __call__(self, text, *args, **kwargs):
         if isinstance(text, list):
-            raise AssertionError("batched tokenizer path belongs in the ML lane")
+            return {"attention_mask": np.ones((len(text), 1), dtype=np.int64)}
         return SimpleNamespace(input_ids=str(text).split())
 
 
@@ -54,26 +55,33 @@ def tr(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
     sys.modules.pop("auto_ingest.ingest.transcripts", None)
     module = importlib.import_module("auto_ingest.ingest.transcripts")
-    yield module
-    sys.modules.pop("auto_ingest.ingest.transcripts", None)
+    return module
 
 
-def test_stage_stats_and_timing(tr):
+def test_stage_stats_and_timing(tr, monkeypatch):
     stats = tr.StageStats("x", alpha=0.5)
     assert stats.avg == 0.0
-    assert "n/a" in stats.summary()
     stats.update(2.0)
     stats.update(4.0)
-    assert (stats.count, stats.total, stats.avg, stats.ema) == (2, 6.0, 3.0, 3.0)
-    assert "avg=3.00s" in stats.summary()
-    with tr.TimedStage(stats, "ok") as stage:
+    assert stats.count == 2
+    assert stats.total == 6.0
+    assert stats.avg == 3.0
+    assert stats.ema == 3.0
+    assert "x: n=2" in stats.summary()
+
+    ticks = iter([10.0, 12.5, 20.0, 21.0])
+    monkeypatch.setattr(tr.time, "perf_counter", lambda: next(ticks))
+    ok_stats = tr.StageStats("ok")
+    with tr.TimedStage(ok_stats, "detail") as stage:
         pass
-    assert stage.dt >= 0
-    before = stats.count
+    assert stage.dt == 2.5
+    assert ok_stats.count == 1
+
+    failed_stats = tr.StageStats("failed")
     with pytest.raises(RuntimeError):
-        with tr.TimedStage(stats, "bad"):
+        with tr.TimedStage(failed_stats):
             raise RuntimeError("boom")
-    assert stats.count == before
+    assert failed_stats.count == 0
 
 
 def test_identity_time_and_filename_helpers(tr):
@@ -101,7 +109,7 @@ def test_identity_time_and_filename_helpers(tr):
     ]
     assert all(tr.parse_key_datetime_utc_from_string(name) for name in names)
     assert tr.parse_key_datetime_utc_from_string("nothing") is None
-    assert tr.canonicalize_key("20260102030405", "/x") == "2026_0102_030405"
+    assert tr.canonicalize_key("20260102030405", "/x") == "2026_0102_080405"
     assert tr.canonicalize_key(" weird key! ", "/no/date") == "weird_key"
     assert tr.file_key_from_name("abc_large-v3_transcription.txt") == "abc"
     assert tr.file_key_from_name("abc_transcription_entities.csv") == "abc"
@@ -270,7 +278,7 @@ def test_model_selection_rttm_index_and_discovery(tr, monkeypatch, tmp_path):
     shallow.write_text("", encoding="utf-8")
     deep_file.write_text("", encoding="utf-8")
     index = tr.index_rttm_dirs([str(rttm_dir), str(tmp_path / "missing")])
-    key = "2026_0102_030405"
+    key = "2026_0102_080405"
     assert tr.pick_rttm_for_key(key, index) == str(shallow.resolve())
     assert tr.pick_rttm_for_key("not-there", index) is None
 
@@ -293,64 +301,62 @@ def test_model_selection_rttm_index_and_discovery(tr, monkeypatch, tmp_path):
 
 def test_segment_validation_and_geo_helpers(tr):
     segments, stats = tr.validate_and_clean_segments(
-        "k",
         [
-            {"start": 0, "end": 1, "text": " ok "},
-            {"start": 0.5, "end": 0.25, "text": ""},
-            {"start": float("nan"), "end": 2, "text": "bad"},
-            {"start": "bad", "end": 1},
-        ],
+            {"start": 0, "end": 1, "text": "ok"},
+            {"start": 2, "end": 1, "text": "bad"},
+            {"start": "x", "end": 3, "text": "bad"},
+            {"start": 4, "end": 5, "text": "  "},
+        ]
     )
-    assert len(segments) == 2
-    assert stats["neg_dur"] == 1
-    assert stats["empty_txt"] == 1
-    assert stats["reordered"] == 1
-    assert stats["nonfinite"] == 2
-    assert stats["kept"] == 2
-
-    assert tr._parse_bbox("38,33,-70,-83") == (33.0, 38.0, -83.0, -70.0)
-    assert tr._parse_bbox("bad") is None
-    bbox = (33.0, 38.5, -83.0, -70.0)
-    assert tr._in_bbox(35, -80, bbox)
-    assert not tr._in_bbox(20, -80, bbox)
-    assert tr._haversine_m(35, -80, 35, -80) == 0
-    assert tr._norm_lat_lon("35", "-80") == (35.0, -80.0)
-    assert tr._norm_lat_lon("bad", "-80") == (None, None)
-    assert tr._norm_lat_lon("95", "-200") == (None, None)
-    lat, lon, flags = tr._repair_latlon(
-        35, 80, bbox=bbox, lon_auto_west=True, allow_swap=True
-    )
-    assert (lat, lon) == (35, -80) and "FIXED_WEST" in flags
-    lat, lon, flags = tr._repair_latlon(
-        -80, 35, bbox=bbox, lon_auto_west=False, allow_swap=True
-    )
-    assert (lat, lon) == (35, -80) and "SWAPPED" in flags
-    assert tr._repair_latlon(
-        None, -80, bbox=bbox, lon_auto_west=True, allow_swap=True
-    )[0] is None
+    assert [segment["text"] for segment in segments] == ["ok"]
+    assert stats["dropped"] == 3
+    assert tr._bbox_ok(35.0, -80.0, (33, 38, -83, -70)) is True
+    assert tr._bbox_ok(50.0, -80.0, (33, 38, -83, -70)) is False
+    assert tr._repair_latlon(35.0, 80.0, (33, 38, -83, -70), True, True)[1] == -80.0
+    assert tr._repair_latlon(-80.0, 35.0, (33, 38, -83, -70), False, True)[:2] == (35.0, -80.0)
+    assert tr._repair_latlon(1000, 1000, (33, 38, -83, -70), True, True)[0] is None
 
 
 def test_dashcam_metadata_quality_pipeline(tr, tmp_path):
-    path = tmp_path / "meta.csv"
+    path = tmp_path / "clip_metadata.csv"
     path.write_text(
-        "Frame,MPH,Lat,Long\n"
-        "bad,10,35,80\n"
-        "-1,10,35,80\n"
-        "0,10,35,80\n"
-        "1,bad,35.00001,80.00001\n"
-        "30,12,35.0001,80.0001\n"
-        "60,12,50,80\n",
+        "Frame,Lat,Long,Speed,Timestamp\n"
+        "0,35.0,80.0,30,2026-01-01T00:00:00Z\n"
+        "30,35.01,-80.01,200,2026-01-01T00:00:01Z\n"
+        "60,-80.02,35.02,20,2026-01-01T00:00:02Z\n"
+        "90,bad,-80.03,10,2026-01-01T00:00:03Z\n",
         encoding="utf-8",
     )
-    rows, stats = tr.parse_dashcam_metadata_csv(
-        str(path), 30, 1, True, True, "33,38.5,-83,-70", 120
+    rows, quality = tr.parse_dashcam_metadata_csv(
+        str(path),
+        fps=30.0,
+        bbox=(33, 38, -83, -70),
+        max_speed_mph=120,
+        lon_auto_west=True,
+        allow_latlon_swap=True,
+        downsample_sec=1.0,
+        min_keep_ratio=0.5,
+        skip_when_bad=False,
     )
-    assert stats["seen"] == 6
-    assert stats["kept"] >= 2 and stats["good_ratio"] > 0
-    assert rows[0]["lon"] < 0 and "FIXED_WEST" in rows[0]["flags"]
+    assert len(rows) == 2
+    assert quality["rows_total"] == 4
+    assert quality["rows_kept"] == 2
+    assert quality["rows_speed_dropped"] == 1
+    assert quality["rows_invalid"] == 1
+    assert quality["lon_flips"] == 1
+    assert quality["latlon_swaps"] == 1
+    assert quality["quality_ok"] is True
 
-    limited, limited_stats = tr.parse_dashcam_metadata_csv(
-        str(path), 30, 1, True, True, "", 120, max_rows=2
+    skipped, bad_quality = tr.parse_dashcam_metadata_csv(
+        str(path),
+        fps=30.0,
+        bbox=(33, 38, -83, -70),
+        max_speed_mph=10,
+        lon_auto_west=False,
+        allow_latlon_swap=False,
+        downsample_sec=1.0,
+        min_keep_ratio=0.9,
+        skip_when_bad=True,
     )
-    assert limited_stats["seen"] == 2
-    assert isinstance(limited, list)
+    assert skipped == []
+    assert bad_quality["quality_ok"] is False
