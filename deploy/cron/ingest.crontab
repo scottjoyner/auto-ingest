@@ -2,8 +2,9 @@
 # Recurring production work enters fenced persisted controllers. Window-scoped
 # job keys make duplicate triggers idempotent while allowing later windows.
 
-# Sync legacy drop every 5 minutes.
-*/5 * * * * cd /app && /usr/bin/env python3 -m auto_ingest.orchestration run --profile sync >> /var/log/cron-sync.log 2>&1
+# Sync legacy drop every 5 minutes. Named profiles bind their semantic task plan
+# before retrying so a changed command cannot silently resume old progress.
+*/5 * * * * cd /app && /usr/bin/env python3 -m auto_ingest.profile_runner --profile sync >> /var/log/cron-sync.log 2>&1
 
 # Recover abandoned orchestration leases every 10 minutes. This is bounded and
 # quarantines repeated stale failures rather than creating an infinite retry loop.
@@ -13,4 +14,4 @@
 */30 * * * * cd /app && /usr/bin/env python3 -m auto_ingest.full_pipeline >> /var/log/cron-ingest.log 2>&1
 
 # Daily dashcam embeddings batch at 2 AM.
-0 2 * * * cd /app && /usr/bin/env python3 -m auto_ingest.orchestration run --profile dashcam >> /var/log/cron-dashcam-daily.log 2>&1
+0 2 * * * cd /app && /usr/bin/env python3 -m auto_ingest.profile_runner --profile dashcam >> /var/log/cron-dashcam-daily.log 2>&1
