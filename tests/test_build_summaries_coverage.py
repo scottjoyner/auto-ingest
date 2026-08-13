@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -107,7 +105,7 @@ def test_stem_text_csv_and_json_extract_helpers(tmp_path):
     assert bs._extract_first_json_object("no object") is None
 
 
-def test_payload_and_task_normalization():
+def test_payload_and_task_normalization_preserves_all_tasks():
     payload = bs._normalize_payload("summary text")
     assert payload["summary"] == "summary text"
     assert payload["version"] == "1.0"
@@ -137,12 +135,14 @@ def test_payload_and_task_normalization():
             "skip",
         ],
     }
-    normalized = bs._normalize_tasks(["skip", task])
-    assert len(normalized) == 1
+    second = {"title": "Second task", "description": "also retained"}
+    normalized = bs._normalize_tasks(["skip", task, second])
+    assert len(normalized) == 2
     assert normalized[0]["title"] == "Do thing"
     assert normalized[0]["priority"] == "medium"
     assert normalized[0]["agent"]["confidence"] == 1.0
     assert normalized[0]["plan"][0]["step"] == 2
+    assert normalized[1]["title"] == "Second task"
     assert bs._normalize_tasks("bad") == []
     assert bs._normalize_tasks([{"title": "", "description": ""}]) == []
 
@@ -287,7 +287,6 @@ def test_process_transcript_existing_summary_paths(monkeypatch, tmp_path):
     bs.process_transcript(path, client, "model", {}, _state())
     assert json.loads(tasks_path.read_text(encoding="utf-8"))["tasks"][0]["title"] == "Call"
 
-    # Fast skip when both sidecars already exist.
     no_calls = _Client([])
     bs.process_transcript(path, no_calls, "model", {}, _state())
     assert no_calls.prompts == []
@@ -327,6 +326,5 @@ def test_process_json_csv_vtt_input_loading(monkeypatch, tmp_path):
         client = _Client([json.dumps({"summary": "ok", "tasks": []})])
         bs.process_transcript(path, client, "m", {}, _state(), overwrite=True)
         assert client.prompts
-        # remove generated files so each suffix exercises the loader path
         (tmp_path / f"{stem}_summary.json").unlink(missing_ok=True)
         (tmp_path / f"{stem}_tasks.json").unlink(missing_ok=True)
