@@ -2,7 +2,7 @@ from auto_ingest.orchestration import _fingerprint, default_job_key
 
 
 def test_default_job_key_is_idempotent_within_profile_window():
-    assert default_job_key("sync", now=1_000) == default_job_key("sync", now=1_299)
+    assert default_job_key("sync", now=900) == default_job_key("sync", now=1_199)
     assert default_job_key("full", now=3_600) == default_job_key("full", now=5_399)
     assert default_job_key("dashcam", now=86_400) == default_job_key("dashcam", now=172_799)
 
