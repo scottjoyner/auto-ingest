@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Sequence
 
 from auto_ingest.artifact_reconcile import reconcile
-from auto_ingest.orchestration import QUARANTINED, READY, lifecycle
+from auto_ingest.orchestration import lifecycle
 from auto_ingest.runtime_schema import audit_schema, ensure_schema
 
 
