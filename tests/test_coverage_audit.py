@@ -28,16 +28,16 @@ def _write_fixture(tmp_path: Path) -> Path:
     return cov
 
 
-def test_audit_reports_nested_method_and_branch_aware_percent(tmp_path: Path):
+def test_audit_reports_nested_method_and_branch_arc_percent(tmp_path: Path):
     cov = _write_fixture(tmp_path)
     report = audit(cov, tmp_path)
     rows = {r["qualname"]: r for r in report["functions"]}
     assert set(rows) == {"covered", "Thing.partial"}
     assert rows["covered"]["statements"] == 4
     assert rows["covered"]["covered_statements"] == 3
-    assert rows["covered"]["branches"] == 1
+    assert rows["covered"]["branches"] == 2
     assert rows["covered"]["covered_branches"] == 1
-    assert rows["covered"]["percent"] == 80.0
+    assert round(rows["covered"]["percent"], 2) == 66.67
 
 
 def test_failures_enforces_total_and_function_floors(tmp_path: Path):
@@ -50,7 +50,7 @@ def test_failures_enforces_total_and_function_floors(tmp_path: Path):
 
 def test_failures_passes_when_thresholds_are_met(tmp_path: Path):
     report = audit(_write_fixture(tmp_path), tmp_path)
-    assert failures(report, min_total=70.0, min_function=50.0) == []
+    assert failures(report, min_total=70.0, min_function=60.0) == []
 
 
 def test_audit_skips_missing_or_unparseable_files(tmp_path: Path):
