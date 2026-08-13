@@ -74,15 +74,17 @@ jobs:
       - name: Control-plane CLI and import smoke
         run: |
           python -m auto_ingest.orchestration --help
+          python -m auto_ingest.profile_runner --help
           python -m auto_ingest.operations --help
           python -m auto_ingest.worker_loop --help
           python -m auto_ingest.file_queue --help
+          python -m auto_ingest.watchdog --help
           python -m auto_ingest.metrics --help
           python -m auto_ingest.readiness --help
           python - <<'PY'
           from auto_ingest.full_pipeline import build_tasks
           from auto_ingest.transcript_entrypoint import build_command
-          assert len(build_tasks()) >= 8
+          assert len(build_tasks()) == 10
           assert callable(build_command)
           PY
 
@@ -128,9 +130,10 @@ jobs:
 
       - name: Verify scheduled ingest routes through fenced controllers
         run: |
-          grep -q "auto_ingest.orchestration run --profile sync" deploy/cron/ingest.crontab
+          grep -q "auto_ingest.profile_runner --profile sync" deploy/cron/ingest.crontab
+          grep -q "auto_ingest.watchdog" deploy/cron/ingest.crontab
           grep -q "auto_ingest.full_pipeline" deploy/cron/ingest.crontab
-          grep -q "auto_ingest.orchestration run --profile dashcam" deploy/cron/ingest.crontab
+          grep -q "auto_ingest.profile_runner --profile dashcam" deploy/cron/ingest.crontab
           ! grep -q "run_ingest_all.sh" deploy/cron/ingest.crontab
           grep -q "auto_ingest.transcript_orchestration" run_ingest_all.sh
           grep -q "auto_ingest.file_queue work --once" deploy/worker_ingest.sh
@@ -191,8 +194,10 @@ jobs:
         run: |
           docker run --rm auto-ingest:ci python -m content_os --help
           docker run --rm auto-ingest:ci python -m auto_ingest.orchestration --help
+          docker run --rm auto-ingest:ci python -m auto_ingest.profile_runner --help
           docker run --rm auto-ingest:ci python -m auto_ingest.operations --help
           docker run --rm auto-ingest:ci python -m auto_ingest.worker_loop --help
           docker run --rm auto-ingest:ci python -m auto_ingest.file_queue --help
+          docker run --rm auto-ingest:ci python -m auto_ingest.watchdog --help
           docker run --rm auto-ingest:ci python -m auto_ingest.metrics --help
           docker run --rm auto-ingest:ci python -m auto_ingest.readiness --help
