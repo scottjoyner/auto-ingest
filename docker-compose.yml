@@ -3,10 +3,10 @@
 #   ingest-cron   = the one recurring ingest/sync scheduler
 #   ingest-worker = resource-aware opportunistic worker using fenced orchestration
 #   content-*     = independent content workflow
-# Direct legacy ingest/sync loops are intentionally not separate services.
+# Production containers execute the tested image contents; source code is NOT
+# bind-mounted over /app. Mutable worker state lives under /state.
 
 services:
-  # === Ingest Worker (distributed / opportunistic) ===
   ingest-worker:
     build: .
     image: auto-ingest:latest
@@ -27,6 +27,7 @@ services:
       BODYCAM_ROOT: ${BODYCAM_ROOT}
       TRANSCRIPT_ROOT: ${TRANSCRIPT_ROOT}
       HOT_STORAGE_ROOT: ${HOT_STORAGE_ROOT:-/nas1}
+      STATE_ROOT: /state
       NEO4J_URI: ${NEO4J_URI}
       NEO4J_USER: ${NEO4J_USER}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD}
@@ -38,7 +39,7 @@ services:
       MIN_DISK_FREE_GB: ${MIN_DISK_FREE_GB:-20}
       MAX_LOAD_PER_CPU: ${MAX_LOAD_PER_CPU:-0.60}
     volumes:
-      - ./:/app
+      - auto-ingest-state:/state
       - ${NAS_ROOT}:/nas
       - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
       - ${NAS2_ROOT:-/media/scott/NAS5}:/nas2
@@ -51,7 +52,6 @@ services:
       retries: 3
       start_period: 30s
 
-  # === Content OS Service ===
   content-service:
     build: .
     image: auto-ingest:latest
@@ -64,15 +64,10 @@ services:
       CONTENT_OS_LLM_MODEL: ${CONTENT_OS_LLM_MODEL}
       CONTENT_OS_LLM_TEMPERATURE: ${CONTENT_OS_LLM_TEMPERATURE}
       CONTENT_OS_LLM_MAX_TOKENS: ${CONTENT_OS_LLM_MAX_TOKENS}
-    volumes:
-      - ./:/app
     networks:
       - auto-ingest-net
 
-  # === Canonical Ingest Scheduler ===
-  # This is the only default recurring authority for sync/full/dashcam ingest.
-  # Each cron invocation enters auto_ingest.orchestration, so duplicate triggers
-  # in the same schedule window are fenced/idempotent and failures quarantine.
+  # The one recurring authority for sync/full/dashcam ingest.
   ingest-cron:
     build: .
     image: auto-ingest:latest
@@ -82,6 +77,7 @@ services:
     environment:
       CRON_FILE: /app/deploy/cron/ingest.crontab
       SCHEMA_ENSURE: "1"
+      STATE_ROOT: /state
       SCAN_ROOTS: ${SCAN_ROOTS}
       AUDIO_ROOT: ${AUDIO_ROOT}
       DASHCAM_ROOT: ${DASHCAM_ROOT}
@@ -92,7 +88,7 @@ services:
       NEO4J_PASSWORD: ${NEO4J_PASSWORD}
       NEO4J_DB: ${NEO4J_DB}
     volumes:
-      - ./:/app
+      - auto-ingest-state:/state
       - ${NAS_ROOT}:/nas
       - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
       - ${NAS2_ROOT:-/media/scott/NAS5}:/nas2
@@ -105,7 +101,6 @@ services:
       retries: 3
       start_period: 30s
 
-  # === Content Cron ===
   content-cron:
     build: .
     image: auto-ingest:latest
@@ -117,10 +112,11 @@ services:
       CONTENT_OS_LLM_BASE_URL: ${CONTENT_OS_LLM_BASE_URL}
       CONTENT_OS_LLM_API_KEY: ${CONTENT_OS_LLM_API_KEY}
       CONTENT_OS_LLM_MODEL: ${CONTENT_OS_LLM_MODEL}
-    volumes:
-      - ./:/app
     networks:
       - auto-ingest-net
+
+volumes:
+  auto-ingest-state:
 
 networks:
   auto-ingest-net:
