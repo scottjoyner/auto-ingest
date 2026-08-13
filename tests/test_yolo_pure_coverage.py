@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import datetime
+import importlib
 from collections import namedtuple
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 pd = pytest.importorskip("pandas")
 pytest.importorskip("moviepy")
-
-from auto_ingest.dashcam import yolo_embeddings as ye
+ye = importlib.import_module("auto_ingest.dashcam.yolo_embeddings")
 
 
 def test_key_time_and_numeric_utilities(monkeypatch):
@@ -109,9 +108,9 @@ def test_csv_split_list_percent_and_parser(tmp_path):
 
 
 def test_row_conversion_and_bbox_forms():
-    NT = namedtuple("NT", "a b")
+    nt = namedtuple("NT", "a b")
     assert ye.row_to_dict({"a": 1}) == {"a": 1}
-    assert ye.row_to_dict(NT(1, 2)) == {"a": 1, "b": 2}
+    assert ye.row_to_dict(nt(1, 2)) == {"a": 1, "b": 2}
     assert ye.row_to_dict(pd.Series({"a": 1})) == {"a": 1}
     assert ye.row_to_dict([1, 2], ["a", "b"]) == {"a": 1, "b": 2}
     assert ye.row_to_dict(object()) == {}
