@@ -1,13 +1,9 @@
 """Canonical persisted pipeline orchestration for scheduled/worker execution.
 
-This module is the scheduler boundary: cron, service loops, and workers should
-submit work here rather than launching pipeline scripts directly. It provides:
-- fenced lease ownership + heartbeats
-- explicit lifecycle state persisted in Neo4j
-- resumable completed task manifest
-- structured primitive-only failure envelopes
-- retry/quarantine policy
-- bounded subprocess execution with periodic lease renewal
+Cron, service loops, and workers should submit work here rather than launching
+pipeline scripts directly. The controller provides fenced ownership, lease
+heartbeats, explicit lifecycle state, resumable task manifests, failure
+fingerprints, bounded retries/quarantine, and recurring idempotency windows.
 """
 from __future__ import annotations
 
@@ -35,8 +31,11 @@ DONE = "DONE"
 RETRY = "RETRY"
 FAILED = "FAILED"
 QUARANTINED = "QUARANTINED"
-
 TERMINAL = {DONE, QUARANTINED}
+
+
+class LeaseLostError(RuntimeError):
+    """The caller no longer owns the exact fenced lease generation."""
 
 
 @dataclass(frozen=True)
@@ -51,12 +50,26 @@ PROFILES: dict[str, tuple[Task, ...]] = {
         Task("full-ingest", (str(REPO / "bin" / "auto-ingest"), "run-all"), 21600),
     ),
     "dashcam": (
-        Task("dashcam-batch", (sys.executable, str(REPO / "bulk_ingest_dashcam.py"), "--years", "2026"), 21600),
+        Task(
+            "dashcam-batch",
+            (sys.executable, str(REPO / "bulk_ingest_dashcam.py"), "--years", "2026"),
+            21600,
+        ),
     ),
     "sync": (
         Task("legacy-sync", ("bash", str(REPO / "deploy" / "sync_from_legacy_drop.sh")), 1800),
     ),
 }
+
+PROFILE_WINDOW_SEC = {"sync": 300, "full": 1800, "dashcam": 86400}
+
+
+def default_job_key(profile: str, *, now: float | None = None) -> str:
+    """Return an idempotency key scoped to the profile's scheduling window."""
+    ts = int(time.time() if now is None else now)
+    window = PROFILE_WINDOW_SEC.get(profile, 3600)
+    bucket = ts // window
+    return f"pipeline:{profile}:{bucket}"
 
 
 def _fingerprint(exc_type: str, message: str, task: str) -> str:
@@ -102,7 +115,9 @@ def lifecycle(driver, key: str) -> dict | None:
                    j.current_task AS current_task,
                    j.error_type AS error_type,
                    j.error_message AS error_message,
-                   j.error_fingerprint AS error_fingerprint
+                   j.error_fingerprint AS error_fingerprint,
+                   j.failed_task AS failed_task,
+                   j.heartbeat_at AS heartbeat_at
             LIMIT 1
             """,
             key=key,
@@ -163,7 +178,8 @@ def mark_task_complete(driver, key: str, task: str, *, owner: str, fence_token: 
             MATCH (j:IngestJob {key:$key})
             WHERE j.owner=$owner AND coalesce(j.fence_token,0)=$fence_token
             SET j.completed_tasks=CASE
-                    WHEN $task IN coalesce(j.completed_tasks,[]) THEN coalesce(j.completed_tasks,[])
+                    WHEN $task IN coalesce(j.completed_tasks,[])
+                    THEN coalesce(j.completed_tasks,[])
                     ELSE coalesce(j.completed_tasks,[]) + $task END,
                 j.updated_at=timestamp()
             RETURN j.key AS key
@@ -194,7 +210,9 @@ def record_failure(
             MATCH (j:IngestJob {key:$key})
             WHERE j.owner=$owner AND coalesce(j.fence_token,0)=$fence_token
             WITH j, coalesce(j.attempt_count,0) AS attempts
-            SET j.lifecycle_state=CASE WHEN attempts >= $max_attempts THEN 'QUARANTINED' ELSE 'RETRY' END,
+            SET j.lifecycle_state=CASE
+                    WHEN attempts >= $max_attempts THEN 'QUARANTINED'
+                    ELSE 'RETRY' END,
                 j.error_type=$exc_type,
                 j.error_message=left($message,2000),
                 j.error_fingerprint=$fingerprint,
@@ -241,7 +259,7 @@ def _run_task(
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-                raise ingest_claim.LeaseLostError("lease lost while subprocess was running")
+                raise LeaseLostError("lease lost while subprocess was running")
             next_heartbeat = now + heartbeat_sec
         if now - started >= task.timeout_sec:
             proc.terminate()
@@ -268,31 +286,44 @@ def run_profile(
 ) -> int:
     if profile not in PROFILES and tasks is None:
         raise ValueError(f"unknown profile {profile!r}")
-    key = job_key or f"pipeline:{profile}"
+    if heartbeat_sec <= 0 or ttl_sec <= heartbeat_sec:
+        raise ValueError("ttl_sec must be greater than positive heartbeat_sec")
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be positive")
+
+    key = job_key or default_job_key(profile)
     worker = owner or f"{socket.gethostname()}:{os.getpid()}"
     ensure_job(driver, key, profile)
     existing = lifecycle(driver, key) or {}
     if existing.get("state") == QUARANTINED:
         return 3
+    if existing.get("state") == DONE:
+        return 0
 
     token = ingest_claim.claim_fenced(driver, key, worker, ttl_sec=ttl_sec)
     if token is None:
         return 2
-    transition_fenced(driver, key, owner=worker, fence_token=token, state=CLAIMED)
+    if not transition_fenced(driver, key, owner=worker, fence_token=token, state=CLAIMED):
+        return 2
     completed = set((lifecycle(driver, key) or {}).get("completed_tasks", []))
     selected = tuple(tasks if tasks is not None else PROFILES[profile])
     run_env = dict(os.environ if env is None else env)
 
     try:
-        transition_fenced(driver, key, owner=worker, fence_token=token, state=READY)
+        if not transition_fenced(driver, key, owner=worker, fence_token=token, state=READY):
+            raise LeaseLostError("lease lost before READY")
         for task in selected:
             if task.name in completed:
                 continue
             if not transition_fenced(
-                driver, key, owner=worker, fence_token=token,
-                state=RUNNING, current_task=task.name,
+                driver,
+                key,
+                owner=worker,
+                fence_token=token,
+                state=RUNNING,
+                current_task=task.name,
             ):
-                raise ingest_claim.LeaseLostError("lease lost before task start")
+                raise LeaseLostError("lease lost before task start")
             try:
                 rc = _run_task(
                     task,
@@ -307,14 +338,18 @@ def run_profile(
                 if rc != 0:
                     raise RuntimeError(f"task {task.name} exited with code {rc}")
                 if not transition_fenced(
-                    driver, key, owner=worker, fence_token=token,
-                    state=VALIDATING, current_task=task.name,
+                    driver,
+                    key,
+                    owner=worker,
+                    fence_token=token,
+                    state=VALIDATING,
+                    current_task=task.name,
                 ):
-                    raise ingest_claim.LeaseLostError("lease lost before validation")
+                    raise LeaseLostError("lease lost before validation")
                 if not mark_task_complete(
                     driver, key, task.name, owner=worker, fence_token=token
                 ):
-                    raise ingest_claim.LeaseLostError("lease lost before task commit")
+                    raise LeaseLostError("lease lost before task commit")
             except Exception as exc:
                 record_failure(
                     driver,
@@ -329,10 +364,14 @@ def run_profile(
                 return 1
 
         if not transition_fenced(
-            driver, key, owner=worker, fence_token=token,
-            state=DONE, current_task=None,
+            driver,
+            key,
+            owner=worker,
+            fence_token=token,
+            state=DONE,
+            current_task=None,
         ):
-            raise ingest_claim.LeaseLostError("lease lost before DONE")
+            raise LeaseLostError("lease lost before DONE")
         return 0
     finally:
         ingest_claim.release_fenced(driver, key, worker, token)
@@ -340,6 +379,7 @@ def run_profile(
 
 def _driver_from_env():
     from neo4j import GraphDatabase
+
     from auto_ingest_config import get_neo4j_config
 
     cfg = get_neo4j_config()
