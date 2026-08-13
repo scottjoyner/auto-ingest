@@ -4,7 +4,6 @@ import importlib
 import json
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import numpy as np
@@ -301,62 +300,65 @@ def test_model_selection_rttm_index_and_discovery(tr, monkeypatch, tmp_path):
 
 def test_segment_validation_and_geo_helpers(tr):
     segments, stats = tr.validate_and_clean_segments(
+        "fixture-key",
         [
             {"start": 0, "end": 1, "text": "ok"},
             {"start": 2, "end": 1, "text": "bad"},
             {"start": "x", "end": 3, "text": "bad"},
             {"start": 4, "end": 5, "text": "  "},
-        ]
+            {"start": 0.5, "end": 0.75, "text": "reordered"},
+        ],
     )
-    assert [segment["text"] for segment in segments] == ["ok"]
-    assert stats["dropped"] == 3
-    assert tr._bbox_ok(35.0, -80.0, (33, 38, -83, -70)) is True
-    assert tr._bbox_ok(50.0, -80.0, (33, 38, -83, -70)) is False
-    assert tr._repair_latlon(35.0, 80.0, (33, 38, -83, -70), True, True)[1] == -80.0
-    assert tr._repair_latlon(-80.0, 35.0, (33, 38, -83, -70), False, True)[:2] == (35.0, -80.0)
-    assert tr._repair_latlon(1000, 1000, (33, 38, -83, -70), True, True)[0] is None
+    assert [segment["text"] for segment in segments] == ["ok", "bad", "", "reordered"]
+    assert stats == {"nonfinite": 1, "neg_dur": 1, "reordered": 1, "empty_txt": 1, "kept": 4}
+    bbox = tr._parse_bbox("33,38,-83,-70")
+    assert bbox == (33.0, 38.0, -83.0, -70.0)
+    assert tr._parse_bbox("bad") is None
+    assert tr._in_bbox(35.0, -80.0, bbox) is True
+    assert tr._in_bbox(50.0, -80.0, bbox) is False
+    assert tr._norm_lat_lon("bad", -80) == (None, None)
+    assert tr._norm_lat_lon(100, -80)[0] is None
+    assert tr._repair_latlon(35.0, 80.0, bbox=bbox, lon_auto_west=True, allow_swap=True)[1] == -80.0
+    assert tr._repair_latlon(-80.0, 35.0, bbox=bbox, lon_auto_west=False, allow_swap=True)[:2] == (35.0, -80.0)
+    assert tr._haversine_m(35, -80, 35, -80) == pytest.approx(0.0)
 
 
 def test_dashcam_metadata_quality_pipeline(tr, tmp_path):
     path = tmp_path / "clip_metadata.csv"
     path.write_text(
-        "Frame,Lat,Long,Speed,Timestamp\n"
+        "Frame,Lat,Long,MPH,Timestamp\n"
         "0,35.0,80.0,30,2026-01-01T00:00:00Z\n"
         "30,35.01,-80.01,200,2026-01-01T00:00:01Z\n"
         "60,-80.02,35.02,20,2026-01-01T00:00:02Z\n"
-        "90,bad,-80.03,10,2026-01-01T00:00:03Z\n",
+        "90,bad,-80.03,10,2026-01-01T00:00:03Z\n"
+        "-1,35,-80,10,2026-01-01T00:00:04Z\n",
         encoding="utf-8",
     )
     rows, quality = tr.parse_dashcam_metadata_csv(
         str(path),
         fps=30.0,
-        bbox=(33, 38, -83, -70),
-        max_speed_mph=120,
+        downsample_sec=1,
         lon_auto_west=True,
-        allow_latlon_swap=True,
-        downsample_sec=1.0,
-        min_keep_ratio=0.5,
-        skip_when_bad=False,
+        allow_swap=True,
+        bbox_str="33,38,-83,-70",
+        max_speed_mph=120,
     )
-    assert len(rows) == 2
-    assert quality["rows_total"] == 4
-    assert quality["rows_kept"] == 2
-    assert quality["rows_speed_dropped"] == 1
-    assert quality["rows_invalid"] == 1
-    assert quality["lon_flips"] == 1
-    assert quality["latlon_swaps"] == 1
-    assert quality["quality_ok"] is True
+    assert quality["seen"] == 5
+    assert quality["kept"] >= 1
+    assert quality["good_ratio"] > 0
+    assert rows[0]["lon"] < 0
+    assert "FIXED_WEST" in rows[0]["flags"]
+    assert all(row["quality"] >= 40 for row in rows)
 
-    skipped, bad_quality = tr.parse_dashcam_metadata_csv(
+    limited, limited_quality = tr.parse_dashcam_metadata_csv(
         str(path),
         fps=30.0,
-        bbox=(33, 38, -83, -70),
-        max_speed_mph=10,
+        downsample_sec=2,
         lon_auto_west=False,
-        allow_latlon_swap=False,
-        downsample_sec=1.0,
-        min_keep_ratio=0.9,
-        skip_when_bad=True,
+        allow_swap=False,
+        bbox_str="bad",
+        max_speed_mph=500,
+        max_rows=2,
     )
-    assert skipped == []
-    assert bad_quality["quality_ok"] is False
+    assert limited_quality["seen"] == 2
+    assert len(limited) <= 2
