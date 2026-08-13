@@ -2,8 +2,8 @@
 
 Queue items are typed JSON documents that name a known orchestration profile.
 Arbitrary shell commands are intentionally unsupported. Claiming is an atomic
-rename, while execution still uses Neo4j fenced orchestration for distributed
-correctness and retry/quarantine state.
+rename, while execution uses plan-bound fenced orchestration for distributed
+correctness, retry/quarantine state, and mixed-generation resume protection.
 """
 from __future__ import annotations
 
@@ -18,7 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
-from auto_ingest.orchestration import PROFILES, run_profile
+from auto_ingest.orchestration import PROFILES
+from auto_ingest.profile_runner import run_bound_profile
 
 QUEUE_VERSION = 1
 ALLOWED_KEYS = {"version", "job_id", "profile", "created_at", "metadata"}
@@ -164,7 +165,7 @@ def process_claimed(
     *,
     root: str | Path,
     owner: str | None = None,
-    runner: Callable[..., int] = run_profile,
+    runner: Callable[..., int] = run_bound_profile,
 ) -> int:
     dirs = ensure_dirs(root)
     claimed = Path(path)
@@ -197,7 +198,7 @@ def work_once(
     root: str | Path,
     *,
     owner: str | None = None,
-    runner: Callable[..., int] = run_profile,
+    runner: Callable[..., int] = run_bound_profile,
 ) -> int:
     claimed = claim_one(root, owner=owner)
     if claimed is None:
