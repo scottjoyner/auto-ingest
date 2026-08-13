@@ -20,11 +20,18 @@ from auto_ingest.pipeline_contract import bind_plan
 REPO = Path(__file__).resolve().parent.parent
 
 
+def state_root() -> Path:
+    root = Path(os.environ.get("STATE_ROOT", str(REPO / ".state")))
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def build_tasks() -> tuple[Task, ...]:
+    state = state_root()
     tasks: list[Task] = [
-        Task("copy-audio", ("bash", str(REPO / "audio_copy.sh")), 7200),
-        Task("copy-dashcam", ("bash", str(REPO / "dashcam_copy.sh")), 14400),
-        Task("copy-bodycam", ("bash", str(REPO / "bodycam_copy.sh")), 7200),
+        Task("copy-audio", ("bash", "audio_copy.sh"), 7200),
+        Task("copy-dashcam", ("bash", "dashcam_copy.sh"), 14400),
+        Task("copy-bodycam", ("bash", "bodycam_copy.sh"), 7200),
         Task("diarize", (sys.executable, "-m", "speakers"), 21600),
         Task(
             "transcript-ingest",
@@ -64,7 +71,12 @@ def build_tasks() -> tuple[Task, ...]:
         ),
         Task(
             "speaker-link",
-            (str(REPO / "bin" / "auto-ingest"), "link-speakers"),
+            (
+                "bin/auto-ingest",
+                "link-speakers",
+                "--state-file",
+                str(state / "full_linker_state.json"),
+            ),
             21600,
         ),
         Task(
