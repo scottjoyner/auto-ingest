@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "queue payload round-trips without executable fields",
+      "target": "queue.job",
+      "input": {
+        "version": 1,
+        "job_id": "fixture-1",
+        "profile": "sync",
+        "created_at": 1700000000,
+        "metadata": {"source": "regression"}
+      },
+      "expect": {
+        "contains": {
+          "job_id": "fixture-1",
+          "profile": "sync",
+          "version": 1
+        }
+      }
+    },
+    {
+      "name": "queue rejects arbitrary command field",
+      "target": "queue.job",
+      "input": {
+        "version": 1,
+        "job_id": "fixture-bad",
+        "profile": "sync",
+        "created_at": 1700000000,
+        "metadata": {},
+        "command": "ignored"
+      },
+      "raises": "QueueJobError"
+    },
+    {
+      "name": "same pipeline plan produces stable hash",
+      "target": "pipeline.plan",
+      "input": {
+        "tasks": [
+          {"name": "copy", "command": ["python3", "-m", "thing"], "timeout_sec": 30}
+        ]
+      },
+      "expect": {
+        "contains": {}
+      }
+    },
+    {
+      "name": "artifact identity is deterministic",
+      "target": "artifact.identity",
+      "input": {
+        "source_text": "fixture",
+        "stage": "transcribe",
+        "stage_version": "1",
+        "config": {"language": "en"},
+        "model": {"name": "synthetic"},
+        "suffix": "json"
+      },
+      "expect": {
+        "contains": {}
+      }
+    }
+  ]
+}
