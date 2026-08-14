@@ -7,10 +7,11 @@ without rewriting the mature batch loop.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Sequence
 
 import compress_dashcam2 as legacy
+
+_LEGACY_BUILD = legacy.build_ffmpeg_cmd
 
 
 def _vaapi_bitrate(crf: int, explicit: str | None) -> str:
@@ -48,7 +49,7 @@ def build_ffmpeg_cmd(
     device/system-memory transfers when software filters are used.
     """
     if not str(vcodec).endswith("_vaapi"):
-        return legacy._original_build_ffmpeg_cmd(
+        return _LEGACY_BUILD(
             ffmpeg,
             src,
             dst_tmp,
@@ -113,9 +114,7 @@ def build_ffmpeg_cmd(
 
 
 def install() -> None:
-    """Install the hardened builder into the legacy batch runner once."""
-    if not hasattr(legacy, "_original_build_ffmpeg_cmd"):
-        legacy._original_build_ffmpeg_cmd = legacy.build_ffmpeg_cmd
+    """Install the hardened builder into the legacy batch runner."""
     legacy.build_ffmpeg_cmd = build_ffmpeg_cmd
 
 
