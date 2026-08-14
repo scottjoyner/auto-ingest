@@ -8,10 +8,15 @@ import pytest
 from auto_ingest.regression import RegressionFixtureError, run_case, run_fixture
 
 
-def test_core_regression_fixture_passes():
-    results = run_fixture(Path("tests/regressions/core_contracts.json"))
+@pytest.mark.parametrize(
+    "fixture_path",
+    sorted(Path("tests/regressions").glob("*.json")),
+    ids=lambda path: path.name,
+)
+def test_all_regression_fixtures_pass(fixture_path: Path):
+    results = run_fixture(fixture_path)
     assert results
-    assert all(result.passed for result in results)
+    assert all(result.passed for result in results), results
 
 
 def test_unknown_target_is_rejected_without_execution():
