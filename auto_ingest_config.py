@@ -17,6 +17,27 @@ from pathlib import Path
 
 import yaml
 
+
+def _load_env():
+    """Load the .env file next to this module into os.environ (no overrides).
+
+    Kept minimal and intentional: only fills env vars that are not already set,
+    so an explicit ``export`` in the shell always wins.
+    """
+    env_path = Path(__file__).parent / '.env'
+    if not env_path.exists():
+        return
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and value and key not in os.environ:
+            os.environ[key] = value
+
+
 # ---------------------------------------------------------------------------
 # Canonical Neo4j password default (single source of truth).
 #
@@ -236,6 +257,7 @@ def get_neo4j_config():
     then first entry) -> built-in default. Env always wins so a single export
     can retarget every script regardless of the committed config.
     """
+    _load_env()
     cfg_uri = cfg_user = cfg_pass = None
 
     config_path = _find_config_path()

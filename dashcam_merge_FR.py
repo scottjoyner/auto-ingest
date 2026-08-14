@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-from auto_ingest_config import get_fileserver_path
 from __future__ import annotations
+
+from auto_ingest_config import get_fileserver_path
 
 import os
 import re

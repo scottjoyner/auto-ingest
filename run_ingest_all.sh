@@ -28,6 +28,11 @@ fi
 IONICE="${IONICE:-ionice -c2 -n7}"   # best-effort, lowest prio
 NICE="${NICE:-nice -n 10}"           # lower CPU priority
 
+# Avoid TensorFlow/Keras import path in transformers/sentence-transformers;
+# this venv is torch-first and Keras 3 breaks older TF integrations.
+export USE_TF="${USE_TF:-0}"
+export TRANSFORMERS_NO_TF="${TRANSFORMERS_NO_TF:-1}"
+
 # ========== Environment (override with env vars if you want) ==========
 # Where to scan for transcripts & media. Resolve FILESERVER_ROOT once so the
 # default does not contain the literal placeholder string.

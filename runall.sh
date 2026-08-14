@@ -63,7 +63,7 @@ echo "▶️ Speaker diarization (dashcam videos + standalone audio)"
 ./.venv/bin/python3 speakers.py || echo "❌ Failed: speakers.py"
 
 echo "▶️ Ingest (transcripts + RTTM → Neo4j)"
-./.venv/bin/python3 ingest_transcriptions.py || echo "❌ Failed: ingest_transcriptions.py"
+./.venv/bin/python3 ingest_transcriptsv5_3.py || echo "❌ Failed: ingest_transcriptsv5_3.py"
 
 echo "▶️ Ingest speakers_reconcile (transcripts + RTTM → Neo4j)"
 ./.venv/bin/python3 speakers_reconcile.py \
@@ -127,7 +127,7 @@ echo "🔗 Linking speakers globally…"
 # ./.venv/bin/python3 yolo_heatmap_iterator.py || echo "❌ Failed: yolo_heatmap_iterator.py"
 
 echo "▶️ Dashcam YOLO embeddings"
-./.venv/bin/python3 dashcam_yolo_embeddings.py \
+./.venv/bin/python3 dashcam_yolo_embeddings_ents.py \
   --resume \
   --grid 16x9 \
   --pyramid \
@@ -135,19 +135,26 @@ echo "▶️ Dashcam YOLO embeddings"
   --neo4j-uri "$NEO4J_URI" \
   --neo4j-user "$NEO4J_USER" \
   --neo4j-pass "$NEO4J_PASSWORD" \
-  --win-mins 10 2> /dev/null || echo "❌ Failed: dashcam_yolo_embeddings.py"
+  --win-mins 10 2> /dev/null || echo "❌ Failed: dashcam_yolo_embeddings_ents.py"
 
 echo "▶️ Patch Missing Locations in YOLO Embeddings"
 if [ -f patch_missing_locations.py ]; then
-  ./.venv/bin/python3 patch_missing_locations.py \
+  PATCH_SCRIPT=patch_missing_locations.py
+elif [ -f patch_missing_locationsv2.py ]; then
+  PATCH_SCRIPT=patch_missing_locationsv2.py
+else
+  PATCH_SCRIPT=""
+fi
+if [ -n "$PATCH_SCRIPT" ]; then
+  ./.venv/bin/python3 "$PATCH_SCRIPT" \
     --neo4j-uri "$NEO4J_URI" \
     --neo4j-user "$NEO4J_USER" \
     --neo4j-pass "$NEO4J_PASSWORD" \
     --key-limit 1000 \
     --win-mins 10 \
-    --validate-m 50 || echo "❌ Failed: patch_missing_locations.py"
+    --validate-m 50 || echo "❌ Failed: $PATCH_SCRIPT"
 else
-  echo "⚠️ Skipping patch_missing_locations.py: file not present in this checkout."
+  echo "⚠️ Skipping patch_missing_locations: no script present in this checkout."
 fi
 echo "▶️ Dashcam Merger"
 ./.venv/bin/python3 dashcam_merge_FR.py \
@@ -165,14 +172,14 @@ PY
 # echo "▶️ Iterator" (OLD)
 # ./.venv/bin/python3 iterator.py || echo "❌ Failed: iterator.py"
 
-echo "▶️ timelapse_from_fr"
-./.venv/bin/python3 timelapse_from_fr.py "${DASHCAM_ROOT:-$(python3 - <<'PY'
+echo "▶️ timelapse"
+./.venv/bin/python3 timelapse.py "${DASHCAM_ROOT:-$(python3 - <<'PY'
 from auto_ingest_config import get_dashcam_root
 print(get_dashcam_root())
 PY
-)}" --recursive || echo "❌ Failed: timelapse_from_fr.py"
+)}" --recursive || echo "❌ Failed: timelapse.py"
 
-echo "▶️ timelapse_from_fr"
+echo "▶️ shorts_builder"
 ./.venv/bin/python3 shorts_builder.py --base "${DASHCAM_ROOT:-$(python3 - <<'PY'
 from auto_ingest_config import get_dashcam_root
 print(get_dashcam_root())
