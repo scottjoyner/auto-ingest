@@ -13,7 +13,7 @@ if [ -f .env ]; then
   set +a
 fi
 
-NEO4J_URI="${NEO4J_URI:-bolt://100.64.43.123:7687}"
+NEO4J_URI="${NEO4J_URI:-bolt://127.0.0.1:7687}"
 NEO4J_USER="${NEO4J_USER:-neo4j}"
 # Password precedence: NEO4J_PASSWORD -> NEO4J_PASS -> NEO4J_PASSWORD_DEFAULT ->
 # baked historical default. Set NEO4J_PASSWORD_DEFAULT once in .env to change it.

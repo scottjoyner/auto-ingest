@@ -70,7 +70,7 @@ export EMBED_BATCH="${EMBED_BATCH:-32}"  # tokenizer batch size for GPU/CPU
 
 # Neo4j connection. Password precedence: NEO4J_PASSWORD -> NEO4J_PASSWORD_DEFAULT
 # -> baked historical default. Set NEO4J_PASSWORD_DEFAULT once in .env to change it.
-export NEO4J_URI="${NEO4J_URI:-bolt://100.64.43.123:7687}"
+export NEO4J_URI="${NEO4J_URI:-bolt://127.0.0.1:7687}"
 export NEO4J_USER="${NEO4J_USER:-neo4j}"
 export NEO4J_PASSWORD="${NEO4J_PASSWORD:-${NEO4J_PASSWORD_DEFAULT:-knowledge_graph_2026}}"
 export NEO4J_DB="${NEO4J_DB:-neo4j}"
