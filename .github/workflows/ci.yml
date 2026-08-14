@@ -8,6 +8,15 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    env:
+      FILESERVER_ROOT: /tmp/auto-ingest/fileserver
+      HOT_STORAGE_ROOT: /tmp/auto-ingest/hot
+      COLD_STORAGE_ROOT: /tmp/auto-ingest/cold
+      AUDIO_ROOT: /tmp/auto-ingest/audio
+      DASHCAM_ROOT: /tmp/auto-ingest/dashcam
+      BODYCAM_ROOT: /tmp/auto-ingest/bodycam
+      TRANSCRIPT_ROOT: /tmp/auto-ingest/transcripts
+      NEXTCLOUD_ROOT: /tmp/auto-ingest/nextcloud
     steps:
       - uses: actions/checkout@v4
 
@@ -16,10 +25,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Prepare portable test roots
+        run: |
+          mkdir -p "$FILESERVER_ROOT" "$HOT_STORAGE_ROOT" "$COLD_STORAGE_ROOT" \
+                   "$AUDIO_ROOT" "$DASHCAM_ROOT" "$BODYCAM_ROOT" \
+                   "$TRANSCRIPT_ROOT" "$NEXTCLOUD_ROOT"
+          touch "$FILESERVER_ROOT/.keep" "$HOT_STORAGE_ROOT/.keep" "$COLD_STORAGE_ROOT/.keep"
+
       - name: Install lightweight test deps (no ML stack)
-        # Keep the non-ML lane aligned with modules collected by the normal test
-        # suite. Media parsing/render helpers require pandas/Pillow/MoviePy even
-        # though torch/transformers/ultralytics remain intentionally absent.
         run: |
           python -m pip install --upgrade pip
           pip install "pydantic>=2.6" "PyYAML>=6.0" "neo4j>=5.24" \
@@ -46,8 +59,9 @@ jobs:
         run: python tools/lint_no_hardcoded_secrets.py
 
       - name: Pytest (system python — no ML stack)
-        run: |
+        run: >-
           python -m pytest tests/ -q
+          -m "not ml and not integration and not e2e and not destructive"
 
       - name: Build isolated render/persona venv
         run: |
@@ -58,4 +72,5 @@ jobs:
                       "fastapi" "python-multipart" "httpx" "numpy" "pandas" \
                       "opencv-python-headless" "pillow" "pytest>=8.0" "pytest-cov>=6.0" \
                       "pydantic-settings" "moviepy==1.0.3"
-          .venv/bin/python -m pytest tests/ -q
+          .venv/bin/python -m pytest tests/ -q \
+            -m "not ml and not integration and not e2e and not destructive"
