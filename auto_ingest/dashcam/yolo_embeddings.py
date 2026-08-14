@@ -980,7 +980,9 @@ def opencv_video_meta(path: str) -> Optional[Tuple[int,int,float,float]]:
         import cv2  # optional fallback
     except Exception:
         return None
+    from auto_ingest.cv2_vaapi import enable_vaapi  # noqa: PLC0415
     cap = cv2.VideoCapture(path)
+    enable_vaapi(cap)
     if not cap.isOpened():
         return None
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)

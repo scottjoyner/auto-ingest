@@ -12,6 +12,8 @@ from neo4j.exceptions import Neo4jError
 import uuid
 from collections import defaultdict, deque
 
+from auto_ingest.cv2_vaapi import enable_vaapi
+
 # Best-effort optional deps
 try:
     import cv2  # for patch crops
@@ -1206,6 +1208,7 @@ def _build_object_embeddings_for_clip(
     cap = None
     if cv2 is not None and os.path.exists(mp4_path):
         cap = cv2.VideoCapture(mp4_path)
+        enable_vaapi(cap)
         if not cap.isOpened():
             cap = None
 
@@ -1463,6 +1466,7 @@ def opencv_video_meta(path: str) -> Optional[Tuple[int,int,float,float]]:
     except Exception:
         return None
     cap = cv2.VideoCapture(path)
+    enable_vaapi(cap)
     if not cap.isOpened():
         return None
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)

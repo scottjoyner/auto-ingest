@@ -74,7 +74,9 @@ def list_directories(base_path):
 
 
                     # Open the video file
+                    from auto_ingest.cv2_vaapi import enable_vaapi
                     cap = cv2.VideoCapture(os.path.join(file_path, f"{key_list[x]}.MP4"))
+                    enable_vaapi(cap)
                     
                     # Retrieve video properties: width, height, and frames per second
                     w, h, fps = (int(cap.get(x)) for x in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT, cv2.CAP_PROP_FPS))
