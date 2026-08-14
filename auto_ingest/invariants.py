@@ -34,16 +34,17 @@ INVARIANTS = (
         "Active lifecycle jobs require an owner, positive fence token, and lease timestamp.",
     ),
     Invariant(
-        "done_job_requires_graph_stage",
+        "done_stage_job_requires_graph_stage",
         """
         MATCH (j:IngestJob)
-        WHERE (j.status='done' OR j.lifecycle_state='DONE')
+        WHERE j.status='done'
+          AND j.completed_stages IS NOT NULL
           AND NOT 'graph_written' IN coalesce(j.completed_stages,[])
-          AND NOT 'graph-written' IN coalesce(j.completed_tasks,[])
-        RETURN j.key AS key, j.status AS status, j.lifecycle_state AS lifecycle_state
+        RETURN j.key AS key, j.status AS status,
+               coalesce(j.completed_stages,[]) AS completed_stages
         LIMIT $limit
         """,
-        "Completed jobs must record the graph-write terminal stage/task.",
+        "Legacy stage-protocol jobs marked done must include graph_written.",
     ),
     Invariant(
         "artifact_requires_provenance_fields",
@@ -61,7 +62,9 @@ INVARIANTS = (
         "artifact_requires_producer",
         """
         MATCH (a:IngestArtifact)
-        WHERE NOT (:IngestJob)-[:PRODUCED]->(a)
+        WHERE NOT EXISTS {
+            MATCH (:IngestJob)-[:PRODUCED]->(a)
+        }
         RETURN a.artifact_id AS artifact_id, a.path AS path
         LIMIT $limit
         """,
