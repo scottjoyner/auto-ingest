@@ -12,6 +12,20 @@ machine_paths:
     hostname_pattern: x1-370
     hot_ssd_root: /media/scott/SSD_4TB/audio
     nas_mirror_root: /media/scott/NAS5
+    # Staging flag (added 2026-08-14): marks x1-370 as the dedicated
+    # torch/ROCm GPU node for pipeline phases that the RX 480 on deathstar
+    # cannot run (pyannote diarization, YOLO embeddings, dense retrieval
+    # re-embeds). deathstar offloads VAAPI + whisper.cpp only; anything that
+    # needs a real ROCm stack (torch.cuda/torch.xpu) is routed here once the
+    # host is back online. See `auto_ingest/backend.has_rocm()`.
+    gpu:
+      type: rocm
+      device: 0
+      model_whitelist:
+        - rx9700xt
+        - mi300
+      rocm_version_min: "6.3"
+      note: "RX 9700 XT (Navi 35, GFX1100); requires rocBLAS + torch+rocm build"
 
   # Any device on the LAN — uses shared SSD_4TB and NAS5 mounts
   # Mount points:

@@ -209,3 +209,32 @@ def prefer_onnx(*, force: bool = False) -> bool:
     if force:
         return True
     return detect_backend() == "onnx"
+
+
+def has_rocm() -> bool:
+    """True when an AMD ROCm stack is actually usable on this host.
+
+    A two-condition check: rocminfo is present AND torch sees a CUDA-API GPU
+    (ROCm drivers expose the CUDA API). On deathstar's RX 480 this is False
+    (no ROCm), so torch-heavy phases fall back to CPU or route to the x1-370
+    ROCm node marked in config.yaml's ``<machine>.gpu`` block.
+    """
+    return backend_info()["rocm_available"]
+
+
+def gpu_target_machine() -> Dict | None:
+    """Return the config.yaml machine entry that should own the ROCm/GPU phases,
+    or None if there is no dedicated GPU target configured for this fleet.
+
+    Reads config.yaml (NOT a runtime probe) so dispatch decisions work even while
+    x1-370 is offline — callers can then remote/execute on that node, or skip.
+    """
+    try:
+        import auto_ingest_config as _cfg  # canonical, always importable
+    except Exception:
+        return None
+    cfg = _cfg._load_config()
+    for name, m in (cfg.get("machine_paths") or {}).items():
+        if m.get("gpu"):
+            return {"name": name, **m}
+    return None
