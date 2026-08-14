@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
-"""
-Fix-up pass after reconcile_scott_voiceprint.py --apply:
-
-1) Remove the STALE ACTIVE_VERSION edge to the old (superseded, corrupt) version,
-   keeping only the new reconcile_resync active version. The HAS_VERSION lineage
-   edge to the old version is preserved (history kept).
-2) Set aliases + canonical_uid on the 'Scott' VoiceIdentity so it's clearly an
-   alias of canonical 'scott' (the first apply's CASE/SET didn't persist due to
-   WITH-scoping of the deleted relationship).
+"""Fix-up pass after reconcile_scott_voiceprint.py --apply.
 
 Dry-run by default; --apply to write.
 """
 import argparse
 import logging
+
 from neo4j import GraphDatabase
 
+from auto_ingest_config import get_neo4j_env
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-URI = "bolt://localhost:7687"; USER = "neo4j"; PASS = "knowledge_graph_2026"
+URI, USER, PASS, _ = get_neo4j_env()
 ASSISTX_DB = "assistx"
 CANONICAL_GROUP_KEY = "scott:identity"
 
@@ -33,7 +28,6 @@ def main():
     drv = driver()
     try:
         with drv.session(database=ASSISTX_DB) as s:
-            # 1) identify stale ACTIVE_VERSION edges (any except the reconcile_resync active one)
             stale = s.run("""
                 MATCH (g:VoiceprintGroup{group_key:$gk})-[r:ACTIVE_VERSION]->(v:VoiceprintVersion)
                 WHERE v.source <> 'reconcile_resync'
@@ -49,7 +43,6 @@ def main():
                 """, gk=CANONICAL_GROUP_KEY)
                 logging.info(f"[fixup] removed {len(stale_ids)} stale ACTIVE_VERSION edge(s).")
 
-            # 2) set alias metadata on 'Scott' VoiceIdentity
             info = s.run("""
                 MATCH (vi:VoiceIdentity{user_id:'Scott'})
                 RETURN vi.aliases AS al, vi.canonical_uid AS cu
@@ -58,7 +51,6 @@ def main():
             cu = info["cu"] if info else None
             logging.info(f"[fixup] 'Scott' VI before: aliases={al} canonical_uid={cu}")
             if not args.dry_run:
-                # pure Cypher: ensure 'Scott' is in the aliases list, no APOC needed
                 s.run("""
                     MATCH (vi:VoiceIdentity{user_id:'Scott'})
                     SET vi.aliases = CASE
@@ -68,7 +60,7 @@ def main():
                         vi.canonical_uid = 'scott',
                         vi.is_alias = true
                 """)
-                logging.info("[fixup] set aliases=['Scott'], canonical_uid='scott', is_alias=true on 'Scott' VI.")
+                logging.info("[fixup] set canonical alias metadata on 'Scott' VoiceIdentity.")
 
         mode = "DRY-RUN" if args.dry_run else "APPLIED"
         logging.info(f"=== DONE [{mode}] ===")
