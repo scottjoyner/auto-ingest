@@ -3,10 +3,8 @@
 # on NAS5 at /fileserver/dashcam/compressed/YYYY/MM/DD/<file>.mp4
 #
 # Reads source from the fileserver dashcam root (SSD_4TB/fileserver -> NAS5) and
-# writes HEVC (libx265) re-encodes. Resumable: existing/verified outputs are
-# skipped, so re-launching after a crash/cont/Ctrl-C continues where it left off.
-#
-# Run in tmux/nohup on a real shell — this is a long job (tens of thousands of files).
+# writes HEVC/H.264 re-encodes. Resumable: existing/verified outputs are skipped,
+# so re-launching after a crash/cont/Ctrl-C continues where it left off.
 set -uo pipefail
 cd "$(dirname "$0")"
 
@@ -26,25 +24,42 @@ VAAPI="${VAAPI:-0}"   # 1 = use VAAPI hardware encode (AMD/Intel GPU)
 VAAPI_DEVICE="${VAAPI_DEVICE:-/dev/dri/renderD128}"
 VAAPI_BITRATE="${VAAPI_BITRATE:-}"
 
+case "$VAAPI" in
+  0|false|FALSE|no|NO|off|OFF) VAAPI_ENABLED=0 ;;
+  1|true|TRUE|yes|YES|on|ON) VAAPI_ENABLED=1 ;;
+  *)
+    echo "ERROR: VAAPI must be 0/1 or a boolean value, got: $VAAPI" >&2
+    exit 2
+    ;;
+esac
+
 echo "=== dashcam compression ==="
 echo "input : $INPUT_ROOT"
 echo "output: $OUTPUT_ROOT"
 echo "workers: $WORKERS  crf: $CRF  limit: $LIMIT"
-echo "vaapi : $VAAPI (device $VAAPI_DEVICE${VAAPI_BITRATE:+ bitrate $VAAPI_BITRATE})"
+echo "vaapi : $VAAPI_ENABLED (device $VAAPI_DEVICE${VAAPI_BITRATE:+ bitrate $VAAPI_BITRATE})"
 
-python3 -u compress_dashcam2.py \
-  --input-root "$INPUT_ROOT" \
-  --output-root "$OUTPUT_ROOT" \
-  --workers "$WORKERS" \
-  --crf "$CRF" \
-  --max-width 1280 \
-  --fps 30 \
-  --audio-k 96 \
-  --order newest \
-  ${VAAPI:+--vaapi} \
-  ${VAAPI_DEVICE:+--vaapi-device "$VAAPI_DEVICE"} \
-  ${VAAPI_BITRATE:+--vaapi-bitrate "$VAAPI_BITRATE"} \
-  ${LIMIT:+--limit "$LIMIT"} \
-  "$@"
+args=(
+  --input-root "$INPUT_ROOT"
+  --output-root "$OUTPUT_ROOT"
+  --workers "$WORKERS"
+  --crf "$CRF"
+  --max-width 1280
+  --fps 30
+  --audio-k 96
+  --order newest
+)
+
+if [[ "$VAAPI_ENABLED" == "1" ]]; then
+  args+=(--vaapi --vaapi-device "$VAAPI_DEVICE")
+  if [[ -n "$VAAPI_BITRATE" ]]; then
+    args+=(--vaapi-bitrate "$VAAPI_BITRATE")
+  fi
+fi
+if [[ "$LIMIT" != "0" ]]; then
+  args+=(--limit "$LIMIT")
+fi
+
+python3 -u compress_dashcam2.py "${args[@]}" "$@"
 
 echo "Compression pass complete. Output mirrored at: $OUTPUT_ROOT"
