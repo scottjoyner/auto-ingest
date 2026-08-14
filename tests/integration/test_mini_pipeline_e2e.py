@@ -15,6 +15,7 @@ from auto_ingest.ingest_claim import (
     stage_status,
     update_stage_fenced,
 )
+from auto_ingest.invariants import audit as audit_invariants
 from auto_ingest.runtime_schema import ensure_schema
 
 pytestmark = [pytest.mark.integration, pytest.mark.destructive]
@@ -54,7 +55,15 @@ def cleanup(driver):
         ).consume()
 
 
-def _register_artifact(driver, *, token: int, artifact_id: str, path: Path, digest: str, source_hash: str):
+def _register_artifact(
+    driver,
+    *,
+    token: int,
+    artifact_id: str,
+    path: Path,
+    digest: str,
+    source_hash: str,
+):
     with driver.session(database="neo4j") as session:
         rec = session.run(
             """
@@ -98,7 +107,13 @@ def test_mini_pipeline_converges_exactly_once_across_retry(driver, tmp_path: Pat
     assert update_stage_fenced(driver, JOB_KEY, "copied", owner="mini-worker", fence_token=token)
     commit = atomic_commit_bytes(artifact_path, source)
     assert commit.reused is False
-    assert update_stage_fenced(driver, JOB_KEY, "transcribed", owner="mini-worker", fence_token=token)
+    assert update_stage_fenced(
+        driver,
+        JOB_KEY,
+        "transcribed",
+        owner="mini-worker",
+        fence_token=token,
+    )
     assert _register_artifact(
         driver,
         token=token,
@@ -153,3 +168,4 @@ def test_mini_pipeline_converges_exactly_once_across_retry(driver, tmp_path: Pat
             key=JOB_KEY,
         ).single()
     assert dict(row) == {"jobs": 1, "artifacts": 1, "produced": 1, "fence": 2}
+    assert audit_invariants(driver)["ok"] is True
