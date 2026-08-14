@@ -29,6 +29,12 @@ CONTENT="${CONTENT:-1}"                 # set 0 to skip content generation
 NEXTCLOUD_URL="${NEXTCLOUD_URL:-}"      # set to WebDAV base to enable Nextcloud ingest
 NEXTCLOUD_USER="${NEXTCLOUD_USER:-admin}"
 NEXTCLOUD_PASS="${NEXTCLOUD_PASS:-}"
+# Auto-enable VAAPI hardware encode for dashcam compression when a GPU render node
+# exists (e.g. deathstar's RX 480). Offloads HEVC encode from CPU to the GPU.
+if [ -c /dev/dri/renderD128 ] && [ -z "${VAAPI:-}" ]; then
+  export VAAPI=1
+fi
+VAAPI_DEVICE="${VAAPI_DEVICE:-/dev/dri/renderD128}"
 # fall back to config.yaml nextcloud: block if env not set
 if [ -z "${NEXTCLOUD_URL:-}" ]; then
   NEXTCLOUD_URL="$(python3 -c "import auto_ingest_config as c; print(c.get_nextcloud_webdav()[0] or '')" 2>/dev/null)"
