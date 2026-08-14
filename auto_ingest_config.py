@@ -424,3 +424,10 @@ def neo4j_session(database=None):
     if drv is None:
         return None
     return drv.session(database=database or os.environ.get('NEO4J_DB', 'neo4j'))
+
+
+# Load .env on import so any script that imports auto_ingest_config (even one
+# that never calls get_neo4j_config()) gets HF_TOKEN, NEO4J_*, WHISPER_CPP_*,
+# and scan-root env vars. _load_env() is a no-op for already-set vars, so an
+# explicit export always wins. Run from the repo root where .env lives.
+_load_env()
