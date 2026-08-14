@@ -12,11 +12,20 @@ Every `*.json` file is discovered automatically by `tests/test_regression_harnes
    python -m auto_ingest.diagnostics --output auto-ingest-diagnostics.tar.gz
    ```
 
-3. Reduce the failing input to the smallest JSON-compatible payload possible.
-4. Add a fixture file in this directory using an allowlisted target from
+3. If you have a bundle from a working machine, compare them directly:
+
+   ```bash
+   python -m auto_ingest.diagnostic_diff good.tar.gz failing.tar.gz
+   ```
+
+   A nonzero exit means the reports differ. Use `--json` when the diff should be
+   attached to an issue or processed by another tool.
+
+4. Reduce the failing input to the smallest JSON-compatible payload possible.
+5. Add a fixture file in this directory using an allowlisted target from
    `auto_ingest.regression.ADAPTERS`.
-5. Make the fixture fail before the production fix, then pass after the fix.
-6. Keep the fixture permanently; do not replace it with a looser unit test.
+6. Make the fixture fail before the production fix, then pass after the fix.
+7. Keep the fixture permanently; do not replace it with a looser unit test.
 
 ## Fixture format
 
