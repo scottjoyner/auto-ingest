@@ -27,13 +27,21 @@ def ffmpeg_supports(codec: str) -> bool:
     except Exception:
         return False
 
-def detect_codecs():
+def detect_codecs(vaapi: bool = False, vaapi_device: str = "/dev/dri/renderD128"):
+    if vaapi:
+        # VAAPI hardware encode (AMD/Intel). Prefer HEVC; fall back to H.264.
+        if ffmpeg_supports("hevc_vaapi"):
+            return ("hevc_vaapi", "hevc", vaapi_device)
+        elif ffmpeg_supports("h264_vaapi"):
+            return ("h264_vaapi", "h264", vaapi_device)
+        else:
+            sys.exit("ERROR: --vaapi requested but ffmpeg has no hevc_vaapi/h264_vaapi encoder.")
     if ffmpeg_supports("libx265"):
-        return ("libx265", "hevc")
+        return ("libx265", "hevc", None)
     elif ffmpeg_supports("hevc_videotoolbox"):
-        return ("hevc_videotoolbox", "hevc")
+        return ("hevc_videotoolbox", "hevc", None)
     elif ffmpeg_supports("libx264"):
-        return ("libx264", "h264")
+        return ("libx264", "h264", None)
     else:
         sys.exit("ERROR: No suitable H.265/H.264 encoder found in FFmpeg (need libx265/hevc_videotoolbox/libx264).")
 
@@ -77,25 +85,30 @@ def is_target_outdated(src: Path, dst: Path) -> bool:
     return False
 
 def build_ffmpeg_cmd(
-    ffmpeg, src, dst_tmp, vcodec, family, crf, preset, max_width, fps, audio_k, tune, extra_x265, tag_apple
+    ffmpeg, src, dst_tmp, vcodec, family, crf, preset, max_width, fps, audio_k, tune, extra_x265, tag_apple, vaapi_device=None, vaapi_bitrate=None
 ):
     vf = []
     if max_width:
         vf.append(f"scale='min({max_width},iw)':'-2':force_original_aspect_ratio=decrease")
     if fps:
         vf.append(f"fps={fps}")
-    vf_str = ",".join(vf) if vf else "null"
 
     common = [
         ffmpeg, "-hide_banner", "-y",
-        "-i", str(src),
-        "-map_metadata", "0",
-        "-map", "0",
-        "-f", "mp4",
-        "-movflags", "+faststart",
-        "-pix_fmt", "yuv420p",
-        "-vf", vf_str,
     ]
+    if vcodec.endswith("_vaapi"):
+        common += ["-init_hw_device", f"vaapi=va:{vaapi_device}"]
+        common += ["-hwaccel", "vaapi"]
+        common += ["-i", str(src)]
+        # Decode via VAAPI (frames stay in system memory), scale on CPU, then
+        # upload to the GPU just for encode.
+        vf.append("format=nv12,hwupload")
+        common += ["-vf", ",".join(vf)]
+    else:
+        vf_str = ",".join(vf) if vf else "null"
+        common += ["-i", str(src)]
+        common += ["-vf", vf_str]
+    common += ["-map_metadata", "0", "-map", "0", "-f", "mp4", "-movflags", "+faststart"]
 
     v = ["-c:v", vcodec]
     if vcodec == "libx265":
@@ -112,6 +125,22 @@ def build_ffmpeg_cmd(
         q = max(18, min(crf, 36))  # videotooolbox quality param
         v += ["-b:v", "0", "-q:v", str(q)]
         v += ["-tag:v", "hvc1"]
+    elif vcodec in ("hevc_vaapi", "h264_vaapi"):
+        # Polaris/older VAAPI fixed-QP maps poorly to x265 CRF (produces
+        # near-lossless sizes). Use bitrate control instead, derived from CRF:
+        # CRF 18..30 -> 12M..4M for 720p-class output (override with
+        # --vaapi-bitrate).
+        if vaapi_bitrate:
+            br = vaapi_bitrate
+        else:
+            # linear-ish map, clamped
+            q = min(max(crf, 18), 30)
+            br_m = 12000 - (q - 18) * 650  # 12M @18 .. ~4.2M @30
+            br_m = int(br_m / 500) * 500
+            br = f"{br_m}k"
+        v += ["-b:v", br]
+        if family == "hevc" and tag_apple:
+            v += ["-tag:v", "hvc1"]
 
     a = ["-c:a", "aac", "-b:a", f"{audio_k}k"]
     sync = ["-vsync", "vfr"] if fps else []
@@ -121,7 +150,7 @@ def process_one(task):
     (
         src, dst, ffmpeg, ffprobe, vcodec, family, crf, preset, max_width,
         fps, audio_k, tune, extra_x265, tag_apple, dry_run, overwrite, skip_existing,
-        verify, verify_thresh, min_bytes, quarantine_bad
+        verify, verify_thresh, min_bytes, quarantine_bad, vaapi_device, vaapi_bitrate
     ) = task
 
     try:
@@ -161,7 +190,7 @@ def process_one(task):
         dst_tmp = dst.with_suffix(dst.suffix + ".partial")
 
         cmd = build_ffmpeg_cmd(
-            ffmpeg, src, dst_tmp, vcodec, family, crf, preset, max_width, fps, audio_k, tune, extra_x265, tag_apple
+            ffmpeg, src, dst_tmp, vcodec, family, crf, preset, max_width, fps, audio_k, tune, extra_x265, tag_apple, vaapi_device, vaapi_bitrate
         )
         if dry_run:
             return (src, dst, "dry-run", 0, " ".join(shlex.quote(c) for c in cmd))
@@ -286,11 +315,18 @@ def main():
                     help="Do not rename invalid existing outputs to .bad before re-encoding")
     ap.set_defaults(quarantine_bad=True)
 
+    ap.add_argument("--vaapi", action="store_true",
+                    help="Use VAAPI hardware encoding (AMD/Intel GPU) instead of libx265.")
+    ap.add_argument("--vaapi-device", default="/dev/dri/renderD128",
+                    help="VAAPI render node (default: /dev/dri/renderD128)")
+    ap.add_argument("--vaapi-bitrate", default=None,
+                    help="Explicit VAAPI encode bitrate (e.g. 6M); else derived from --crf.")
+
     args = ap.parse_args()
 
     ffmpeg = which_ffmpeg()
     ffprobe = which_ffprobe()
-    vcodec, family = detect_codecs()
+    vcodec, family, vaapi_device = detect_codecs(args.vaapi, args.vaapi_device)
 
     input_root = Path(args.input_root).resolve()
     output_root = Path(args.output_root).resolve()
@@ -330,6 +366,11 @@ def main():
         print(f"HEVC (CRF {args.crf}, preset {args.preset}, x265-params='{args.x265_params}')")
     elif vcodec == "libx264":
         print(f"H.264 (CRF {max(16, min(args.crf, 30))}, preset {args.preset}, tune={args.tune})")
+    elif vcodec.endswith("_vaapi"):
+        if args.vaapi_bitrate:
+            print(f"VAAPI {family.upper()} (bitrate {args.vaapi_bitrate}, device {vaapi_device})")
+        else:
+            print(f"VAAPI {family.upper()} (CRF->bitrate map from CRF {args.crf}, device {vaapi_device})")
 
     tasks = []
     for src in files:
@@ -340,9 +381,10 @@ def main():
             args.max_width if args.max_width > 0 else None,
             args.fps if args.fps > 0 else None,
             args.audio_k, args.tune, args.x265_params,
-            (False if args.no_apple_tag else True) and (vcodec in ("libx265", "hevc_videotoolbox")),
+            (False if args.no_apple_tag else True) and (vcodec in ("libx265", "hevc_videotoolbox", "hevc_vaapi")),
             args.dry_run, args.overwrite, args.skip_existing,
-            args.verify, args.verify_threshold, args.min_bytes, args.quarantine_bad
+            args.verify, args.verify_threshold, args.min_bytes, args.quarantine_bad,
+            vaapi_device, args.vaapi_bitrate
         ))
 
     ok, skipped, skipped_exists, errors = 0, 0, 0, 0

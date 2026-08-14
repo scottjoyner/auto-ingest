@@ -22,11 +22,15 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-$COMPRESSED_ROOT}"
 WORKERS="${WORKERS:-$(nproc)}"
 CRF="${CRF:-26}"
 LIMIT="${LIMIT:-0}"   # 0 = no limit (process everything)
+VAAPI="${VAAPI:-0}"   # 1 = use VAAPI hardware encode (AMD/Intel GPU)
+VAAPI_DEVICE="${VAAPI_DEVICE:-/dev/dri/renderD128}"
+VAAPI_BITRATE="${VAAPI_BITRATE:-}"
 
 echo "=== dashcam compression ==="
 echo "input : $INPUT_ROOT"
 echo "output: $OUTPUT_ROOT"
 echo "workers: $WORKERS  crf: $CRF  limit: $LIMIT"
+echo "vaapi : $VAAPI (device $VAAPI_DEVICE${VAAPI_BITRATE:+ bitrate $VAAPI_BITRATE})"
 
 python3 -u compress_dashcam2.py \
   --input-root "$INPUT_ROOT" \
@@ -37,6 +41,9 @@ python3 -u compress_dashcam2.py \
   --fps 30 \
   --audio-k 96 \
   --order newest \
+  ${VAAPI:+--vaapi} \
+  ${VAAPI_DEVICE:+--vaapi-device "$VAAPI_DEVICE"} \
+  ${VAAPI_BITRATE:+--vaapi-bitrate "$VAAPI_BITRATE"} \
   ${LIMIT:+--limit "$LIMIT"} \
   "$@"
 
