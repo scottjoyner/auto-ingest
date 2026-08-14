@@ -5,8 +5,6 @@ import subprocess
 from pathlib import Path
 from types import ModuleType
 
-import pytest
-
 from auto_ingest import cv2_vaapi
 
 
@@ -155,7 +153,11 @@ def test_wrapper_rejects_invalid_boolean(tmp_path: Path):
     calls = tmp_path / "calls.txt"
     _write_fake_python(bin_dir, calls)
     env = dict(os.environ)
-    env.update(PATH=f"{bin_dir}:{env['PATH']}", VAAPI="sometimes", FILESERVER_ROOT="/tmp/fileserver")
+    env.update(
+        PATH=f"{bin_dir}:{env['PATH']}",
+        VAAPI="sometimes",
+        FILESERVER_ROOT="/tmp/fileserver",
+    )
     result = subprocess.run(
         ["bash", "run_compress_dashcam.sh"],
         cwd=Path(__file__).resolve().parents[1],
