@@ -40,15 +40,41 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from auto_ingest_config import get_neo4j_config, get_fileserver_root
 from auto_ingest.backend import backend_info, has_rocm, gpu_target_machine
-from auto_ingest.embed import get_default_model, embed_texts
+from auto_ingest.embed import EmbedModel, DEFAULT_MODEL
 from neo4j import GraphDatabase
 
 DEFAULT_TOP_K = 25
 # Which utterance vector index to query. Defaults to the live MiniLM-L6 index;
 # switch to the gte-small re-embed by starting the server with
-# VECTOR_PROP=emb_gte_small (INDEX_NAME resolves to <prop>_index).
+# VECTOR_PROP=emb_gte_small.
 EMBED_PROP = os.getenv("VECTOR_PROP", "embedding")
-INDEX_NAME = f"{EMBED_PROP}_index"
+# Index names aren't uniformly `<prop>_index` — the legacy path names them
+# `<label>_<prop>_index` (utterance_embedding_index), while the reembed path
+# uses `<prop>_index` (emb_gte_small_index). Resolve the real name at query
+# time by asking the DB which ONLINE vector index targets Utterance + prop.
+# The query embedding model MUST match the model that produced the indexed
+# vectors, or cosine scores are meaningless. Resolve it from the prop by
+# default, with EMBED_MODEL_NAME as an explicit override.
+_PROP_MODEL = {
+    "embedding": "sentence-transformers/all-MiniLM-L6-v2",
+    "emb_gte_small": "thenlper/gte-small",
+    "emb_mini12": "sentence-transformers/all-MiniLM-L12-v2",
+    "emb_e5_large": "intfloat/multilingual-e5-large",
+}
+QUERY_MODEL = os.getenv("EMBED_MODEL_NAME") or _PROP_MODEL.get(EMBED_PROP, DEFAULT_MODEL)
+_query_model = EmbedModel(QUERY_MODEL)
+
+
+def resolve_utterance_index(sess) -> Optional[str]:
+    """Return the ONLINE vector index name for Utterance.<EMBED_PROP>, or None."""
+    rows = sess.run(
+        "SHOW VECTOR INDEXES YIELD name, labelsOrTypes, properties, state "
+        "WHERE state = 'ONLINE' RETURN name, labelsOrTypes, properties"
+    ).values()
+    for name, labels, props in rows:
+        if "Utterance" in (labels or []) and EMBED_PROP in (props or []):
+            return name
+    return None
 _LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 # SSE tailed logs (sweep worker + active re-embed). New lines from any are
 # forwarded to the live page with a short tag so you see ingest + re-embed
@@ -78,9 +104,13 @@ def search(text: str, k: int = DEFAULT_TOP_K) -> List[Dict[str, Any]]:
     """Vector search utterances, joined to their Transcription for media path."""
     if not text.strip():
         return []
-    qvec = embed_texts([text])[0]
-    cypher = f"""
-    CALL db.index.vector.queryNodes('{INDEX_NAME}', $k, $qvec)
+    qvec = _query_model.embed([text])[0]
+    with _driver.session() as s:
+        idx = resolve_utterance_index(s)
+        if idx is None:
+            return []
+        cypher = f"""
+    CALL db.index.vector.queryNodes('{idx}', $k, $qvec)
     YIELD node AS u, score
     WHERE 'Utterance' IN labels(u)
     MATCH (u)<-[:HAS_UTTERANCE]-(t:Transcription)
@@ -100,7 +130,6 @@ def search(text: str, k: int = DEFAULT_TOP_K) -> List[Dict[str, Any]]:
     ORDER BY score DESC
     LIMIT $k
     """
-    with _driver.session() as s:
         rows = s.run(cypher, k=int(k), qvec=list(qvec)).data()
     hits = []
     for r in rows:
@@ -262,7 +291,7 @@ class Handler(BaseHTTPRequestHandler):
                 "backend": bi["backend"], "torch_device": bi["torch_device"],
                 "has_rocm": has_rocm(),
                 "gpu_target": gpu_target_machine().get("name") if gpu_target_machine() else None,
-                "embed_model": get_default_model().name, "embed_dim": get_default_model().dim,
+                "embed_model": _query_model.name, "embed_dim": _query_model.dim,
                 "nodes": db_count(),
             })
         elif path == "/api/search":
