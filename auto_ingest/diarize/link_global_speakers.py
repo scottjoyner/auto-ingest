@@ -35,6 +35,7 @@ import hashlib
 import math
 import sqlite3
 import time
+from collections import OrderedDict
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, List, Set, Tuple, Optional
@@ -167,6 +168,33 @@ DEFAULT_CACHE_REFRESH = False
 DEFAULT_EMB_CACHE = "./emb_cache.sqlite"
 DEFAULT_EMB_REFRESH = False
 EMB_CACHE_SCHEMA_VER = 2  # bumped to add rms/snr columns
+
+# In-memory LRU for decoded waveforms (many speakers share the same file;
+# re-decoding each MP3 once per speaker is the dominant I/O cost).
+WAV_CACHE_MAX_BYTES = int(os.getenv("WAV_CACHE_MAX_BYTES", str(2 << 30)))  # default 2 GiB
+_WAV_CACHE: "OrderedDict[str, Tuple[torch.Tensor, int]]" = OrderedDict()
+_wav_cache_bytes = 0
+
+def _wav_cache_get(path: str) -> Optional[Tuple[torch.Tensor, int]]:
+    hit = _WAV_CACHE.get(path)
+    if hit is not None:
+        _WAV_CACHE.move_to_end(path)
+        return hit
+    return None
+
+def _wav_cache_put(path: str, wav: torch.Tensor, sr: int):
+    global _wav_cache_bytes
+    nbytes = wav.numel() * wav.element_size()
+    if nbytes > WAV_CACHE_MAX_BYTES:
+        return  # too big to cache
+    if path in _WAV_CACHE:
+        old = _WAV_CACHE.pop(path)
+        _wav_cache_bytes -= old[0].numel() * old[0].element_size()
+    while _wav_cache_bytes + nbytes > WAV_CACHE_MAX_BYTES and _WAV_CACHE:
+        _k, (ow, _s) = _WAV_CACHE.popitem(last=False)
+        _wav_cache_bytes -= ow.numel() * ow.element_size()
+    _WAV_CACHE[path] = (wav, sr)
+    _wav_cache_bytes += nbytes
 
 # Quarantine thresholds
 DEFAULT_QUARANTINE_MIN = 0.70  # min internal pairwise score for "confirmed"
@@ -817,6 +845,29 @@ class SpkEmbedder:
             emb = self._pyannote(arr, sample_rate=sr)
             return np.asarray(emb, dtype=np.float32)
 
+    @torch.inference_mode()
+    def embed_batch(self, wavs: List[torch.Tensor], sr: int) -> List[np.ndarray]:
+        """Embed a list of snippets in ONE model forward pass.
+
+        Snips are padded to the longest in the batch; ECAPA's wav_lens masks the
+        padding so per-snip results stay exact. Falls back to per-snip for pyannote
+        (its Inference object has no native batch API).
+        """
+        if not wavs:
+            return []
+        if self.backend == "speechbrain":
+            self._ensure_ecapa()
+            max_len = max(w.numel() for w in wavs)
+            batch = torch.zeros(len(wavs), max_len, dtype=torch.float32)
+            for i, w in enumerate(wavs):
+                batch[i, :w.numel()] = w.float()
+            lens = torch.tensor([w.numel() / max_len for w in wavs], dtype=torch.float32)
+            embs = self._ecapa.encode_batch(batch.to(DEVICE), wav_lens=lens.to(DEVICE))
+            out = [embs[i].squeeze(0).squeeze(0).cpu().numpy().astype(np.float32) for i in range(len(wavs))]
+            return out
+        else:
+            return [self.embed(w, sr) for w in wavs]
+
 
 # -----------------------
 # SQLite per-snippet embedding cache
@@ -830,6 +881,8 @@ class EmbCache:
         self.snip_len = snip_len
         self.sr = sr
         self.conn = None
+        self._pending = 0
+        self._commit_every = 256
         if self.path:
             self._open()
 
@@ -889,7 +942,16 @@ class EmbCache:
             (k, speaker_id, file_key, float(start), float(end), self.backend, self.model_name, float(self.snip_len), int(self.sr),
              int(emb.size), emb.tobytes(), float(rms), float(snr_db), time.time())
         )
-        self.conn.commit()
+        self._pending += 1
+        if self._pending >= self._commit_every:
+            self.conn.commit()
+            self._pending = 0
+
+    def flush(self):
+        """Force any pending inserts to disk (call once at the end of a run)."""
+        if self.conn and self._pending:
+            self.conn.commit()
+            self._pending = 0
 
 
 # -----------------------
@@ -1335,6 +1397,11 @@ class Args:
     priority_max_attach: int              # safety cap
     rank_and_label: bool                  # compute dominance + label transcriptions
 
+    # promotion + non-speech gating
+    promote: bool
+    promote_min_weight: float
+    exclude_non_speech: bool
+
 
 def parse_args():
     import argparse
@@ -1485,7 +1552,13 @@ def main():
             p = Path(p_str)
             try:
                 if _is_audio_path(p):
+                    # decoded-waveform LRU avoids re-decoding the same file per speaker
+                    hit = _wav_cache_get(str(p))
+                    if hit is not None:
+                        wav, sr = hit
+                        return wav, sr, p
                     wav, sr = load_audio(p, DEFAULT_SR)
+                    _wav_cache_put(str(p), wav, sr)
                     return wav, sr, p
                 else:
                     # cached path is not audio; drop it
@@ -1500,9 +1573,14 @@ def main():
             logging.warning(f"Audio missing for key={key}")
             return None
 
-        # Validate + load
+        # Validate + load (decoded-waveform LRU)
         try:
-            wav, sr = load_audio(p, DEFAULT_SR)
+            hit = _wav_cache_get(str(p))
+            if hit is not None:
+                wav, sr = hit
+            else:
+                wav, sr = load_audio(p, DEFAULT_SR)
+                _wav_cache_put(str(p), wav, sr)
         except Exception as ex:
             logging.warning(f"Discovered audio failed for key={key}: {p} ({ex})")
             return None
@@ -1552,12 +1630,12 @@ def main():
         # hold-out candidate
         hold_idx = (len(chosen) - 1) if (args.holdout and len(chosen) >= 2) else None
 
-        # accumulate weighted sum
-        sum_vec = None
-        wsum = 0.0
-        used = 0
-        held: Optional[np.ndarray] = None
-
+        # Pass 1: clip + gate each chosen snip. Cache hits are resolved inline;
+        # misses are queued for ONE batched ECAPA forward pass below.
+        emb_for_idx: Dict[int, np.ndarray] = {}
+        pending: List[Tuple[int, torch.Tensor, str, float, float]] = []  # (idx, snip, key, s, e)
+        snr_for_idx: Dict[int, float] = {}
+        rms_for_idx: Dict[int, float] = {}
         got_audio = False
         for idx, (key, s, e, text, prop) in enumerate(chosen):
             pack = get_audio_for_key(key)
@@ -1573,6 +1651,8 @@ def main():
             rms, snr_db = rms_and_snr_db(snip)
             if rms < args.min_rms or snr_db < args.min_snr_db:
                 continue
+            snr_for_idx[idx] = snr_db
+            rms_for_idx[idx] = rms
 
             if out_dir:
                 safe_key = re.sub(r"[^A-Za-z0-9_-]", "", key)
@@ -1581,15 +1661,32 @@ def main():
 
             cached = emb_cache.get(sid, key, s, e)
             if cached is None:
-                emb = embedder.embed(snip, sr)
-                emb_cache.set(sid, key, s, e, emb, rms, snr_db)
+                pending.append((idx, snip, key, s, e))
             else:
-                emb, _, _ = cached
+                emb_for_idx[idx], _, _ = cached
+
+        # Pass 2: embed all cache misses in a single model forward pass.
+        if pending:
+            batch_embs = embedder.embed_batch([p[1] for p in pending], DEFAULT_SR)
+            for (idx, _snip, key, s, e), emb in zip(pending, batch_embs):
+                emb_for_idx[idx] = emb
+                emb_cache.set(sid, key, s, e, emb, rms_for_idx[idx], snr_for_idx[idx])
+
+        # Pass 3: accumulate weighted centroid.
+        sum_vec = None
+        wsum = 0.0
+        used = 0
+        held: Optional[np.ndarray] = None
+        for idx, (key, s, e, text, prop) in enumerate(chosen):
+            emb = emb_for_idx.get(idx)
+            if emb is None:
+                continue
 
             # per-snippet weight
             duration = max(float(e - s), 0.0)
             qscale = 1.0
             if args.weight_quality:
+                snr_db = snr_for_idx.get(idx, args.min_snr_db)
                 qscale = max(0.5, min(2.0, (snr_db - args.min_snr_db) / 10.0 + 1.0))
             w = float(prop) * duration * qscale
 
@@ -1611,7 +1708,7 @@ def main():
                 logging.warning(f"All snips gated out for speaker {sid}")
             continue
 
-        cen = unit(sum_vec if sum_vec is not None else np.zeros_like(emb_u))
+        cen = unit(sum_vec if sum_vec is not None else np.zeros_like(emb_for_idx[list(emb_for_idx)[0]]))
         spk_centroids[sid] = cen
         spk_weights[sid] = max(wsum, 1e-6)
         counts[sid] = used
@@ -1619,6 +1716,7 @@ def main():
 
     if cache_path:
         save_audio_cache(cache_path, audio_cache)
+    emb_cache.flush()
 
     # Mark speakers we attempted but could not embed (no usable audio / all gated out)
     # so that chunked / resumed runs skip them and make monotonic forward progress.
@@ -1743,16 +1841,22 @@ def main():
             ra, rb = find(a), find(b)
             if ra != rb:
                 parent[rb] = ra
-        arr = {sid: unit(remaining_centroids[sid]) for sid in ids}
+        A = np.stack([unit(np.asarray(remaining_centroids[sid], dtype=np.float32)) for sid in ids], axis=0)
         pair_scores: Dict[Tuple[str,str], float] = {}
         n = len(ids)
-        for i in range(n):
-            ai = arr[ids[i]]
-            for j in range(i+1, n):
-                s = float(np.dot(ai, arr[ids[j]]))
-                if s >= args.thresh:
-                    union(i, j)
-                    pair_scores[(ids[i], ids[j])] = s
+        # Vectorized chunked matmul: identical O(n^2) result, but numpy BLAS
+        # instead of a Python double loop (which is ~100x slower at scale).
+        CHUNK = 512
+        for i0 in range(0, n, CHUNK):
+            Ai = A[i0:i0+CHUNK]
+            S = Ai @ A.T  # (chunk, n) cosine similarity of unit vectors
+            for ii in range(S.shape[0]):
+                i = i0 + ii
+                for j in range(i+1, n):
+                    s = float(S[ii, j])
+                    if s >= args.thresh:
+                        union(i, j)
+                        pair_scores[(ids[i], ids[j])] = s
         comps: Dict[int, List[str]] = {}
         for i, sid in enumerate(ids):
             r = find(i)
