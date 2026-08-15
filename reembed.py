@@ -57,12 +57,14 @@ SCHEMA: Dict[str, str] = {
 }
 
 
-def ensure_vector_index(sess, label: str, prop: str, dim: int):
+def ensure_vector_index(sess, label: str, prop: str, dim: int, drop_first: bool = True):
     idx_name = f"{prop}_index"
-    sess.run(f"DROP INDEX {idx_name} IF EXISTS")
+    if drop_first:
+        sess.run(f"DROP INDEX {idx_name} IF EXISTS")
     # Neo4j 5.x vector syntax with tuned HNSW params (recall > defaults).
     sess.run(
-        f"CREATE VECTOR INDEX {idx_name} FOR (n:{label}) ON (n.{prop}) "
+        f"CREATE VECTOR INDEX {idx_name} IF NOT EXISTS "
+        f"FOR (n:{label}) ON (n.{prop}) "
         f"OPTIONS {{ indexConfig: {{ `vector.dimensions`: {dim}, "
         f"`vector.similarity_function`: 'cosine', "
         f"`vector.hnsw.m`: {HNSW_M}, `vector.hnsw.ef_construction`: {HNSW_EF}"
@@ -110,7 +112,8 @@ def page_rows(sess, label: str, prop: str, start_id: int, limit: int):
     return [(r["nid"], r["text"]) for r in rows]
 
 
-def run(label: str, model_name: str, prop: str, batch_size: int, resume: bool):
+def run(label: str, model_name: str, prop: str, batch_size: int, resume: bool,
+        verify_only: bool = False, catchup: bool = False):
     cfg = get_neo4j_config()
     from neo4j import GraphDatabase
 
@@ -120,53 +123,98 @@ def run(label: str, model_name: str, prop: str, batch_size: int, resume: bool):
     text_prop = SCHEMA[label]
     model = EmbedModel(model_name)
 
-    log.info(
-        "reembed %s  model=%s  prop=%s  dim=%d  device=%s  rocm=%s  gpu_target=%s",
-        label, model_name, prop, model.dim, model.device, has_rocm(),
-        (gpu_target_machine() or {}).get("name"),
-    )
-
-    cursor_file = _cursor_path(label, prop)
-    start_id = 0
-    if resume and os.path.exists(cursor_file):
-        start_id = int(open(cursor_file).read().strip())
-        log.info("resuming %s from id > %d (cursor file)", label, start_id)
-
     with driver.session() as sess:
-        ensure_vector_index(sess, label, prop, model.dim)
+        if not verify_only:
+            log.info(
+                "reembed %s  model=%s  prop=%s  dim=%d  device=%s  rocm=%s  gpu_target=%s",
+                label, model_name, prop, model.dim, model.device, has_rocm(),
+                (gpu_target_machine() or {}).get("name"),
+            )
+
         need, total = count_needing(sess, label, text_prop, prop)
+        if verify_only:
+            log.info("%s: %d/%d nodes still missing %s vector%s",
+                     label, need, total, prop,
+                     "  [OK]" if need == 0 else "  [MISSING]")
+            driver.close()
+            return need
+
+        ensure_vector_index(sess, label, prop, model.dim, drop_first=not catchup)
         log.info("%s: %d/%d nodes missing %s vector", label, need, total, prop)
 
-        done = 0
-        t0 = time.perf_counter()
-        while True:
-            rows = page_rows(sess, label, prop, start_id, batch_size)
-            if not rows:
-                break
-            texts = [t or "" for _, t in rows]
-            vecs = model.embed(texts, batch_size=min(batch_size, len(texts)))
-            updates = []
-            for (nid, _text), vec in zip(rows, vecs):
-                updates.append({"nid": nid, "vec": vec})
-            if updates:
-                sess.run(
-                    f"UNWIND $u AS x "
-                    f"MATCH (n:{label}) WHERE id(n) = x.nid "
-                    f"SET n.{prop} = x.vec",
-                    u=updates,
-                )
-                start_id = rows[-1][0]
+        if catchup:
+            # Id-independent sweep: re-scan from 0 repeatedly so nodes created
+            # after the main cursor passed their id(n) still get covered. The
+            # WHERE ... IS NULL filter makes each pass cheap; we stop when a
+            # full pass embeds nothing new (new arrivals were also covered).
+            log.info("%s: catch-up mode — sweeping id space for stragglers", label)
+            passes = 0
+            while True:
+                passes += 1
+                embedded = _embed_pass(sess, label, model, prop, batch_size,
+                                       start_id=0, log_every=0)
+                log.info("%s: catch-up pass %d embedded %d stragglers",
+                         label, passes, embedded)
+                if embedded == 0:
+                    break
+                if passes > 50:
+                    log.warning("%s: catch-up not converging after %d passes "
+                                "(data arriving faster than we sweep)", label, passes)
+                    break
+            need_after, _ = count_needing(sess, label, text_prop, prop)
+            log.info("%s: catch-up complete — %d/%d still missing%s",
+                     label, need_after, total, "" if need_after == 0 else " (non-text nodes excluded)")
+            driver.close()
+            return need_after
+
+        cursor_file = _cursor_path(label, prop)
+        start_id = 0
+        if resume and os.path.exists(cursor_file):
+            start_id = int(open(cursor_file).read().strip())
+            log.info("resuming %s from id > %d (cursor file)", label, start_id)
+
+        done = _embed_pass(sess, label, model, prop, batch_size, start_id,
+                           cursor_file=cursor_file if resume else None,
+                           target=need)
+        log.info("%s complete: %d vectors written to .%s", label, done, prop)
+    driver.close()
+
+
+def _embed_pass(sess, label: str, model, prop: str, batch_size: int,
+                start_id: int, cursor_file: str = None, target: int = 0,
+                log_every: int = 1) -> int:
+    """Embed every node still missing `prop` above `start_id`. Returns count."""
+    done = 0
+    t0 = time.perf_counter()
+    while True:
+        rows = page_rows(sess, label, prop, start_id, batch_size)
+        if not rows:
+            break
+        texts = [t or "" for _, t in rows]
+        vecs = model.embed(texts, batch_size=min(batch_size, len(texts)))
+        updates = []
+        for (nid, _text), vec in zip(rows, vecs):
+            updates.append({"nid": nid, "vec": vec})
+        if updates:
+            sess.run(
+                f"UNWIND $u AS x "
+                f"MATCH (n:{label}) WHERE id(n) = x.nid "
+                f"SET n.{prop} = x.vec",
+                u=updates,
+            )
+            start_id = rows[-1][0]
+            if cursor_file:
                 with open(cursor_file, "w") as f:
                     f.write(str(start_id))
-            done += len(updates)
+        done += len(updates)
+        if log_every and (done % (batch_size * log_every) < batch_size):
             elapsed = time.perf_counter() - t0
             rate = done / elapsed if elapsed else 0.0
             log.info(
                 "  %s: %d/%d done (%.0f/s, ~%.0fs left)",
-                label, done, need, rate, (need - done) / rate if rate else 0.0,
+                label, done, target, rate, (target - done) / rate if rate else 0.0,
             )
-        log.info("%s complete: %d vectors written to .%s", label, done, prop)
-    driver.close()
+    return done
 
 
 def main(argv=None):
@@ -178,14 +226,24 @@ def main(argv=None):
     ap.add_argument("--resume", action="store_true", help="Only populate missing vectors (default behavior)")
     ap.add_argument("--torch-threads", type=int, default=int(os.getenv("TORCH_THREADS", "6")),
                     help="torch intra-op threads (default 6; leaves headroom on deathstar for the sweep)")
+    ap.add_argument("--verify-only", action="store_true",
+                    help="Only report per-label counts of nodes still missing the vector; no writes")
+    ap.add_argument("--catchup", action="store_true",
+                    help="Id-independent sweep: re-scan from 0 until no stragglers remain, "
+                         "covering nodes created after the main cursor passed them")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     _torch.set_num_threads(args.torch_threads)
     log.info("torch threads=%d  model=%s  prop=%s  batch=%d",
              args.torch_threads, args.model, args.prop, args.batch_size)
+    total_missing = 0
     for label in args.labels:
-        run(label, args.model, args.prop, args.batch_size, args.resume)
+        missing = run(label, args.model, args.prop, args.batch_size, args.resume,
+                      verify_only=args.verify_only, catchup=args.catchup)
+        total_missing += missing
+    if args.verify_only:
+        raise SystemExit(1 if total_missing else 0)
 
 
 if __name__ == "__main__":

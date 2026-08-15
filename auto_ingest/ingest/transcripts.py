@@ -67,6 +67,14 @@ LOCAL_TZ = os.getenv("LOCAL_TZ", "America/New_York")
 
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")  # 384 dims
 EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))
+# Optional second embedding model written alongside the canonical `embedding`
+# prop (A/B / hybrid retrieval). When AUTO_INGEST_EMBED_EXTRA=1 the ingest path
+# also computes vectors with EMBED_EXTRA_MODEL into EMBED_EXTRA_PROP so newly
+# ingested data is immediately searchable by the alternative index without a
+# later re-embed pass. Off by default: keeps the live sweep fast on CPU.
+EMBED_EXTRA_ENABLED = os.getenv("AUTO_INGEST_EMBED_EXTRA", "0") == "1"
+EMBED_EXTRA_MODEL = os.getenv("EMBED_EXTRA_MODEL", "thenlper/gte-small")
+EMBED_EXTRA_PROP = os.getenv("EMBED_EXTRA_PROP", "emb_gte_small")
 
 NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, NEO4J_DB = get_neo4j_env()
 NEO4J_ENABLED = bool(NEO4J_URI and NEO4J_USER and NEO4J_PASSWORD)
@@ -265,6 +273,22 @@ def embed_texts(texts: List[str], batch_size: int, max_length: int = 512) -> Lis
             pooled = normalize(pooled)
             vectors.extend(pooled.cpu().numpy().tolist())
     return vectors
+
+_extra_model = None  # lazy: auto_ingest.embed.EmbedModel for the extra prop
+
+def embed_extra_texts(texts: List[str], batch_size: int) -> List[List[float]]:
+    """Compute EMBED_EXTRA_PROP vectors with EMBED_EXTRA_MODEL (lazy load).
+
+    Uses auto_ingest.embed.EmbedModel so pooling is byte-identical to the
+    re-embed CLI and the search server — vectors from both paths interleave.
+    """
+    global _extra_model
+    if _extra_model is None:
+        from ..embed import EmbedModel
+        _extra_model = EmbedModel(EMBED_EXTRA_MODEL)
+    if not texts: return []
+    vecs = _extra_model.embed(texts, batch_size=batch_size)
+    return [v if len(v) == _extra_model.dim else [0.0] * _extra_model.dim for v in vecs]
 
 def chunk_by_tokens(text: str, tokenizer, max_tokens: int = 256, overlap: int = 64) -> List[str]:
     if not text.strip(): return []
@@ -493,6 +517,12 @@ def ensure_schema(driver):
             _create_vector_index(sess, "Transcription", "embedding", "transcription_embedding_index", EMBED_DIM)
             _create_vector_index(sess, "Utterance", "embedding", "utterance_embedding_index", EMBED_DIM)
             _create_vector_index(sess, "Transcription", "embedding_v2", "transcription_embedding_v2_index", EMBED_DIM)
+            if EMBED_EXTRA_ENABLED:
+                from ..embed import EmbedModel as _EmbedModel
+                _extra_dim = int(getattr(_EmbedModel(EMBED_EXTRA_MODEL), "dim", 0) or 384)
+                for _lbl in ("Segment", "Transcription", "Utterance"):
+                    _create_vector_index(sess, _lbl, EMBED_EXTRA_PROP,
+                                         f"{EMBED_EXTRA_PROP}_index", _extra_dim)
         except Neo4jError as e:
             msg = str(e)
             if "Invalid input 'VECTOR'" in msg or "Unrecognized command" in msg:
@@ -880,14 +910,17 @@ def parse_dashcam_metadata_csv(path: str, fps: float, downsample_sec: int,
 # =========================
 # Chunked ingestion
 # =========================
-def ingest_transcription_header(driver, t_id, key, started_at_iso, ended_at_iso, source_paths, text, transcript_emb, transcript_emb_v2):
-    cy = """
-    MERGE (t:Transcription {id: $t_id})
+def ingest_transcription_header(driver, t_id, key, started_at_iso, ended_at_iso, source_paths, text, transcript_emb, transcript_emb_v2,
+                                transcript_extra=None, extra_prop=None):
+    extra_prop = extra_prop or EMBED_EXTRA_PROP
+    cy = f"""
+    MERGE (t:Transcription {{id: $t_id}})
     ON CREATE SET t.key=$key, t.created_at=datetime()
     ON MATCH  SET t.key=$key, t.updated_at=datetime()
     SET t.text=$text,
         t.embedding=$transcript_emb,
         t.embedding_v2=CASE WHEN $transcript_emb_v2 IS NULL THEN t.embedding_v2 ELSE $transcript_emb_v2 END,
+        t.{extra_prop}=CASE WHEN $transcript_extra IS NULL THEN t.{extra_prop} ELSE $transcript_extra END,
         t.source_json=$source_json,
         t.source_csv=$source_csv,
         t.source_rttm=$source_rttm,
@@ -912,7 +945,9 @@ def ingest_transcription_header(driver, t_id, key, started_at_iso, ended_at_iso,
                      transcript_emb_v2=transcript_emb_v2, source_json=source_paths.get("json"),
                      source_csv=source_paths.get("csv"), source_rttm=source_paths.get("rttm"),
                      source_media=source_paths.get("media"),
-                     started_at=started_at_iso, ended_at=ended_at_iso)
+                     started_at=started_at_iso, ended_at=ended_at_iso,
+                     transcript_extra=transcript_extra,
+                     extra_prop=extra_prop or EMBED_EXTRA_PROP)
     except Exception as e:
         if ob is not None and op_id is not None:
             ob.mark_failed(op_id, str(e)[:500])
@@ -922,16 +957,18 @@ def ingest_transcription_header(driver, t_id, key, started_at_iso, ended_at_iso,
 
 def ingest_segments_chunked(driver, t_id, segments, batch=200, timeout=120):
     if not segments: return 0
-    cy = """
-    MATCH (t:Transcription {id:$t_id})
+    extra_prop = EMBED_EXTRA_PROP
+    cy = f"""
+    MATCH (t:Transcription {{id:$t_id}})
     WITH t
     UNWIND $segments AS seg
-    MERGE (s:Segment {id: seg.id})
+    MERGE (s:Segment {{id: seg.id}})
       ON CREATE SET s.idx=seg.idx, s.start=seg.start, s.end=seg.end, s.created_at=datetime()
       ON MATCH  SET s.idx=seg.idx, s.start=seg.start, s.end=seg.end, s.updated_at=datetime()
     SET s.text=seg.text,
         s.tokens_count=seg.tokens_count,
         s.embedding=seg.embedding,
+        s.{extra_prop}=CASE WHEN seg.{extra_prop} IS NULL THEN s.{extra_prop} ELSE seg.{extra_prop} END,
         s.absolute_start=CASE WHEN seg.abs_start IS NULL THEN s.absolute_start ELSE datetime(seg.abs_start) END,
         s.absolute_end  =CASE WHEN seg.abs_end   IS NULL THEN s.absolute_end   ELSE datetime(seg.abs_end)   END,
         s.speaker_label=seg.speaker_label,
@@ -962,14 +999,16 @@ def ingest_speakers_chunked(driver, speakers, batch=200, timeout=120):
 
 def ingest_utterances_chunked(driver, t_id, utterances, batch=200, timeout=120):
     if not utterances: return 0
-    cy = """
-    MATCH (t:Transcription {id:$t_id})
+    extra_prop = EMBED_EXTRA_PROP
+    cy = f"""
+    MATCH (t:Transcription {{id:$t_id}})
     WITH t
     UNWIND $utterances AS u
-    MERGE (uNode:Utterance {id: u.id})
+    MERGE (uNode:Utterance {{id: u.id}})
       ON CREATE SET uNode.idx=u.idx, uNode.created_at=datetime()
       ON MATCH  SET uNode.idx=u.idx, uNode.updated_at=datetime()
     SET uNode.start=u.start, uNode.end=u.end, uNode.text=u.text, uNode.embedding=u.embedding,
+        uNode.{extra_prop}=CASE WHEN u.{extra_prop} IS NULL THEN uNode.{extra_prop} ELSE u.{extra_prop} END,
         uNode.absolute_start=CASE WHEN u.abs_start IS NULL THEN uNode.absolute_start ELSE datetime(u.abs_start) END,
         uNode.absolute_end  =CASE WHEN u.abs_end   IS NULL THEN uNode.absolute_end   ELSE datetime(u.abs_end) END
     MERGE (t)-[:HAS_UTTERANCE]->(uNode)
@@ -1178,6 +1217,19 @@ def process_key(key: str, paths: Dict[str, Any], driver,
         else:
             transcript_vec = embed_texts([text], batch_size=batch_size)[0]
             transcript_vec_v2 = None
+        if EMBED_EXTRA_ENABLED:
+            if seg_texts:
+                extra_seg_vecs = embed_extra_texts(seg_texts, batch_size=batch_size)
+                for i,v in enumerate(extra_seg_vecs): enriched_segments[i][EMBED_EXTRA_PROP] = v
+                arr = np.asarray(extra_seg_vecs, dtype=np.float32)
+                transcript_extra = arr.mean(axis=0)
+                n = np.linalg.norm(transcript_extra)
+                if n > 0: transcript_extra = transcript_extra / n
+                transcript_extra = transcript_extra.tolist()
+            else:
+                transcript_extra = embed_extra_texts([text], batch_size=batch_size)[0]
+        else:
+            transcript_extra = None
     if emb_v2 and transcript_vec_v2 is None:
         transcript_vec_v2 = transcript_embedding_v2_from_chunks(text, batch_size=batch_size, max_tokens=256, overlap=64)
 
@@ -1224,6 +1276,9 @@ def process_key(key: str, paths: Dict[str, Any], driver,
         if utt_texts:
             utt_vecs = embed_texts(utt_texts, batch_size=batch_size)
             for i,v in enumerate(utt_vecs): utts[i]["embedding"] = v
+            if EMBED_EXTRA_ENABLED:
+                extra_utt_vecs = embed_extra_texts(utt_texts, batch_size=batch_size)
+                for i,v in enumerate(extra_utt_vecs): utts[i][EMBED_EXTRA_PROP] = v
         if dt0_utc:
             for u in utts:
                 u["abs_start"] = iso(dt0_utc + timedelta(seconds=float(u["start"])))
@@ -1251,7 +1306,8 @@ def process_key(key: str, paths: Dict[str, Any], driver,
 
     # --- CHUNKED INGEST ---
     with TimedStage(st_ingest, detail=f"key={key}"):
-        ingest_transcription_header(driver, t_id, key, started_at_iso, ended_at_iso, source_paths, text, transcript_vec, transcript_vec_v2)
+        ingest_transcription_header(driver, t_id, key, started_at_iso, ended_at_iso, source_paths, text, transcript_vec, transcript_vec_v2,
+                                    transcript_extra=transcript_extra)
         ingest_speakers_chunked(driver, speakers, batch=tx_sizes.get("spk", 200), timeout=tx_timeout_seconds)
         ingest_segments_chunked(driver, t_id, enriched_segments, batch=tx_sizes.get("seg", 200), timeout=tx_timeout_seconds)
         ingest_utterances_chunked(driver, t_id, utterances, batch=tx_sizes.get("utt", 200), timeout=tx_timeout_seconds)
