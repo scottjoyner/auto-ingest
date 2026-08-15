@@ -31,6 +31,13 @@ import os
 import time
 from typing import Dict, List, Tuple
 
+# Cap CPU threads so the re-embed doesn't starve the still-running speakers.py
+# sweep on deathstar. Override with TORCH_THREADS / OMP_NUM_THREADS.
+import torch as _torch
+_tn = os.getenv("TORCH_THREADS")
+if _tn:
+    _torch.set_num_threads(int(_tn))
+
 from auto_ingest_config import get_neo4j_config
 from auto_ingest.embed import EmbedModel, DEFAULT_MODEL, HNSW_M, HNSW_EF, HNSW_QUANT
 from auto_ingest.backend import gpu_target_machine, has_rocm
@@ -97,7 +104,7 @@ def page_rows(sess, label: str, prop: str, start_id: int, limit: int):
         f"MATCH (n:{label}) "
         f"WHERE n.text IS NOT NULL AND n.{prop} IS NULL AND id(n) > $start "
         f"RETURN id(n) AS nid, n.text AS text "
-        f"ORDER BY n.id(n) ASC, id(n) LIMIT $lim",
+        f"ORDER BY id(n) ASC LIMIT $lim",
         start=start_id, lim=limit,
     )
     return [(r["nid"], r["text"]) for r in rows]
@@ -169,9 +176,14 @@ def main(argv=None):
     ap.add_argument("--prop", required=True, help="Destination vector property (e.g. emb_gte_small)")
     ap.add_argument("--batch-size", type=int, default=int(os.getenv("EMBED_BATCH", "32")))
     ap.add_argument("--resume", action="store_true", help="Only populate missing vectors (default behavior)")
+    ap.add_argument("--torch-threads", type=int, default=int(os.getenv("TORCH_THREADS", "6")),
+                    help="torch intra-op threads (default 6; leaves headroom on deathstar for the sweep)")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    _torch.set_num_threads(args.torch_threads)
+    log.info("torch threads=%d  model=%s  prop=%s  batch=%d",
+             args.torch_threads, args.model, args.prop, args.batch_size)
     for label in args.labels:
         run(label, args.model, args.prop, args.batch_size, args.resume)
 
