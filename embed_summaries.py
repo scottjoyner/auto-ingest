@@ -16,7 +16,7 @@ from neo4j import GraphDatabase
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from auto_ingest_config import get_neo4j_config
-from auto_ingest.embed import EmbedModel, DEFAULT_MODEL, HNSW_M, HNSW_EF, HNSW_QUANT
+from auto_ingest.embed import load_embed_model, DEFAULT_MODEL, HNSW_M, HNSW_EF, HNSW_QUANT
 
 PROP = os.getenv("SUMMARY_EMBED_PROP", "embedding")
 
@@ -60,6 +60,9 @@ def main():
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--prop", default=PROP)
     ap.add_argument("--batch", type=int, default=int(os.getenv("EMBED_BATCH", "256")))
+    ap.add_argument("--engine", choices=["torch", "onnx"], default=os.getenv("EMBED_ENGINE", "torch"),
+                    help="Inference engine. onnx runs the same weights via onnxruntime CPU "
+                         "(fast; ONNX_QUANTIZE=1 for ~3-5x). Keep ONE engine per prop.")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -81,8 +84,8 @@ def main():
         if args.dry_run or need == 0:
             return
 
-        ensure_index(s, args.prop, EmbedModel(args.model).dim)
-        model = EmbedModel(args.model)
+        ensure_index(s, args.prop, load_embed_model(args.model, engine=args.engine).dim)
+        model = load_embed_model(args.model, engine=args.engine)
 
         rows = s.run(
             f"MATCH (s:Summary) WHERE size(s.text)>10 AND s.{args.prop} IS NULL "

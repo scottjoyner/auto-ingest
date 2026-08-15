@@ -39,7 +39,7 @@ if _tn:
     _torch.set_num_threads(int(_tn))
 
 from auto_ingest_config import get_neo4j_config
-from auto_ingest.embed import EmbedModel, DEFAULT_MODEL, HNSW_M, HNSW_EF, HNSW_QUANT
+from auto_ingest.embed import load_embed_model, DEFAULT_MODEL, HNSW_M, HNSW_EF, HNSW_QUANT
 from auto_ingest.backend import gpu_target_machine, has_rocm
 
 log = logging.getLogger("reembed")
@@ -128,7 +128,7 @@ def page_rows(sess, label: str, prop: str, start_id: int, limit: int):
 
 
 def run(label: str, model_name: str, prop: str, batch_size: int, resume: bool,
-        verify_only: bool = False, catchup: bool = False):
+        verify_only: bool = False, catchup: bool = False, engine: str = "torch"):
     cfg = get_neo4j_config()
     from neo4j import GraphDatabase
 
@@ -136,14 +136,14 @@ def run(label: str, model_name: str, prop: str, batch_size: int, resume: bool,
         cfg["uri"], auth=(cfg["user"], cfg["password"]), database=cfg.get("database")
     )
     text_prop = SCHEMA[label]
-    model = EmbedModel(model_name)
+    model = load_embed_model(model_name, engine=engine)
 
     with driver.session() as sess:
         if not verify_only:
             log.info(
-                "reembed %s  model=%s  prop=%s  dim=%d  device=%s  rocm=%s  gpu_target=%s",
+                "reembed %s  model=%s  prop=%s  dim=%d  device=%s  rocm=%s  gpu_target=%s  engine=%s",
                 label, model_name, prop, model.dim, model.device, has_rocm(),
-                (gpu_target_machine() or {}).get("name"),
+                (gpu_target_machine() or {}).get("name"), engine,
             )
 
         need, total = count_needing(sess, label, text_prop, prop)
@@ -246,16 +246,19 @@ def main(argv=None):
     ap.add_argument("--catchup", action="store_true",
                     help="Id-independent sweep: re-scan from 0 until no stragglers remain, "
                          "covering nodes created after the main cursor passed them")
+    ap.add_argument("--engine", choices=["torch", "onnx"], default=os.getenv("EMBED_ENGINE", "torch"),
+                    help="Inference engine. onnx runs the same weights via onnxruntime CPU "
+                         "(fast; ONNX_QUANTIZE=1 for ~3-5x). Keep ONE engine per prop.")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     _torch.set_num_threads(args.torch_threads)
-    log.info("torch threads=%d  model=%s  prop=%s  batch=%d",
-             args.torch_threads, args.model, args.prop, args.batch_size)
+    log.info("torch threads=%d  model=%s  prop=%s  batch=%d  engine=%s",
+             args.torch_threads, args.model, args.prop, args.batch_size, args.engine)
     total_missing = 0
     for label in args.labels:
         missing = run(label, args.model, args.prop, args.batch_size, args.resume,
-                      verify_only=args.verify_only, catchup=args.catchup)
+                      verify_only=args.verify_only, catchup=args.catchup, engine=args.engine)
         total_missing += missing
     if args.verify_only:
         raise SystemExit(1 if total_missing else 0)
