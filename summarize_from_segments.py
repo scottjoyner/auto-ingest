@@ -115,8 +115,13 @@ Return ONLY JSON (no prose)."""
 # =========================
 # Neo4j helpers (summarize)
 # =========================
+_DRIVER = None  # module-level singleton: one pool for the whole run
+
 def neo_driver():
-    return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    global _DRIVER
+    if _DRIVER is None:
+        _DRIVER = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    return _DRIVER
 
 def fetch_one(session, trans_id: Optional[str], latest: bool) -> Optional[Dict[str, Any]]:
     if trans_id:
@@ -222,7 +227,7 @@ def _ollama_generate_json(system: str, user: str, temperature: float) -> Dict[st
         "stream": False,
     }
     url = f"{OLLAMA_HOST}/api/generate"
-    r = requests.post(url, json=payload, timeout=180)
+    r = requests.post(url, json=payload, timeout=OLLAMA_TIMEOUT)
     # Some older servers return 200 with a textual body even on errors; raise_for_status is still fine.
     r.raise_for_status()
 
@@ -451,7 +456,7 @@ def _lmstudio_chat_json(system: str, user: str, temperature: float = 0.2) -> Opt
         "stream": False,
     }
     try:
-        r = requests.post(url, json=payload, timeout=180)
+        r = requests.post(url, json=payload, timeout=OLLAMA_TIMEOUT)
         if r.status_code == 404:
             raise RuntimeError(f"LM Studio endpoint returned 404 at {url}")
         r.raise_for_status()
@@ -602,76 +607,113 @@ def extract_tasks_json(summary_obj: Dict[str, Any]) -> Dict[str, Any]:
 # Write-back
 # ===============
 def write_back(session, trans_id: str, final_obj: Dict[str, Any], write_notes: bool=False) -> str:
-    """Create Summary (and optional Tasks) for a transcription. Returns summary id or '' on failure."""
-    
-    # Step 1 – verify the transcription exists  
-    ver = session.run(
-        "MATCH (t:Transcription {id:$tid}) RETURN t.id", tid=trans_id
-    ).single()
-    if not ver:
-        return ""
+    """Create Summary (and optional Tasks) for a transcription. Returns summary id or '' on failure.
 
-    # Step 2 – create Summary standalone (no MATCH on a node we then CREATE/MERGE with)
+    All writes for one transcription run inside a single transaction (one
+    commit) so an interruption cannot leave an orphan Summary or half-written
+    Task set. Tasks are materialized with one UNWIND instead of 2 queries each.
+    """
     summary_uuid = uuid.uuid4().hex
     bullets = [str(b).strip() for b in (final_obj.get("bullets") or []) if str(b).strip()]
-    
-    session.run(
-        "CREATE (s:Summary {id:$sid, text:$text, bullets:$blts, created_at: datetime()})",
-        sid=summary_uuid,
-        text=final_obj.get("summary", ""),
-        blts=bullets,
-    )
-
-    # Step 3 – link Summary to Transcription (MERGE on known UUIDs is safe)
-    session.run(
-        "MATCH (t:Transcription {id:$tid}) MATCH (s:Summary {id:$sid}) MERGE (t)-[:HAS_SUMMARY]->(s)",
-        tid=trans_id, sid=summary_uuid,
-    )
-
-    # Step 4 – optional: write summary text into t.notes  
-    if write_notes:
-        session.run(
-            "MATCH (t:Transcription {id:$tid}) SET t.notes = $text, t.updated_at = datetime()",
-            tid=trans_id, text=final_obj.get("summary", ""),
-        )
-
-    # Step 5 – create any Tasks  
     tasks_serialized = _serialize_tasks_for_db(final_obj.get("tasks") or [])
+    task_rows = []
     for task in tasks_serialized:
         tsk_uuid = uuid.uuid4().hex
-        session.run(
-            """CREATE (tk:Task {
-                  id: $tid,
-                  title: coalesce($title,"Untitled Task"),
-                  description: coalesce($description,""),
-                  priority: coalesce($priority,"MEDIUM"),
-                  due: $due,
+        task_rows.append({
+            "id": tsk_uuid,
+            "sid": summary_uuid,
+            "title": task.get("title"),
+            "description": task.get("description"),
+            "priority": task.get("priority"),
+            "due": task.get("due"),
+            "confidence": task.get("confidence"),
+            "acceptance_json": task.get("acceptance_json"),
+        })
+
+    def _tx(tx):
+        ver = tx.run(
+            "MATCH (t:Transcription {id:$tid}) RETURN t.id", tid=trans_id
+        ).single()
+        if not ver:
+            return None
+        tx.run(
+            "CREATE (s:Summary {id:$sid, text:$text, bullets:$blts, created_at: datetime()})",
+            sid=summary_uuid, text=final_obj.get("summary", ""), blts=bullets,
+        )
+        tx.run(
+            "MATCH (t:Transcription {id:$tid}) MATCH (s:Summary {id:$sid}) "
+            "MERGE (t)-[:HAS_SUMMARY]->(s)",
+            tid=trans_id, sid=summary_uuid,
+        )
+        if write_notes:
+            tx.run(
+                "MATCH (t:Transcription {id:$tid}) SET t.notes = $text, t.updated_at = datetime()",
+                tid=trans_id, text=final_obj.get("summary", ""),
+            )
+        if task_rows:
+            tx.run(
+                """UNWIND $rows AS r
+                MATCH (s:Summary {id:r.sid})
+                CREATE (tk:Task {
+                  id: r.id,
+                  title: coalesce(r.title,"Untitled Task"),
+                  description: coalesce(r.description,""),
+                  priority: coalesce(r.priority,"MEDIUM"),
+                  due: r.due,
                   status: "REVIEW",
-                  confidence: coalesce($confidence,0.5),
-                  acceptance_json: coalesce($acceptance_json, "[]")
-                })""",
-            tid=tsk_uuid,
-            title=task.get("title"),
-            description=task.get("description"),
-            priority=task.get("priority"),
-            due=task.get("due"),
-            confidence=task.get("confidence"),
-            acceptance_json=task.get("acceptance_json"),
-        )
-        # Link Task to Summary  
-        session.run(
-            "MATCH (s:Summary {id:$sid}) MATCH (tk:Task {id:$tid}) MERGE (s)-[:GENERATED_TASK]->(tk)",
-            sid=summary_uuid, tid=tsk_uuid,
-        )
+                  confidence: coalesce(r.confidence,0.5),
+                  acceptance_json: coalesce(r.acceptance_json, "[]")
+                })
+                CREATE (s)-[:GENERATED_TASK]->(tk)""",
+                rows=task_rows,
+            )
+        return summary_uuid
 
-    return summary_uuid
+    try:
+        return session.execute_write(_tx)
+    except Exception:
+        return ""
 
 
-def process_one(session, tnode: Dict[str,Any], include_utterances: bool, dry_run: bool, write_notes: bool) -> Optional[str]:
-    """Process a single transcription — uses fresh Neo4j driver for write-back (LM Studio calls may close the session)."""
-    row = fetch_one(session, tnode.get("id"), latest=False)
+def fetch_segments_for(session, tnode: Dict[str, Any]) -> Dict[str, Any]:
+    """Lightweight fetch of segments+utterances for a node already loaded.
+
+    Skips the per-candidate `MATCH (t:Transcription {id})` that fetch_one
+    re-runs for every --all-missing candidate; the node is reused as-is.
+    """
+    t = dict(tnode)
+    q = """
+    MATCH (t:Transcription {id:$id})
+    OPTIONAL MATCH (t)-[:HAS_SEGMENT]->(s:Segment)
+    WITH t, s ORDER BY coalesce(s.start, s.idx, 0)
+    WITH t, collect({id:s.id, start:coalesce(s.start,0.0), end:coalesce(s.end,0.0), text:s.text, type:'SEGMENT', low_conf:false}) AS segs
+    OPTIONAL MATCH (t)-[:HAS_UTTERANCE]->(u)
+    WITH t, segs, u ORDER BY coalesce(u.start, u.idx, 0)
+    RETURN t, segs, collect({id:u.id, start:coalesce(u.start,0.0), end:coalesce(u.end,0.0), text:u.text, type:'UTTERANCE', low_conf:true}) AS utts
+    """
+    rec = session.run(q, id=tnode.get("id")).single()
+    if not rec:
+        return {"t": t, "segments": [], "utterances": []}
+    segs = [x for x in (rec["segs"] or []) if x and x.get("text")]
+    utts = [x for x in (rec["utts"] or []) if x and x.get("text")]
+    return {"t": t, "segments": segs, "utterances": utts}
+
+
+def process_one(session, tnode: Dict[str,Any], include_utterances: bool, dry_run: bool, write_notes: bool,
+                skip_refetch: bool = False) -> Optional[str]:
+    """Process a single transcription.
+
+    Opens its own Neo4j session for the read so it is safe to call from
+    multiple threads (--workers); write-back uses a fresh session since LM
+    Studio calls may exhaust/close the session pool.
+    """
+    key = tnode.get("key") or tnode.get("id")
+    if session is None:
+        session = neo_driver().session()
+    row = (fetch_segments_for(session, tnode) if skip_refetch
+           else fetch_one(session, tnode.get("id"), latest=False))
     if not row:
-        print(f"[{tnode.get('key') or tnode.get('id')}] not found or empty.")
+        print(f"[{key}] not found or empty.")
         return None
 
     # Use a fresh driver for write-back since LM Studio calls may exhaust/close the session pool
@@ -969,8 +1011,15 @@ def main():
     sel.add_argument("--all-missing", action="store_true", help="Process transcriptions missing notes (no Summary OR empty t.notes)")
 
     ap.add_argument("--limit", type=int, default=50, help="Max items when using --all-missing")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="Concurrent transcriptions for --all-missing (each worker has its own "
+                         "Neo4j session; LM Studio/Ollama still serialize per-model unless the "
+                         "server queues, so 2-3 is the sweet spot on a local LLM)")
     ap.add_argument("--include-utterances", action="store_true", help="Include UTTERANCE as LOW_CONF lines")
     ap.add_argument("--write-notes", action="store_true", help="Also write summary text into t.notes")
+    ap.add_argument("--skip-refetch", action="store_true",
+                    help="With --all-missing, reuse the already-fetched candidate node instead of "
+                         "re-MATCHing the Transcription (skips one query per item)")
     ap.add_argument("--dry-run", action="store_true", help="Print JSON only (no writes)")
 
     # New: approve & execute flags
@@ -1020,9 +1069,21 @@ def main():
                 cands = fetch_missing_transcriptions(sess, limit=args.limit)
                 if not cands:
                     print("No candidates found (all have notes/summaries).")
+                elif args.workers and args.workers > 1:
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
+                    print(f"Processing {len(cands)} candidates with {args.workers} workers…")
+                    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                        futs = [pool.submit(process_one, None, tnode,
+                                            args.include_utterances,
+                                            args.dry_run, args.write_notes,
+                                            args.skip_refetch)
+                                for tnode in cands]
+                        for fut in as_completed(futs):
+                            fut.result()
                 else:
                     for tnode in cands:
-                        process_one(sess, tnode, args.include_utterances, args.dry_run, args.write_notes)
+                        process_one(sess, tnode, args.include_utterances, args.dry_run,
+                                    args.write_notes, args.skip_refetch)
 
     # Approve & Execute steps (run whether or not we summarized this invocation)
     if args.approve_all is not None:
