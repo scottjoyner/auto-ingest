@@ -149,6 +149,7 @@ GLOBAL_START = time.perf_counter()
 # (not a hardcoded "cpu"/"cuda") so we also leverage ROCm (-> "cuda" API) and
 # Apple Silicon MPS (-> "mps") automatically.
 from auto_ingest.backend import torch_device
+from auto_ingest.embed import HNSW_M, HNSW_EF, HNSW_QUANT
 DEVICE = torch_device()
 if DEVICE == "cuda":
     try: torch.backends.cuda.matmul.allow_tf32 = True
@@ -473,7 +474,10 @@ def _create_vector_index(sess, label: str, prop: str, name: str, dim: int):
     OPTIONS {{
       indexConfig: {{
         `vector.dimensions`: {dim},
-        `vector.similarity_function`: 'cosine'
+        `vector.similarity_function`: 'cosine',
+        `vector.hnsw.m`: {HNSW_M},
+        `vector.hnsw.ef_construction`: {HNSW_EF}
+        {', `vector.quantization.enabled`: true' if HNSW_QUANT else ''}
       }}
     }}
     """

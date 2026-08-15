@@ -32,7 +32,7 @@ import time
 from typing import Dict, List, Tuple
 
 from auto_ingest_config import get_neo4j_config
-from auto_ingest.embed import EmbedModel, DEFAULT_MODEL
+from auto_ingest.embed import EmbedModel, DEFAULT_MODEL, HNSW_M, HNSW_EF, HNSW_QUANT
 from auto_ingest.backend import gpu_target_machine, has_rocm
 
 log = logging.getLogger("reembed")
@@ -53,19 +53,26 @@ SCHEMA: Dict[str, str] = {
 def ensure_vector_index(sess, label: str, prop: str, dim: int):
     idx_name = f"{prop}_index"
     sess.run(f"DROP INDEX {idx_name} IF EXISTS")
-    # Neo4j 5.x vector syntax (matches ingest.transcripts._create_vector_index).
+    # Neo4j 5.x vector syntax with tuned HNSW params (recall > defaults).
     sess.run(
         f"CREATE VECTOR INDEX {idx_name} FOR (n:{label}) ON (n.{prop}) "
         f"OPTIONS {{ indexConfig: {{ `vector.dimensions`: {dim}, "
-        f"`vector.similarity_function`: 'cosine' }} }}"
+        f"`vector.similarity_function`: 'cosine', "
+        f"`vector.hnsw.m`: {HNSW_M}, `vector.hnsw.ef_construction`: {HNSW_EF}"
+        + (", `vector.quantization.enabled`: true" if HNSW_QUANT else "") +
+        f" }} }}"
     )
+    log.info("  index %s ON %s.%s dim=%d hnsw(m=%d,ef=%d,q=%s)",
+             idx_name, label, prop, dim, HNSW_M, HNSW_EF, HNSW_QUANT)
     log.info("waiting for %s to become ONLINE ...", idx_name)
     while True:
         rows = sess.run(
             "SHOW VECTOR INDEXES YIELD name, state WHERE name = $n RETURN state",
             n=idx_name,
         ).values()
-        if rows and rows[0] == "ONLINE":
+        # .values() yields rows as tuples; state is the first column.
+        state = rows[0][0] if rows else None
+        if str(state) == "ONLINE":
             break
         time.sleep(1.0)
 

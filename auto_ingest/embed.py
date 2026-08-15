@@ -41,9 +41,15 @@ DEFAULT_MODEL = os.getenv("EMBED_MODEL_NAME", "sentence-transformers/all-MiniLM-
 _DEFAULT: Optional["EmbedModel"] = None
 
 
-def _resolve_device() -> str:
-    dev = torch_device()
-    return dev if dev in ("cuda", "mps", "cpu") else "cpu"
+# --- HNSW index tuning (env-configurable) ---
+# Neo4j 5.x vector indexes are HNSW. The original indexes were built with the
+# provider defaults (m=16, ef_construction=100), which trade recall for speed.
+# Raising these improves ANN precision at query time at the cost of build time
+# and memory — worth it for the retrieval "re-take". Exposed as env vars so
+# reembed.py and the ingest path build indexes identically.
+HNSW_M = int(os.getenv("HNSW_M", "32"))
+HNSW_EF = int(os.getenv("HNSW_EF", "200"))
+HNSW_QUANT = os.getenv("HNSW_QUANT", "true") == "true"
 
 
 class EmbedModel:
