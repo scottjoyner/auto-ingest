@@ -59,8 +59,23 @@ SCHEMA: Dict[str, str] = {
 
 def ensure_vector_index(sess, label: str, prop: str, dim: int, drop_first: bool = True):
     idx_name = f"{prop}_index"
-    if drop_first:
-        sess.run(f"DROP INDEX {idx_name} IF EXISTS")
+    # Index hygiene: if the index already exists with the right dimensions, leave it
+    # in place — rebuilding from scratch on 400k+ nodes wastes minutes each run.
+    existing = sess.run(
+        "SHOW VECTOR INDEXES YIELD name, labelsOrTypes, properties, options "
+        "WHERE name = $n RETURN labelsOrTypes, properties, options",
+        n=idx_name,
+    ).single()
+    if existing is not None:
+        labels = list(existing[0]) if existing[0] else []
+        props = list(existing[1]) if existing[1] else []
+        dim_existing = int(existing[2].get("indexConfig", {}).get("vector.dimensions", -1))
+        if props == [prop] and labels == [label] and dim_existing == dim:
+            log.info("index %s already exists (label=%s prop=%s dim=%d); keeping it",
+                     idx_name, label, prop, dim)
+            return
+        if drop_first:
+            sess.run(f"DROP INDEX {idx_name} IF EXISTS")
     # Neo4j 5.x vector syntax with tuned HNSW params (recall > defaults).
     sess.run(
         f"CREATE VECTOR INDEX {idx_name} IF NOT EXISTS "

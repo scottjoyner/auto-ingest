@@ -23,7 +23,20 @@ PROP = os.getenv("SUMMARY_EMBED_PROP", "embedding")
 
 def ensure_index(sess, prop: str, dim: int):
     name = f"summary_{prop}_index"
-    sess.run(f"DROP INDEX {name} IF EXISTS")
+    # Index hygiene: keep the index when it already matches (label/prop/dim).
+    existing = sess.run(
+        "SHOW VECTOR INDEXES YIELD name, labelsOrTypes, properties, options "
+        "WHERE name = $n RETURN labelsOrTypes, properties, options",
+        n=name,
+    ).single()
+    if existing is not None:
+        labels = list(existing[0]) if existing[0] else []
+        props = list(existing[1]) if existing[1] else []
+        dim_existing = int(existing[2].get("indexConfig", {}).get("vector.dimensions", -1))
+        if props == [prop] and labels == ["Summary"] and dim_existing == dim:
+            print(f"  index {name} already exists (dim={dim}); keeping it")
+            return
+        sess.run(f"DROP INDEX {name} IF EXISTS")
     sess.run(
         f"CREATE VECTOR INDEX {name} IF NOT EXISTS FOR (n:Summary) ON (n.{prop}) "
         f"OPTIONS {{ indexConfig: {{ `vector.dimensions`: {dim}, "

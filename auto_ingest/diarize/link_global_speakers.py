@@ -953,6 +953,23 @@ class EmbCache:
             self.conn.commit()
             self._pending = 0
 
+    def prune(self, max_age_days: int = 90):
+        """Drop cached embeddings older than max_age_days so the cache stays fast.
+
+        Keys embed (speaker_id, file_key, start, end); old snips are never re-requested
+        because the linker only fetches speakers missing SAME_PERSON edges, so a pruning
+        hit is a re-embed of a stale snippet — a cheap price for a bounded cache.
+        """
+        if not self.conn:
+            return
+        if not max_age_days:
+            return
+        cutoff = time.time() - max_age_days * 86400
+        cur = self.conn.execute("DELETE FROM emb_cache WHERE created_at < ?", (cutoff,))
+        if cur.rowcount:
+            self.conn.commit()
+            logging.info(f"Pruned {cur.rowcount} stale rows from emb cache ({max_age_days}d cutoff).")
+
 
 # -----------------------
 # Selection utilities
@@ -1438,6 +1455,7 @@ class Args:
     audio_index_refresh: bool
     emb_cache: Optional[Path]
     emb_refresh: bool
+    prune_cache_days: int
 
     # embeddings / quarantine
     store_embeddings: bool
@@ -1512,6 +1530,8 @@ def parse_args():
                    help="Rebuild the audio index from disk instead of loading the cache.")
     p.add_argument("--emb-cache", type=str, default=DEFAULT_EMB_CACHE)
     p.add_argument("--emb-refresh", action="store_true", default=DEFAULT_EMB_REFRESH)
+    p.add_argument("--prune-cache-days", type=int, default=int(os.getenv("EMB_CACHE_PRUNE_DAYS", "0")),
+                   help="Delete cached embeddings older than N days (0 = keep everything).")
 
     # embeddings/quarantine
     p.add_argument("--store-embeddings", dest="store_embeddings", action="store_true", default=True)
@@ -1794,6 +1814,8 @@ def main():
     if cache_path:
         save_audio_cache(cache_path, audio_cache)
     emb_cache.flush()
+    if args.prune_cache_days:
+        emb_cache.prune(max_age_days=args.prune_cache_days)
 
     # Mark speakers we attempted but could not embed (no usable audio / all gated out)
     # so that chunked / resumed runs skip them and make monotonic forward progress.
