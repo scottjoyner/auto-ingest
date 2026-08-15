@@ -88,16 +88,34 @@ def _ensure_fulltext_index(sess) -> None:
         time.sleep(1.0)
 
 
-def resolve_vector_index(sess, label: str) -> Optional[str]:
-    """Return the ONLINE vector index name for <label>.<EMBED_PROP>, or None."""
+# Vector-index resolution is queried on every search request (once per label).
+# Index topology only changes when a re-embed stage re-runs, so cache the
+# label -> index map for a short TTL and refresh on-demand; the query still
+# falls through to the DB if the cache misses.
+_INDEX_CACHE: Dict[str, Optional[str]] = {}
+_INDEX_CACHE_TS = 0.0
+INDEX_CACHE_TTL = float(os.getenv("INDEX_CACHE_TTL", "60"))
+
+
+def _refresh_index_cache(sess) -> None:
+    global _INDEX_CACHE, _INDEX_CACHE_TS
+    _INDEX_CACHE = {}
     rows = sess.run(
         "SHOW VECTOR INDEXES YIELD name, labelsOrTypes, properties, state "
         "WHERE state = 'ONLINE' RETURN name, labelsOrTypes, properties"
     ).values()
     for name, labels, props in rows:
-        if label in (labels or []) and EMBED_PROP in (props or []):
-            return name
-    return None
+        if EMBED_PROP in (props or []):
+            for label in (labels or []):
+                _INDEX_CACHE.setdefault(label, name)
+    _INDEX_CACHE_TS = time.time()
+
+
+def resolve_vector_index(sess, label: str) -> Optional[str]:
+    """Return the ONLINE vector index name for <label>.<EMBED_PROP>, or None."""
+    if time.time() - _INDEX_CACHE_TS > INDEX_CACHE_TTL:
+        _refresh_index_cache(sess)
+    return _INDEX_CACHE.get(label)
 _LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 # SSE tailed logs (sweep worker + active re-embed). New lines from any are
 # forwarded to the live page with a short tag so you see ingest + re-embed
