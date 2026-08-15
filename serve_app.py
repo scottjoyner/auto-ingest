@@ -64,15 +64,38 @@ _PROP_MODEL = {
 QUERY_MODEL = os.getenv("EMBED_MODEL_NAME") or _PROP_MODEL.get(EMBED_PROP, DEFAULT_MODEL)
 _query_model = EmbedModel(QUERY_MODEL)
 
+# Entities searched, with the property each one carries text on and the
+# relationship/join back to a Transcription for media + absolute timing.
+SEARCH_LABELS = ["Utterance", "Segment", "Transcription"]
+FULLTEXT_NAME = "search_hybrid_text"
 
-def resolve_utterance_index(sess) -> Optional[str]:
-    """Return the ONLINE vector index name for Utterance.<EMBED_PROP>, or None."""
+
+def _ensure_fulltext_index(sess) -> None:
+    """Create the multi-label fulltext index used for lexical (BM25) half of RRF."""
+    sess.run(
+        f"CREATE FULLTEXT INDEX {FULLTEXT_NAME} IF NOT EXISTS "
+        f"FOR (n:Utterance|Segment|Transcription) ON EACH [n.text] "
+        f"OPTIONS {{ indexConfig: {{ `fulltext.analyzer`: 'standard' }} }}"
+    )
+    # Wait until ONLINE so a just-started server doesn't 500 on query.
+    for _ in range(60):
+        rows = sess.run(
+            "SHOW FULLTEXT INDEXES YIELD name, state WHERE name = $n RETURN state",
+            n=FULLTEXT_NAME,
+        ).values()
+        if rows and str(rows[0][0]) == "ONLINE":
+            return
+        time.sleep(1.0)
+
+
+def resolve_vector_index(sess, label: str) -> Optional[str]:
+    """Return the ONLINE vector index name for <label>.<EMBED_PROP>, or None."""
     rows = sess.run(
         "SHOW VECTOR INDEXES YIELD name, labelsOrTypes, properties, state "
         "WHERE state = 'ONLINE' RETURN name, labelsOrTypes, properties"
     ).values()
     for name, labels, props in rows:
-        if "Utterance" in (labels or []) and EMBED_PROP in (props or []):
+        if label in (labels or []) and EMBED_PROP in (props or []):
             return name
     return None
 _LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -101,49 +124,78 @@ def db_count() -> int:
 
 
 def search(text: str, k: int = DEFAULT_TOP_K) -> List[Dict[str, Any]]:
-    """Vector search utterances, joined to their Transcription for media path."""
+    """Hybrid (RRF) search across Utterance/Segment/Transcription.
+
+    Fuses a per-label vector rank list with one fulltext rank list using
+    Reciprocal Rank Fusion (score = sum 1/(60+rank)). Exact phrases (names,
+    part numbers) that vector search misses surface via BM25; semantic
+    matches surface via the vector half. Hits join back to their Transcription
+    for the media path + relative timing.
+    """
     if not text.strip():
         return []
     qvec = _query_model.embed([text])[0]
     with _driver.session() as s:
-        idx = resolve_utterance_index(s)
-        if idx is None:
-            return []
-        cypher = f"""
-    CALL db.index.vector.queryNodes('{idx}', $k, $qvec)
-    YIELD node AS u, score
-    WHERE 'Utterance' IN labels(u)
-    MATCH (u)<-[:HAS_UTTERANCE]-(t:Transcription)
-    WITH u, score, t,
-         coalesce(u.absolute_start, t.started_at) AS started,
-         coalesce(u.absolute_end,   t.ended_at)   AS ended,
-         t.source_media AS source_media
-    RETURN
-      u.text AS text,
-      score,
-      t.key AS transcript,
-      source_media,
-      started.epochMillis AS start_ms,
-      ended.epochMillis AS end_ms,
-      toFloat(u.start) AS start_rel,
-      toFloat(u.end) AS end_rel
-    ORDER BY score DESC
-    LIMIT $k
-    """
-        rows = s.run(cypher, k=int(k), qvec=list(qvec)).data()
+        # ---- vector half: one rank list per label that has an ONLINE index ----
+        vector_lists = []
+        for label in SEARCH_LABELS:
+            idx = resolve_vector_index(s, label)
+            if idx is None:
+                continue
+            rows = s.run(
+                f"""CALL db.index.vector.queryNodes('{idx}', $k, $qvec)
+                YIELD node AS u, score
+                WHERE '{label}' IN labels(u)
+                OPTIONAL MATCH (u)<-[r]-(t:Transcription)
+                RETURN elementId(u) AS eid, '{label}' AS kind, u.text AS text, score,
+                       coalesce(t.key, u.key) AS transcript,
+                       coalesce(t.source_media, u.source_media) AS source_media,
+                       toFloat(u.start) AS start_rel, toFloat(u.end) AS end_rel
+                ORDER BY score DESC LIMIT $k""",
+                k=int(k), qvec=list(qvec),
+            )
+            vector_lists.append((label, [(r["eid"], r) for r in rows]))
+        # ---- lexical half: one BM25 rank list over the shared fulltext index ----
+        fulltext_rows = []
+        try:
+            rows = s.run(
+                f"""CALL db.index.fulltext.queryNodes('{FULLTEXT_NAME}', $q)
+                YIELD node AS u, score
+                WITH u, score, labels(u)[0] AS kind
+                OPTIONAL MATCH (u)<-[r]-(t:Transcription)
+                RETURN elementId(u) AS eid, kind, u.text AS text, score,
+                       coalesce(t.key, u.key) AS transcript,
+                       coalesce(t.source_media, u.source_media) AS source_media,
+                       toFloat(u.start) AS start_rel, toFloat(u.end) AS end_rel
+                ORDER BY score DESC LIMIT $k""",
+                q=text, k=int(k),
+            )
+            fulltext_rows = [(r["eid"], r) for r in rows]
+        except Exception:
+            fulltext_rows = []
+
+    # ---- RRF fusion over unique elementId (same node can rank in both halves) ----
+    rrf: Dict[str, Dict[str, Any]] = {}
+    lists = [(label, lst) for label, lst in vector_lists] + [("fulltext", fulltext_rows)]
+    for label, lst in lists:
+        for rank, (eid, rec) in enumerate(lst):
+            entry = rrf.setdefault(eid, dict(rec))
+            entry["rrf"] = entry.get("rrf", 0.0) + 1.0 / (60.0 + rank)
+    ranked = sorted(rrf.values(), key=lambda r: -r["rrf"])[:k]
+
     hits = []
-    for r in rows:
-        src = r["source_media"] or ""
+    for r in ranked:
+        src = r.get("source_media") or ""
+        kind = (r.get("kind") or "").lower()
         hits.append({
-            "text": (r["text"] or "")[:320],
-            "score": round(float(r["score"]), 4),
-            "transcript": r["transcript"],
+            "text": (r.get("text") or "")[:320],
+            "score": round(float(r.get("rrf", 0.0)), 4),
+            "transcript": r.get("transcript"),
+            "kind": kind or "unknown",
             "source_media": src,
-            "start_ms": r["start_ms"],
-            "end_ms": r["end_ms"],
-            "start_rel": r["start_rel"],
-            "end_rel": r["end_rel"],
-            "media_url": f"/api/media?file={src}" + (f"#t={r['start_rel'] or 0}" if r["start_rel"] else ""),
+            "start_rel": r.get("start_rel"),
+            "end_rel": r.get("end_rel"),
+            "media_url": f"/api/media?file={src}" + (f"#t={r.get('start_rel') or 0}" if r.get("start_rel") else ""),
         })
     return hits
 
@@ -236,7 +288,7 @@ PAGE_HTML = r"""<!doctype html>
     if(!hits.length){ box.innerHTML='<p class=text-sm text-slate-400>no results</p>'; return; }
     box.innerHTML = hits.map(h => \`
       <div class="hit">
-        <div class="flex gap-2"><span class="score">\${h.score.toFixed(3)}</span><b class="text-sm">\${h.transcript||'?'}</b></div>
+        <div class="flex gap-2"><span class="score">\${h.score.toFixed(3)}</span><span class="text-xs bg-slate-700 rounded px-1">\${h.kind||'?'}</span><b class="text-sm">\${h.transcript||'?'}</b></div>
         <div class="text-sm text-slate-300 mt-1">\${h.text}</div>
         \${h.media_url ? '<audio controls preload=none src="'+h.media_url+'"></audio>' : ''}
       </div>\`).join('');
@@ -408,7 +460,9 @@ def main():
         SSE_LOGS.append(os.path.abspath(args.log))
 
     # Force the embedding model to load once at startup (and warm any GPU).
-    m = get_default_model()
+    with _driver.session() as s:
+        _ensure_fulltext_index(s)
+    m = _query_model
     print(f"LOCAL search server on http://{args.host}:{args.port}  "
           f"(backend={backend_info()['backend']} device={m.device} "
           f"model={m.name} dim={m.dim} rocm={has_rocm()})")
