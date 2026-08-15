@@ -1,63 +1,102 @@
 #!/usr/bin/env python3
-"""Embed summaries in chunks using Neo4j APOC batch writes."""
-import sys, os
-sys.path.insert(0, '/home/scott/git/auto-ingest')
-os.environ.setdefault('NEO4J_PASSWORD', os.environ.get('NEO4J_PASSWORD', ''))
+"""Embed Summary nodes missing a vector, using the canonical embedding path.
+
+Delegates to auto_ingest.embed (single source of pooling truth) so Summary
+vectors are byte-comparable with Segment/Transcription/Utterance vectors from
+the ingest path and reembed.py. Writes are batched with UNWIND instead of one
+Cypher round-trip per summary.
+
+Usage:
+  embed_summaries.py [--prop emb_gte_small] [--model thenlper/gte-small]
+                     [--batch 256] [--dry-run]
+"""
+import os, sys, time
 
 from neo4j import GraphDatabase
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from auto_ingest_config import get_neo4j_config
+from auto_ingest.embed import EmbedModel, DEFAULT_MODEL, HNSW_M, HNSW_EF, HNSW_QUANT
 
-_NEO4J_CFG = get_neo4j_config()
-_NEO4J_URI = os.environ.get("NEO4J_URI", _NEO4J_CFG["uri"])
-_NEO4J_USER = os.environ.get("NEO4J_USER", _NEO4J_CFG["user"])
-_NEO4J_PASS = os.environ.get("NEO4J_PASSWORD", _NEO4J_CFG["password"])
-d = GraphDatabase.driver(_NEO4J_URI, auth=(_NEO4J_USER, _NEO4J_PASS))
+PROP = os.getenv("SUMMARY_EMBED_PROP", "embedding")
 
-# Phase 1: Get all summaries needing embeddings, batch them  
-with d.session() as s1:
-    r = s1.run('''MATCH (t:Transcription)-[:HAS_SUMMARY]->(s) 
-                 WHERE s.embedding IS NULL AND size(s.text)>10 
-                 RETURN s.id AS summary_id, t.key AS trans_key, s.text AS text''')
 
-    from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-    
-    batch_size = 50
-    ids_to_embed = []
-    
-    for rec in r:
-        txt = str(rec['text'] or '').strip()
-        if len(txt) >= 10:
-            ids_to_embed.append({
-                'id': rec['summary_id'],
-                'tkey': rec.get('trans_key') or '',
-                'text': txt
-            })
+def ensure_index(sess, prop: str, dim: int):
+    name = f"summary_{prop}_index"
+    sess.run(f"DROP INDEX {name} IF EXISTS")
+    sess.run(
+        f"CREATE VECTOR INDEX {name} IF NOT EXISTS FOR (n:Summary) ON (n.{prop}) "
+        f"OPTIONS {{ indexConfig: {{ `vector.dimensions`: {dim}, "
+        f"`vector.similarity_function`: 'cosine', "
+        f"`vector.hnsw.m`: {HNSW_M}, `vector.hnsw.ef_construction`: {HNSW_EF}"
+        + (", `vector.quantization.enabled`: true" if HNSW_QUANT else "") +
+        f" }} }}"
+    )
+    while True:
+        rows = sess.run(
+            "SHOW VECTOR INDEXES YIELD name, state WHERE name = $n RETURN state", n=name
+        ).values()
+        if rows and str(rows[0][0]) == "ONLINE":
+            return
+        time.sleep(1.0)
 
-    total = len(ids_to_embed)
-    print("Processing {} summaries...".format(total))
 
-    # Process in chunks of batch_size  
-    processed = 0
-    for chunk_start in range(0, total, batch_size):
-        chunk_end = min(chunk_start + batch_size, total)
-        chunk_items = ids_to_embed[chunk_start:chunk_end]
-        
-        texts = [item['text'] for item in chunk_items]
-        
-        # Embed this chunk  
-        import numpy as np
-        embeddings = model.encode(texts)  # list of arrays
-        
-        with d.session() as s2:
-            # Use APOC or individual MATCH+SET  
-            for j, (item, emb) in enumerate(zip(chunk_items, embeddings)):
-                s2.run('''MATCH (s:Summary {id:$sid}) SET s.embedding = $emb''',
-                       sid=item['id'], emb=list(emb))
+def main():
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--prop", default=PROP)
+    ap.add_argument("--batch", type=int, default=int(os.getenv("EMBED_BATCH", "256")))
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
 
-        processed += chunk_end - chunk_start
-        if processed % 500 == 0 or processed == total:
-            print("  Processed {} / {}".format(processed, total))
+    cfg = get_neo4j_config()
+    driver = GraphDatabase.driver(
+        cfg["uri"], auth=(cfg["user"], cfg["password"]), database=cfg.get("database")
+    )
 
-d.close()
-print("Done!")
+    with driver.session() as s:
+        total = s.run(
+            f"MATCH (s:Summary) WHERE size(s.text)>10 RETURN count(s)"
+        ).single().values()[0]
+        done = s.run(
+            f"MATCH (s:Summary) WHERE size(s.text)>10 AND s.{args.prop} IS NOT NULL "
+            f"RETURN count(s)"
+        ).single().values()[0]
+        need = total - done
+        print(f"{need}/{total} Summary nodes missing {args.prop} vector")
+        if args.dry_run or need == 0:
+            return
+
+        ensure_index(s, args.prop, EmbedModel(args.model).dim)
+        model = EmbedModel(args.model)
+
+        rows = s.run(
+            f"MATCH (s:Summary) WHERE size(s.text)>10 AND s.{args.prop} IS NULL "
+            f"RETURN s.id AS sid, s.text AS text"
+        )
+        pending = [(r["sid"], str(r["text"] or "").strip()) for r in rows]
+
+    done_n = 0
+    t0 = time.perf_counter()
+    for i in range(0, len(pending), args.batch):
+        chunk = pending[i:i + args.batch]
+        texts = [t for _, t in chunk]
+        vecs = model.embed(texts, batch_size=min(args.batch, len(texts)))
+        updates = [{"sid": sid, "vec": vec} for (sid, _), vec in zip(chunk, vecs)]
+        with driver.session() as s:
+            s.run(
+                f"UNWIND $u AS x MATCH (s:Summary {{id: x.sid}}) "
+                f"SET s.{args.prop} = x.vec",
+                u=updates,
+            )
+        done_n += len(updates)
+        if done_n % 500 < args.batch or done_n >= len(pending):
+            rate = done_n / (time.perf_counter() - t0)
+            print(f"  {done_n}/{len(pending)} (rate={rate:.0f}/s)")
+    driver.close()
+    print("Done!")
+
+
+if __name__ == "__main__":
+    main()
