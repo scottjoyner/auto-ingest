@@ -44,7 +44,11 @@ from auto_ingest.embed import get_default_model, embed_texts
 from neo4j import GraphDatabase
 
 DEFAULT_TOP_K = 25
-INDEX_NAME = "utterance_embedding_index"
+# Which utterance vector index to query. Defaults to the live MiniLM-L6 index;
+# switch to the gte-small re-embed by starting the server with
+# VECTOR_PROP=emb_gte_small (INDEX_NAME resolves to <prop>_index).
+EMBED_PROP = os.getenv("VECTOR_PROP", "embedding")
+INDEX_NAME = f"{EMBED_PROP}_index"
 PIPELINE_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "pipeline.log")
 SSE_POLL_INTERVAL = 0.5
 
