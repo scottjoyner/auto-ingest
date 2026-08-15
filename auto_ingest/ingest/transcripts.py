@@ -279,13 +279,17 @@ _extra_model = None  # lazy: auto_ingest.embed.EmbedModel for the extra prop
 def embed_extra_texts(texts: List[str], batch_size: int) -> List[List[float]]:
     """Compute EMBED_EXTRA_PROP vectors with EMBED_EXTRA_MODEL (lazy load).
 
-    Uses auto_ingest.embed.EmbedModel so pooling is byte-identical to the
+    Uses auto_ingest.embed.load_embed_model so pooling is byte-identical to the
     re-embed CLI and the search server — vectors from both paths interleave.
+    The engine (torch/onnx) follows EMBED_EXTRA_ENGINE (default: the shared
+    EMBED_ENGINE env, falling back to torch) so ingest can reuse the cached
+    ONNX export without mixing engines under one prop.
     """
     global _extra_model
     if _extra_model is None:
-        from ..embed import EmbedModel
-        _extra_model = EmbedModel(EMBED_EXTRA_MODEL)
+        from ..embed import load_embed_model
+        engine = os.getenv("EMBED_EXTRA_ENGINE") or os.getenv("EMBED_ENGINE", "torch")
+        _extra_model = load_embed_model(EMBED_EXTRA_MODEL, engine=engine)
     if not texts: return []
     vecs = _extra_model.embed(texts, batch_size=batch_size)
     return [v if len(v) == _extra_model.dim else [0.0] * _extra_model.dim for v in vecs]
