@@ -244,6 +244,60 @@ def search(text: str, k: int = DEFAULT_TOP_K) -> List[Dict[str, Any]]:
     return hits
 
 
+def media_context(transcript: str, anchor: float = 0.0,
+                  window: float = 60.0, limit: int = 60) -> List[Dict[str, Any]]:
+    """Surrounding lines in `transcript` around `anchor` (relative seconds).
+
+    Fetches utterances + segments of one transcription within [anchor-window,
+    anchor+window], sorted by start time, so a search hit can be shown with
+    its conversational context instead of a lone clip.
+    """
+    if not transcript:
+        return []
+    with _driver.session() as s:
+        rows = s.run(
+            """MATCH (t:Transcription {key:$key})
+            OPTIONAL MATCH (t)-[:HAS_UTTERANCE]->(u:Utterance)
+            RETURN coalesce(t.source_media, '') AS source_media,
+                   collect({start:toFloat(u.start), end:toFloat(u.end),
+                            text:u.text, type:'UTTERANCE'}) AS utts""",
+            key=transcript,
+        ).single()
+        rows2 = s.run(
+            """MATCH (t:Transcription {key:$key})
+            OPTIONAL MATCH (t)-[:HAS_SEGMENT]->(sg:Segment)
+            RETURN collect({start:toFloat(sg.start), end:toFloat(sg.end),
+                            text:sg.text, type:'SEGMENT'}) AS segs""",
+            key=transcript,
+        ).single()
+    if not rows:
+        return []
+    lo, hi = anchor - window, anchor + window
+    items = []
+    for row in (rows["utts"] if rows else []) + ((rows2["segs"] if rows2 else [])):
+        if row.get("text") is None:
+            continue
+        st = float(row.get("start") or 0.0)
+        if hi >= st >= lo or (st <= lo and (row.get("end") or 0.0) >= lo):
+            items.append({
+                "type": row["type"],
+                "text": (row.get("text") or "")[:400],
+                "start_rel": st,
+                "end_rel": float(row.get("end") or 0.0),
+            })
+    # De-dup identical (start, text) — same transcript may have repeated rows.
+    seen = set()
+    uniq = []
+    for it in items:
+        key = (it["start_rel"], it["text"])
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(it)
+    uniq.sort(key=lambda r: r["start_rel"])
+    return {"source_media": rows["source_media"], "lines": uniq[:limit]}
+
+
 def serve_range(path: str, range_header: Optional[str]):
     """Serve `path` honoring an HTTP Range header (bytes).
 
@@ -401,6 +455,16 @@ class Handler(BaseHTTPRequestHandler):
             k = int(qs.get("k", [str(DEFAULT_TOP_K)])[0])
             k = max(1, min(k, 200))
             self._json(HTTPStatus.OK, search(q, k))
+        elif path == "/api/context":
+            try:
+                anchor = float(qs.get("at", ["0"])[0] or 0)
+                window = float(qs.get("window", ["60"])[0] or 60)
+            except ValueError:
+                anchor, window = 0.0, 60.0
+            limit = max(1, min(int(qs.get("limit", ["60"])[0] or 60), 200))
+            ctx = media_context(unquote(qs.get("transcript", [""])[0] or ""),
+                                anchor=anchor, window=window, limit=limit)
+            self._json(HTTPStatus.OK, ctx)
         elif path == "/api/media":
             raw = unquote(qs.get("file", [""])[0] or "")
             rng = self.headers.get("Range")
