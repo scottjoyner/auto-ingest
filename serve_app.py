@@ -141,6 +141,32 @@ def db_count() -> int:
         return -1
 
 
+# Labels that carry text and should have embedding vectors once recovery
+# completes. /api/coverage reports progress per prop: the active search prop
+# (EMBED_PROP) plus the canonical recovery prop (emb_gte_small).
+COVERAGE_LABELS = ["Segment", "Utterance", "Transcription", "Summary"]
+
+
+def embedding_coverage(prop: str) -> Dict[str, Dict[str, Any]]:
+    """embedded/total per text-bearing label for `prop`."""
+    out: Dict[str, Dict[str, Any]] = {}
+    with _driver.session() as s:
+        for lbl in COVERAGE_LABELS:
+            try:
+                total = s.run(
+                    f"MATCH (n:{lbl}) WHERE n.text IS NOT NULL AND trim(n.text) <> '' "
+                    f"RETURN count(n)",
+                ).single().values()[0]
+                done = s.run(
+                    f"MATCH (n:{lbl}) WHERE n.text IS NOT NULL AND trim(n.text) <> '' "
+                    f"AND n.{prop} IS NOT NULL RETURN count(n)",
+                ).single().values()[0]
+                out[lbl] = {"embedded": int(done), "total": int(total)}
+            except Exception as e:
+                out[lbl] = {"embedded": 0, "total": 0, "error": str(e)[:200]}
+    return out
+
+
 def search(text: str, k: int = DEFAULT_TOP_K) -> List[Dict[str, Any]]:
     """Hybrid (RRF) search across Utterance/Segment/Transcription.
 
@@ -363,6 +389,12 @@ class Handler(BaseHTTPRequestHandler):
                 "gpu_target": gpu_target_machine().get("name") if gpu_target_machine() else None,
                 "embed_model": _query_model.name, "embed_dim": _query_model.dim,
                 "nodes": db_count(),
+            })
+        elif path == "/api/coverage":
+            props = list(dict.fromkeys([EMBED_PROP, "emb_gte_small"]))
+            self._json(HTTPStatus.OK, {
+                "active_prop": EMBED_PROP,
+                "coverage": {p: embedding_coverage(p) for p in props},
             })
         elif path == "/api/search":
             q = (qs.get("q", [""])[0] or "").strip()
