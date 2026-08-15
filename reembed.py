@@ -133,7 +133,12 @@ def run(label: str, model_name: str, prop: str, batch_size: int, resume: bool,
     from neo4j import GraphDatabase
 
     driver = GraphDatabase.driver(
-        cfg["uri"], auth=(cfg["user"], cfg["password"]), database=cfg.get("database")
+        cfg["uri"], auth=(cfg["user"], cfg["password"]), database=cfg.get("database"),
+        # Cursor paging depends on id(n) being a monotonic integer (elementId is
+        # NOT sortable by creation order — its lexicographic order has no
+        # relation to insert sequence). Keep id(n) and silence the deprecation
+        # notification instead of switching to a non-monotonic cursor.
+        notifications_disabled_classifications=["DEPRECATION"],
     )
     text_prop = SCHEMA[label]
     model = load_embed_model(model_name, engine=engine)
