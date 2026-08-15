@@ -1143,19 +1143,38 @@ def update_existing_gs_with_assignments(
       - compute new embedding by running-mean with local weighted sum
       - set status=confirmed if min(new edge scores) >= quarantine_min else tentative
       - create SAME_PERSON edges for members with score=cos(local, e_new)
+
+    Batched: one read for all globals, then UNWIND writes (GS updates + edges)
+    instead of a query per gid and per sid.
     """
+    gids = list(assignments.keys())
+    if not gids:
+        return
+    dim = next(iter(local_centroids.values())).shape[0]
+
+    # 1) one read for all existing globals
+    prev_by_gid: Dict[str, dict] = {}
+    for rec in sess.run(
+        "MATCH (g:GlobalSpeaker) WHERE g.id IN $gids "
+        "RETURN g.id AS gid, g.embedding AS emb, g.weight_sum AS w, "
+        "g.is_me AS me, g.person_id AS pid, g.label AS lbl",
+        gids=gids,
+    ):
+        prev_by_gid[rec["gid"]] = rec
+
+    # 2) compute new embeddings/status/edge payloads in memory
+    gs_rows = []
+    edge_rows = []
     for gid, sids in assignments.items():
-        prev = sess.run("MATCH (g:GlobalSpeaker {id:$gid}) RETURN g.embedding AS emb, g.weight_sum AS w, g.is_me AS me, g.person_id AS pid, g.label AS lbl", gid=gid).single()
-        if not prev:
-            continue
-        e_prev = np.asarray(prev["emb"], dtype=np.float32) if prev["emb"] is not None else None
-        w_prev = float(prev["w"]) if prev["w"] is not None else 0.0
-        g_me = bool(prev["me"]) if prev["me"] is not None else False
-        g_pid = prev["pid"]
-        g_lbl = prev["lbl"]
+        prev = prev_by_gid.get(gid)
+        e_prev = np.asarray(prev["emb"], dtype=np.float32) if (prev and prev["emb"] is not None) else None
+        w_prev = float(prev["w"]) if (prev and prev["w"] is not None) else 0.0
+        g_me = bool(prev["me"]) if (prev and prev["me"] is not None) else False
+        g_pid = prev["pid"] if prev else None
+        g_lbl = prev["lbl"] if prev else None
 
         # local contribution
-        sum_vec = np.zeros_like(next(iter(local_centroids.values())), dtype=np.float32)
+        sum_vec = np.zeros(dim, dtype=np.float32)
         wsum = 0.0
         for sid in sids:
             w = float(local_weights.get(sid, 1.0))
@@ -1171,43 +1190,64 @@ def update_existing_gs_with_assignments(
 
         e_new = unit(sum_combined)
         status = "confirmed"
-        # compute edge scores & tentative flags
-        edge_payload = []
-        min_edge = 1.0
         for sid in sids:
             sc = float(np.dot(unit(local_centroids[sid]), e_new))
-            min_edge = min(min_edge, sc)
-            tentative = (sc < quarantine_min)
-            if tentative:
+            if sc < quarantine_min:
                 status = "tentative"
-            edge_payload.append((sid, sc, tentative, float(local_weights.get(sid, 1.0))))
+                break
 
-        # write GS
+        gs_rows.append({
+            "gid": gid, "emb": list(map(float, e_new)), "w": float(w_combined),
+            "status": status,
+        })
+
+        # edges — carry is_me from the GlobalSpeaker onto each linked local Speaker
+        # so the Scott anchor grows automatically as new clips are linked.
+        # is_me/pid/lbl are None for non-me rows so coalesce() leaves them untouched.
+        me_fields = {"is_me": g_me, "pid": g_pid, "lbl": g_lbl} if g_me else {"is_me": None, "pid": None, "lbl": None}
+        for sid in sids:
+            sc = float(np.dot(unit(local_centroids[sid]), e_new))
+            row = {
+                "sid": sid, "gid": gid, "score": float(sc),
+                "tentative": bool(sc < quarantine_min),
+                "w": float(local_weights.get(sid, 1.0)),
+            }
+            row.update(me_fields)
+            edge_rows.append(row)
+
+    # 3) batched writes
+    _unwind_update_gs(sess, gs_rows, method)
+    _unwind_write_edges(sess, edge_rows, method)
+
+
+def _unwind_update_gs(sess, gs_rows: List[dict], method: str):
+    """UNWIND write of GlobalSpeaker embedding/status/weight updates."""
+    for i in range(0, len(gs_rows), 5000):
+        chunk = gs_rows[i:i + 5000]
         sess.run("""
-          MERGE (g:GlobalSpeaker {id:$gid})
+          UNWIND $rows AS r
+          MERGE (g:GlobalSpeaker {id:r.gid})
           ON CREATE SET g.created_at=datetime()
           ON MATCH  SET g.updated_at=datetime()
-          SET g.embedding=$emb, g.weight_sum=$w, g.status=$status, g.method=$method
-        """, gid=gid, emb=list(map(float, e_new)), w=float(w_combined), status=status, method=method)
+          SET g.embedding=r.emb, g.weight_sum=r.w, g.status=r.status, g.method=$method
+        """, rows=chunk, method=method)
 
-        # write edges — carry is_me from the GlobalSpeaker onto each linked local
-        # Speaker so the Scott anchor grows automatically as new clips are linked.
-        for sid, sc, tentative, wloc in edge_payload:
-            if g_me:
-                sess.run("""
-                  MATCH (s:Speaker {id:$sid}), (g:GlobalSpeaker {id:$gid})
-                  MERGE (s)-[r:SAME_PERSON]->(g)
-                  ON CREATE SET r.created_at=datetime()
-                  SET r.updated_at=datetime(), r.method=$method, r.score=$score, r.tentative=$tentative, r.weight=$w,
-                      s.is_me=true, s.person_id=$gpid, s.label=$glbl
-                """, sid=sid, gid=gid, method=method, score=float(sc), tentative=bool(tentative), w=float(wloc), gpid=g_pid, glbl=g_lbl)
-            else:
-                sess.run("""
-                  MATCH (s:Speaker {id:$sid}), (g:GlobalSpeaker {id:$gid})
-                  MERGE (s)-[r:SAME_PERSON]->(g)
-                  ON CREATE SET r.created_at=datetime()
-                  SET r.updated_at=datetime(), r.method=$method, r.score=$score, r.tentative=$tentative, r.weight=$w
-                """, sid=sid, gid=gid, method=method, score=float(sc), tentative=bool(tentative), w=float(wloc))
+
+def _unwind_write_edges(sess, edge_rows: List[dict], method: str):
+    """UNWIND write of SAME_PERSON edges. Non-me rows leave is_me/person_id/label untouched."""
+    for i in range(0, len(edge_rows), 5000):
+        chunk = edge_rows[i:i + 5000]
+        sess.run("""
+          UNWIND $rows AS r
+          MATCH (s:Speaker {id:r.sid}), (g:GlobalSpeaker {id:r.gid})
+          MERGE (s)-[rel:SAME_PERSON]->(g)
+          ON CREATE SET rel.created_at=datetime()
+          ON MATCH  SET rel.updated_at=datetime()
+          SET rel.method=$method, rel.score=r.score, rel.tentative=r.tentative, rel.weight=r.w,
+              s.is_me = coalesce(r.is_me, s.is_me),
+              s.person_id = coalesce(r.pid, s.person_id),
+              s.label = coalesce(r.lbl, s.label)
+        """, rows=chunk, method=method)
 
 
 # -----------------------
@@ -1245,85 +1285,122 @@ def write_clusters_incremental(
         tentative = ((len(g) == 1) and singleton_tentative) or (conf < quarantine_min)
         cluster_payload.append((g, sum_vec, wsum, gcen_unit, conf, tentative))
 
+    if not cluster_payload:
+        return
+
+    # Pre-resolve is_me + Scott identity for all clusters in ONE query so the
+    # per-cluster writes below are pure UNWIND batches.
+    all_members = sorted({sid for g, *_ in cluster_payload for sid in g})
     with drv.session(database=NEO4J_DB) as sess:
-        if store_embeddings and cluster_payload:
+        if store_embeddings:
             dim = len(cluster_payload[0][3])
             ensure_global_vector_index(sess, dim)
 
+        me_ids: Set[str] = set()
+        me_reps: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+        if all_members:
+            for rec in sess.run(
+                "MATCH (s:Speaker) WHERE s.id IN $ids AND s.is_me=true "
+                "RETURN s.id AS sid, s.person_id AS pid, s.label AS lbl",
+                ids=all_members,
+            ):
+                me_ids.add(rec["sid"])
+                me_reps.setdefault(rec["sid"], (rec["pid"], rec["lbl"]))
+
+        # Build per-cluster payload rows.
+        gs_rows = []  # {"gid","status","conf","emb","w","is_me","pid","lbl"}
+        edge_rows = []  # {"sid","gid","best","w","tentative","is_me","pid","lbl"}
+        cluster_meta = []  # (cluster_sorted, sum_vec, wsum, gcen_unit, conf, tentative, gid, status, any_me, g_pid, g_lbl)
         for g, sum_vec, wsum, gcen_unit, conf, tentative in cluster_payload:
             cluster_sorted = sorted(g)
             gid = hashlib.md5("|".join(cluster_sorted).encode("utf-8")).hexdigest()
             status = "tentative" if tentative else "confirmed"
-
-            # If any member is already Scott (is_me), the new GlobalSpeaker is Scott
-            # too, and every linked local Speaker inherits is_me. This lets the anchor
-            # grow automatically as new clips are linked by future runs.
-            any_me = bool(sess.run(
-                "MATCH (s:Speaker) WHERE s.id IN $ids AND s.is_me=true RETURN count(s) > 0 AS b",
-                ids=cluster_sorted,
-            ).single()["b"]) if cluster_sorted else False
+            any_me = any(sid in me_ids for sid in cluster_sorted)
             if any_me:
-                rep = sess.run(
-                    "MATCH (s:Speaker{is_me:true}) WHERE s.id IN $ids "
-                    "RETURN s.person_id AS pid, s.label AS lbl LIMIT 1",
-                    ids=cluster_sorted,
-                ).single()
-                g_pid = (rep["pid"] if rep and rep["pid"] else "scott")
-                g_lbl = (rep["lbl"] if rep and rep["lbl"] else "Scott")
+                rep_sid = next((sid for sid in cluster_sorted if sid in me_reps), cluster_sorted[0])
+                pid, lbl = me_reps.get(rep_sid, (None, None))
+                g_pid = pid or "scott"
+                g_lbl = lbl or "Scott"
             else:
                 g_pid, g_lbl = None, None
-            gs_extra = ", g.is_me=true, g.person_id=$gpid, g.label=$glbl" if any_me else ""
-            sp_extra = ", s.is_me=true, s.person_id=$gpid, s.label=$glbl" if any_me else ""
-
             if dry_run:
                 logging.info(f"DRY-RUN cluster<{len(cluster_sorted)}> gs={gid} status={status} conf={conf:.3f} members={cluster_sorted}")
-            else:
-                prev = sess.run(
-                    "MATCH (g:GlobalSpeaker {id:$gid}) RETURN g.embedding AS emb, g.weight_sum AS w",
-                    gid=gid
-                ).single()
-                if store_embeddings:
-                    if prev and prev["emb"] is not None and prev["w"] is not None:
-                        e_prev = np.asarray(prev["emb"], dtype=np.float32)
-                        w_prev = float(prev["w"])
-                        sum_combined = e_prev * w_prev + sum_vec
-                        w_combined = w_prev + wsum
-                        e_new = unit(sum_combined)
-                        w_new = w_combined
-                    else:
-                        e_new = gcen_unit
-                        w_new = wsum if wsum > 0 else 1.0
+                continue
+            cluster_meta.append((cluster_sorted, sum_vec, wsum, gcen_unit, conf, tentative, gid, status, any_me, g_pid, g_lbl))
 
-                    sess.run("""
-                      MERGE (g:GlobalSpeaker {id:$gid})
-                      ON CREATE SET g.created_at=datetime()
-                      ON MATCH  SET g.updated_at=datetime()
-                      SET g.status=$status, g.method=$method, g.confidence=$conf,
-                          g.embedding=$emb, g.weight_sum=$w""" + gs_extra + """
-                    """, gid=gid, status=status, method=method, conf=float(conf),
-                         emb=list(map(float, e_new)), w=float(w_new), gpid=g_pid, glbl=g_lbl)
+        # One batched read of any pre-existing GS embeddings for these gids.
+        prev_emb: Dict[str, Tuple[np.ndarray, float]] = {}
+        if store_embeddings and cluster_meta:
+            gids = [m[6] for m in cluster_meta]
+            for rec in sess.run(
+                "MATCH (g:GlobalSpeaker) WHERE g.id IN $gids "
+                "RETURN g.id AS gid, g.embedding AS emb, g.weight_sum AS w",
+                gids=gids,
+            ):
+                if rec["emb"] is not None and rec["w"] is not None:
+                    prev_emb[rec["gid"]] = (np.asarray(rec["emb"], dtype=np.float32), float(rec["w"]))
+
+        for cluster_sorted, sum_vec, wsum, gcen_unit, conf, tentative, gid, status, any_me, g_pid, g_lbl in cluster_meta:
+            e_new, w_new = gcen_unit, (wsum if wsum > 0 else 1.0)
+            if store_embeddings:
+                prev = prev_emb.get(gid)
+                if prev is not None:
+                    e_prev, w_prev = prev
+                    e_new = unit(e_prev * w_prev + sum_vec)
+                    w_new = w_prev + wsum
+
+            gs_rows.append({
+                "gid": gid, "status": status, "conf": float(conf),
+                "emb": list(map(float, e_new)) if store_embeddings else None,
+                "w": float(w_new), "is_me": any_me, "pid": g_pid, "lbl": g_lbl,
+            })
+
+            for sid in cluster_sorted:
+                best = 1.0 if len(cluster_sorted) == 1 else max(
+                    pair_scores.get((min(sid, x), max(sid, x)), 0.0)
+                    for x in cluster_sorted if x != sid
+                )
+                row = {
+                    "sid": sid, "gid": gid, "best": float(best),
+                    "w": float(spk_weights.get(sid, 1.0)), "tentative": bool(tentative),
+                }
+                if any_me:
+                    row.update({"is_me": True, "pid": g_pid, "lbl": g_lbl})
                 else:
-                    sess.run("""
-                      MERGE (g:GlobalSpeaker {id:$gid})
-                      ON CREATE SET g.created_at=datetime()
-                      ON MATCH  SET g.updated_at=datetime()
-                      SET g.status=$status, g.method=$method, g.confidence=$conf""" + gs_extra + """
-                    """, gid=gid, status=status, method=method, conf=float(conf),
-                         gpid=g_pid, glbl=g_lbl)
+                    row.update({"is_me": None, "pid": None, "lbl": None})
+                edge_rows.append(row)
 
-                for sid in cluster_sorted:
-                    best = 1.0 if len(cluster_sorted) == 1 else max(
-                        pair_scores.get((min(sid, x), max(sid, x)), 0.0)
-                        for x in cluster_sorted if x != sid
-                    )
-                    sess.run("""
-                      MATCH (s:Speaker {id:$sid}), (g:GlobalSpeaker {id:$gid})
-                      MERGE (s)-[r:SAME_PERSON]->(g)
-                      ON CREATE SET r.method=$method, r.score=$score, r.weight=$w, r.tentative=$tentative, r.created_at=datetime()""" + sp_extra + """
-                      ON MATCH  SET r.method=$method, r.score=$score, r.weight=$w, r.tentative=$tentative, r.updated_at=datetime()""" + sp_extra + """
-                    """, sid=sid, gid=gid, method=method, score=float(best),
-                         w=float(spk_weights.get(sid, 1.0)), tentative=bool(tentative),
-                         gpid=g_pid, glbl=g_lbl)
+        # Batched writes.
+        for i in range(0, len(gs_rows), 2000):
+            chunk = gs_rows[i:i + 2000]
+            with drv.session(database=NEO4J_DB) as sess:
+                sess.run("""
+                  UNWIND $rows AS r
+                  MERGE (g:GlobalSpeaker {id:r.gid})
+                  ON CREATE SET g.created_at=datetime()
+                  ON MATCH  SET g.updated_at=datetime()
+                  SET g.status=r.status, g.method=$method, g.confidence=r.conf,
+                      g.is_me = coalesce(r.is_me, g.is_me),
+                      g.person_id = coalesce(r.pid, g.person_id),
+                      g.label = coalesce(r.lbl, g.label)
+                  """ + (", g.embedding=r.emb, g.weight_sum=r.w" if store_embeddings else "") + """
+                """, rows=chunk, method=method)
+
+        for i in range(0, len(edge_rows), 5000):
+            chunk = edge_rows[i:i + 5000]
+            with drv.session(database=NEO4J_DB) as sess:
+                sess.run("""
+                  UNWIND $rows AS r
+                  MATCH (s:Speaker {id:r.sid}), (g:GlobalSpeaker {id:r.gid})
+                  MERGE (s)-[rel:SAME_PERSON]->(g)
+                  ON CREATE SET rel.method=$method, rel.score=r.best, rel.weight=r.w,
+                                 rel.tentative=r.tentative, rel.created_at=datetime()
+                  ON MATCH  SET rel.method=$method, rel.score=r.best, rel.weight=r.w,
+                                 rel.tentative=r.tentative, rel.updated_at=datetime()
+                  SET s.is_me = coalesce(r.is_me, s.is_me),
+                      s.person_id = coalesce(r.pid, s.person_id),
+                      s.label = coalesce(r.lbl, s.label)
+                """, rows=chunk, method=method)
 
 
 # -----------------------
