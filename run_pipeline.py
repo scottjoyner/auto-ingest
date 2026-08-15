@@ -21,6 +21,7 @@ Examples
   run_pipeline.py --prop emb_gte_small --engine onnx
   run_pipeline.py --stages reembed,cluster --dry-run
   run_pipeline.py --prop emb_gte_small --force-stage cluster
+  run_pipeline.py --stages replay-outbox   # drain failed ingest writes
 """
 import argparse
 import os
@@ -49,7 +50,8 @@ ENV = {
 DEFAULT_MODEL = os.environ.get("EMBED_MODEL_NAME", "thenlper/gte-small")
 DEFAULT_PROP = "emb_gte_small"
 
-STAGES = ["reembed", "embed_summaries", "cluster", "link-speakers", "summarize"]
+STAGES = ["reembed", "embed_summaries", "cluster", "link-speakers", "summarize",
+          "replay-outbox"]
 
 LINKER = "auto_ingest.diarize.link_global_speakers"
 
@@ -120,6 +122,13 @@ def stage_summarize(args) -> int:
     return _run(cli, "summarize")
 
 
+def stage_replay_outbox(args) -> int:
+    cli = [PY, "-u", "-m", "auto_ingest.outbox"]
+    if args.dry_run:
+        cli += ["--dry-run"]
+    return _run(cli, "replay-outbox")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -158,6 +167,7 @@ def main():
         "cluster": stage_cluster,
         "link-speakers": stage_link_speakers,
         "summarize": stage_summarize,
+        "replay-outbox": stage_replay_outbox,
     }
 
     rc = 0

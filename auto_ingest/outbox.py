@@ -13,6 +13,7 @@ ML-heavy ingest import graph.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +72,60 @@ class GraphOutbox:
         )
         self.conn.commit()
 
+    def count_pending(self) -> int:
+        row = self.conn.execute("SELECT count(*) FROM graph_outbox").fetchone()
+        return int(row[0]) if row else 0
+
+    def replay(self, verify: Optional[callable] = None,
+               max_ops: int = 1000, max_retries: int = 3,
+               on_status=None) -> Dict[str, Any]:
+        """Drain pending outbox ops, returning a summary dict.
+
+        Ops are staged *before* the Neo4j write, so a pending op means the write
+        may or may not have landed. The op payload is only the durable intent
+        (not the full row), so replay cannot rebuild a missed write by itself.
+
+        ``verify(op_type, payload) -> bool`` decides whether the intent was
+        satisfied: return True to mark the op done (drained), False to keep it
+        pending (a real gap for re-ingest from source). When ``verify`` is None,
+        ops are only counted (no mutation).
+
+        Ops exceeding ``max_retries`` are marked failed and left pending.
+        """
+        pending = self.pending(limit=max_ops)
+        summary = {"drained": 0, "kept": 0, "failed": 0, "seen": len(pending),
+                   "max_retries": max_retries}
+        for op_id, op_type, correlation_id, payload_json, retry_count in pending:
+            if retry_count > max_retries:
+                self.mark_failed(op_id, "replay: exceeded max_retries")
+                summary["failed"] += 1
+                continue
+            try:
+                payload = json.loads(payload_json)
+            except Exception as e:
+                self.mark_failed(op_id, f"replay: bad payload: {e}")
+                summary["failed"] += 1
+                continue
+            if verify is None:
+                summary["kept"] += 1
+                continue
+            try:
+                ok = bool(verify(op_type, payload))
+            except Exception as e:
+                self.mark_failed(op_id, f"replay: verify error: {e}")
+                summary["failed"] += 1
+                continue
+            if ok:
+                self.mark_done(op_id)
+                summary["drained"] += 1
+            else:
+                # Intent not satisfied in the graph — genuine gap. Keep it
+                # pending (retry_count untouched) for a later re-ingest pass.
+                summary["kept"] += 1
+            if on_status:
+                on_status(op_id, op_type, ok)
+        return summary
+
     def close(self) -> None:
         self.conn.close()
 
@@ -96,3 +151,69 @@ def get_outbox(sqlite_path: Optional[str] = None) -> Optional[GraphOutbox]:
         _OUTBOX = GraphOutbox(path)
         return _OUTBOX
     return None
+
+
+def _verify_transcription_exists(op_type: str, payload: Dict[str, Any]) -> bool:
+    """Default verifier: True when the staged Transcription node exists.
+
+    Replay only drains ops whose write actually landed; ops whose Transcription
+    is still absent stay pending so the source can be re-ingested.
+    """
+    from auto_ingest_config import get_neo4j_config
+    from neo4j import GraphDatabase
+
+    t_id = payload.get("t_id") or payload.get("id")
+    if not t_id:
+        return False
+    cfg = get_neo4j_config()
+    driver = GraphDatabase.driver(
+        cfg["uri"], auth=(cfg["user"], cfg["password"]), database=cfg.get("database")
+    )
+    try:
+        with driver.session() as sess:
+            rec = sess.run(
+                "MATCH (t:Transcription {id:$tid}) RETURN t.id", tid=t_id
+            ).single()
+            return rec is not None
+    finally:
+        driver.close()
+
+
+def _drain(limit: int = 1000, max_retries: int = 3, dry_run: bool = False) -> Dict[str, Any]:
+    """Drain the durable outbox into the graph, returning a summary dict."""
+    ob = GraphOutbox(os.environ.get("AUTO_INGEST_OUTBOX_PATH", DEFAULT_OUTBOX_PATH))
+    try:
+        n = ob.count_pending()
+        print(f"outbox: {n} pending op(s)")
+        verify = None if dry_run else _verify_transcription_exists
+        summary = ob.replay(
+            verify=verify, max_ops=limit, max_retries=max_retries,
+            on_status=lambda op_id, op_type, ok: print(
+                f"  op {op_id} [{op_type}]: {'drained' if ok else 'kept'}"
+            ),
+        )
+        print(f"outbox: {summary['drained']} drained, {summary['kept']} kept "
+              f"(re-ingest), {summary['failed']} failed, {summary['seen']} seen")
+        return summary
+    finally:
+        ob.close()
+
+
+def main(argv=None) -> int:
+    import argparse
+
+    p = argparse.ArgumentParser(
+        description="Drain the durable ingest outbox: mark done ops whose "
+                    "writes landed; keep true gaps pending for re-ingest.")
+    p.add_argument("--limit", type=int, default=1000)
+    p.add_argument("--max-retries", type=int, default=3)
+    p.add_argument("--dry-run", action="store_true",
+                   help="Report pending ops without draining (no graph writes)")
+    args = p.parse_args(argv)
+    summary = _drain(limit=args.limit, max_retries=args.max_retries, dry_run=args.dry_run)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
