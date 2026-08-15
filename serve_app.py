@@ -298,6 +298,45 @@ def media_context(transcript: str, anchor: float = 0.0,
     return {"source_media": rows["source_media"], "lines": uniq[:limit]}
 
 
+def cluster_list(limit: int = 200, min_size: int = 1) -> List[Dict[str, Any]]:
+    """Top clusters by size (Cluster nodes produced by cluster.py)."""
+    with _driver.session() as s:
+        rows = s.run(
+            """MATCH (c:Cluster)
+            WITH c, count{ (c)<-[:CLUSTERED_IN]-() } AS n
+            WHERE n >= $min_size
+            RETURN c.id AS cid, c.label AS label, n AS size, c.algorithm AS algo
+            ORDER BY n DESC LIMIT $limit""",
+            min_size=min_size, limit=limit,
+        )
+        return [dict(r) for r in rows]
+
+
+def cluster_members(cid: str, limit: int = 50) -> Dict[str, Any]:
+    """Summaries in a cluster, joined back to their transcriptions."""
+    if not cid:
+        return {}
+    with _driver.session() as s:
+        row = s.run(
+            """MATCH (c:Cluster {id:$cid})
+            MATCH (s:Summary)-[:CLUSTERED_IN]->(c)
+            OPTIONAL MATCH (t:Transcription)-[:HAS_SUMMARY]->(s)
+            WITH c, s, t
+            RETURN c.id AS cid, c.label AS label, c.algorithm AS algo,
+                   count(s) AS total,
+                   collect({sid:s.id, text:left(s.text, 200),
+                            tkey:coalesce(t.key, '')}) AS members
+            ORDER BY total DESC LIMIT $limit""",
+            cid=cid, limit=limit,
+        ).single()
+    if not row:
+        return {}
+    return {
+        "cid": row["cid"], "label": row["label"], "algorithm": row["algo"],
+        "total": row["total"], "members": row["members"][:limit],
+    }
+
+
 def serve_range(path: str, range_header: Optional[str]):
     """Serve `path` honoring an HTTP Range header (bytes).
 
@@ -465,6 +504,12 @@ class Handler(BaseHTTPRequestHandler):
             ctx = media_context(unquote(qs.get("transcript", [""])[0] or ""),
                                 anchor=anchor, window=window, limit=limit)
             self._json(HTTPStatus.OK, ctx)
+        elif path == "/api/clusters":
+            limit = max(1, min(int(qs.get("limit", ["200"])[0] or 200), 500))
+            min_size = max(0, int(qs.get("min_size", ["1"])[0] or 1))
+            self._json(HTTPStatus.OK, {"clusters": cluster_list(limit, min_size)})
+        elif path == "/api/cluster":
+            self._json(HTTPStatus.OK, cluster_members(unquote(qs.get("id", [""])[0] or "")))
         elif path == "/api/media":
             raw = unquote(qs.get("file", [""])[0] or "")
             rng = self.headers.get("Range")
