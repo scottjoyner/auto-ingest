@@ -49,7 +49,14 @@ DEFAULT_TOP_K = 25
 # VECTOR_PROP=emb_gte_small (INDEX_NAME resolves to <prop>_index).
 EMBED_PROP = os.getenv("VECTOR_PROP", "embedding")
 INDEX_NAME = f"{EMBED_PROP}_index"
-PIPELINE_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "pipeline.log")
+_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+# SSE tailed logs (sweep worker + active re-embed). New lines from any are
+# forwarded to the live page with a short tag so you see ingest + re-embed
+# progress in one real-time feed.
+SSE_LOGS = [
+    os.path.join(_LOG_DIR, "pipeline.log"),
+    os.path.join(_LOG_DIR, "reembed_gte.log"),
+]
 SSE_POLL_INTERVAL = 0.5
 
 # --- Neo4j driver (module-level singleton) ---
@@ -60,7 +67,9 @@ _driver = GraphDatabase.driver(_cfg["uri"], auth=(_cfg["user"], _cfg["password"]
 def db_count() -> int:
     try:
         with _driver.session() as s:
-            return int(s.run("MATCH (n) RETURN count(n)").single().values()[0])
+            from neo4j import Query
+            res = s.run(Query("MATCH (n) RETURN count(n)", timeout=3.0))
+            return int(res.single().values()[0])
     except Exception:
         return -1
 
@@ -290,35 +299,62 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(HTTPStatus.NOT_FOUND, b"not found")
 
-    def _sse_tail(self, tail_bytes: int = 8192):
-        # Long-lived SSE: stream new lines appended to the pipeline log.
+    def _sse_tail(self):
+        """Long-lived SSE: tail every file in SSE_LOGS, tagging each line by
+        source so the page shows the sweep + re-embed progress in one stream.
+        Runs on its own thread (ThreadingHTTPServer)."""
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
-        log_fd = open(PIPELINE_LOG, "a+") if os.path.exists(PIPELINE_LOG) else None
-        # Note: this is a blocking handler run on its own thread (ThreadingHTTPServer).
+        # Track each log with a byte offset + incomplete-line buffer. We do NOT
+        # use readline() (CPython's BufferedReader caches EOF on a file being
+        # written by another process, so it returns '' even after appends).
+        # Reading by size delta + splitting on newlines is the robust tail -f.
+        tails = []
+        for lf in SSE_LOGS:
+            try:
+                f = open(lf, "rb")
+                f.seek(0, os.SEEK_END)
+                tails.append({"path": lf, "fd": f, "off": f.tell(), "buf": b"",
+                              "tag": os.path.basename(lf).replace(".log", "")})
+            except FileNotFoundError:
+                pass
+        if not tails:
+            self._sse_send("[system] (no logs found yet — has a worker run?)")
+            while True:
+                time.sleep(SSE_POLL_INTERVAL)
+            return
         try:
-            if log_fd:
-                log_fd.seek(0, os.SEEK_END)
-                while True:
-                    line = log_fd.readline()
-                    if not line:
-                        time.sleep(SSE_POLL_INTERVAL)
+            while True:
+                any_line = False
+                for t in tails:
+                    f = t["fd"]
+                    try:
+                        size = os.fstat(f.fileno()).st_size
+                    except OSError:
+                        size = t["off"]
+                    if size <= t["off"]:
                         continue
-                    data = line.decode(errors="replace").rstrip("\n")
-                    self._sse_send(data)
-            else:
-                self._sse_send("(pipeline.log not found — has the worker run yet?)")
-                # keep the stream alive so the reconnect logic stabilizes
-                while True:
+                    f.seek(t["off"])
+                    chunk = f.read(size - t["off"])
+                    t["off"] = f.tell()
+                    t["buf"] += chunk
+                    while b"\n" in t["buf"]:
+                        line, t["buf"] = t["buf"].split(b"\n", 1)
+                        self._sse_send(f"[{t['tag']}] {line.decode(errors='replace')}")
+                        any_line = True
+                if not any_line:
                     time.sleep(SSE_POLL_INTERVAL)
         except Exception:
             pass
         finally:
-            if log_fd:
-                log_fd.close()
+            for t in tails:
+                try:
+                    t["fd"].close()
+                except Exception:
+                    pass
 
     def _sse_send(self, data: str):
         payload = f"data: {data}\n\n".encode()
@@ -333,13 +369,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global PIPELINE_LOG
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8090)
-    ap.add_argument("--log", default=PIPELINE_LOG)
+    ap.add_argument("--log", default=None,
+                    help="optional extra log file to tail via SSE (added to SSE_LOGS)")
     args = ap.parse_args()
-    PIPELINE_LOG = args.log
+    if args.log:
+        SSE_LOGS.append(os.path.abspath(args.log))
 
     # Force the embedding model to load once at startup (and warm any GPU).
     m = get_default_model()
