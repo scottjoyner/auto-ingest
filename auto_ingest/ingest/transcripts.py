@@ -246,11 +246,10 @@ def normalize(v: torch.Tensor) -> torch.Tensor:
     return torch.nn.functional.normalize(v, p=2, dim=1)
 
 def mean_pooling(last_hidden_state: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-    mask = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
-    masked = last_hidden_state * mask
-    summed = torch.sum(masked, dim=1)
-    counts = torch.clamp(mask.sum(dim=1), min=1e-9)
-    return summed / counts
+    # Delegates to auto_ingest.embed._mean_pool so re-embeds (reembed.py) and the
+    # search server use BYTE-IDENTICAL pooling math as the ingest path here.
+    from ..embed import _mean_pool
+    return _mean_pool(last_hidden_state, attention_mask)
 
 def embed_texts(texts: List[str], batch_size: int, max_length: int = 512) -> List[List[float]]:
     if not texts: return []
