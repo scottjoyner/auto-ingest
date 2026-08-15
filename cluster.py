@@ -56,21 +56,29 @@ def fetch_vectors(sess, prop: str, min_text: int = 10):
     return out
 
 
-def pick_k(X: np.ndarray, k_range) -> int:
+def pick_k(X: np.ndarray, k_range):
+    """Pick k via silhouette on a stratified sample (sklearn, CPU-friendly).
+
+    The sweep fits MiniBatchKMeans on a fixed random sample of <=4000 rows; the
+    sample is drawn once and reused across k so comparisons are apples-to-apples
+    and the expensive tokenization/IO stays out of the loop. Returns
+    (best_k, best_sil, best_km): the winner's fitted model is reused to
+    warm-start the full-data fit, skipping a fresh k-means++ init.
+    """
     from sklearn.cluster import MiniBatchKMeans
     from sklearn.metrics import silhouette_score
 
     rng = np.random.default_rng(42)
     n = min(len(X), 4000)
     sample = X[rng.choice(len(X), n, replace=False)] if len(X) > n else X
-    best_k, best_sil = k_range[0], -1.0
+    best_k, best_sil, best_km = k_range[0], -1.0, None
     for k in k_range:
         km = MiniBatchKMeans(n_clusters=k, random_state=42, batch_size=1024).fit(sample)
         sil = silhouette_score(sample, km.labels_, sample_size=min(2000, n))
         print(f"  k={k}: silhouette={sil:.4f}")
         if sil > best_sil:
-            best_k, best_sil = k, sil
-    return best_k
+            best_k, best_sil, best_km = k, sil, km
+    return best_k, best_sil, best_km
 
 
 _STOP = set("""a an and are as at be but by for from has have he her his i if in is it its
@@ -207,13 +215,21 @@ def main():
 
     if args.k:
         k = args.k
+        init_centers = None
     else:
         k_range = range(args.k_min, args.k_max + 1, args.k_step)
-        k = pick_k(X, k_range)
+        k, _sil, sweep_km = pick_k(X, k_range)
+        # Warm-start the full-data fit with the winning sweep centers instead of
+        # re-running k-means++ from scratch on the whole matrix.
+        init_centers = sweep_km.cluster_centers_ if sweep_km is not None else None
     print(f"Using k={k}")
 
     from sklearn.cluster import MiniBatchKMeans
-    km = MiniBatchKMeans(n_clusters=k, random_state=42, batch_size=1024).fit(X)
+    km = MiniBatchKMeans(
+        n_clusters=k, random_state=42, batch_size=1024,
+        init="k-means++" if init_centers is None else init_centers,
+        n_init=1,
+    ).fit(X)
     assignments = {sid: int(c) for (sid, _, _), c in zip(rows, km.labels_)}
 
     rows_by_cluster = {}
