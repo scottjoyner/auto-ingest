@@ -48,10 +48,11 @@ DEFAULT_TOP_K = 25
 # switch to the gte-small re-embed by starting the server with
 # VECTOR_PROP=emb_gte_small.
 EMBED_PROP = os.getenv("VECTOR_PROP", "embedding")
-# Index names aren't uniformly `<prop>_index` — the legacy path names them
-# `<label>_<prop>_index` (utterance_embedding_index), while the reembed path
-# uses `<prop>_index` (emb_gte_small_index). Resolve the real name at query
-# time by asking the DB which ONLINE vector index targets Utterance + prop.
+# Index names aren't uniform: legacy MiniLM path uses `<label>_<prop>_index`
+# (utterance_embedding_index), while the reembed path uses `<label>_<prop>_index`
+# too (segment_emb_gte_small_index). Resolve the real name at query time by
+# asking the DB which ONLINE vector index targets <label> + prop; the per-label
+# names are stable across stages so one cached query serves all searches.
 # The query embedding model MUST match the model that produced the indexed
 # vectors, or cosine scores are meaningless. Resolve it from the prop by
 # default, with EMBED_MODEL_NAME as an explicit override.
