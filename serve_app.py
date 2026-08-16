@@ -149,19 +149,16 @@ COVERAGE_LABELS = ["Segment", "Utterance", "Transcription", "Summary"]
 
 
 def embedding_coverage(prop: str) -> Dict[str, Dict[str, Any]]:
-    """embedded/total per text-bearing label for `prop`."""
+    """embedded/total per text-bearing label for `prop` (single pass per label)."""
     out: Dict[str, Dict[str, Any]] = {}
     with _driver.session() as s:
         for lbl in COVERAGE_LABELS:
             try:
-                total = s.run(
+                total, done = s.run(
                     f"MATCH (n:{lbl}) WHERE n.text IS NOT NULL AND trim(n.text) <> '' "
-                    f"RETURN count(n)",
-                ).single().values()[0]
-                done = s.run(
-                    f"MATCH (n:{lbl}) WHERE n.text IS NOT NULL AND trim(n.text) <> '' "
-                    f"AND n.{prop} IS NOT NULL RETURN count(n)",
-                ).single().values()[0]
+                    f"RETURN count(n) AS total, "
+                    f"sum(CASE WHEN n.{prop} IS NOT NULL THEN 1 ELSE 0 END) AS done",
+                ).single().values()
                 out[lbl] = {"embedded": int(done), "total": int(total)}
             except Exception as e:
                 out[lbl] = {"embedded": 0, "total": 0, "error": str(e)[:200]}
