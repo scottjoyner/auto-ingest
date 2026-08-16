@@ -1,13 +1,16 @@
-"""CV2 VAAPI hardware-decode helper (RX 480 / Polaris).
+"""Best-effort OpenCV VAAPI hardware decoding.
 
-OpenCV 4.10+ exposes CAP_PROP_HW_ACCELERATION. On AMD/Intel with a working
-VAAPI render node this moves H.264/H.265 *decode* onto the GPU, cutting CPU
-time ~8x for pure decode-heavy frame work (YOLO CSV generation, patch crops,
-HUD OCR). Encode is NOT done here (see compress_dashcam2 --vaapi).
+OpenCV exposes hardware acceleration as an *open-only* VideoCapture property.
+That means setting CAP_PROP_HW_ACCELERATION after ``VideoCapture(path)`` has
+already opened the stream is not sufficient. Call ``open_capture`` for the
+accelerated path; it attempts an FFmpeg/VAAPI open and falls back to the normal
+CPU-backed capture if the backend, driver, codec, or build does not support it.
 
-Enable automatically when the platform is Linux, cv2 advertises VAAPI, and the
-render node exists. Callers that want the flag regardless can set
-AUTO_INGEST_VAAPI=0 to disable or AUTO_INGEST_VAAPI=1 to force.
+The helper is intentionally safe on non-Linux and non-VAAPI machines. Set
+``AUTO_INGEST_VAAPI=0`` to disable attempts, or ``AUTO_INGEST_VAAPI=1`` to
+request an attempt whenever OpenCV advertises the required API. The render-node
+probe is retained as a host capability guard and can be overridden with
+``AUTO_INGEST_VAAPI_DEVICE``.
 """
 
 from __future__ import annotations
@@ -16,7 +19,6 @@ import os
 from pathlib import Path
 from typing import Optional
 
-# Common VAAPI render nodes in priority order (first existing wins).
 _VAAPI_NODES = (
     "/dev/dri/renderD128",
     "/dev/dri/renderD129",
@@ -24,14 +26,18 @@ _VAAPI_NODES = (
 
 
 def _cv2_vaapi_supported(cv2) -> bool:
-    return (
-        getattr(cv2, "CAP_PROP_HW_ACCELERATION", None) is not None
-        and getattr(cv2, "VIDEO_ACCELERATION_VAAPI", None) is not None
+    return all(
+        getattr(cv2, name, None) is not None
+        for name in (
+            "CAP_FFMPEG",
+            "CAP_PROP_HW_ACCELERATION",
+            "VIDEO_ACCELERATION_VAAPI",
+        )
     )
 
 
 def vaapi_device() -> Optional[str]:
-    """Return the first existing VAAPI render node, or None."""
+    """Return the configured/first existing VAAPI render node, or ``None``."""
     env = os.environ.get("AUTO_INGEST_VAAPI_DEVICE")
     if env:
         return env if Path(env).exists() else None
@@ -41,31 +47,63 @@ def vaapi_device() -> Optional[str]:
     return None
 
 
-def enable_vaapi(cap) -> None:
-    """Best-effort: enable VAAPI hw decode on an already-created VideoCapture.
+def vaapi_requested() -> bool:
+    """Whether this host should attempt a VAAPI capture open."""
+    value = os.environ.get("AUTO_INGEST_VAAPI")
+    if value == "0":
+        return False
+    if value == "1":
+        return True
+    return os.name == "posix" and vaapi_device() is not None
 
-    Safe to call unconditionally; silently no-ops when unsupported/disabled.
+
+def enable_vaapi(cap) -> bool:
+    """Compatibility probe for already-open captures.
+
+    ``CAP_PROP_HW_ACCELERATION`` is open-only in OpenCV, so this function no
+    longer claims to enable acceleration after construction. It returns whether
+    the current capture reports VAAPI, when that property is readable. Existing
+    callers remain safe, but new code should use :func:`open_capture`.
     """
-    if os.environ.get("AUTO_INGEST_VAAPI") == "0":
-        return
+    if not vaapi_requested():
+        return False
     try:
         import cv2  # noqa: PLC0415
     except Exception:
-        return
+        return False
     if not _cv2_vaapi_supported(cv2):
-        return
-    if vaapi_device() is None:
-        return
+        return False
     try:
-        # Property must be set *before* frames are read.
-        cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_VAAPI)
+        return int(cap.get(cv2.CAP_PROP_HW_ACCELERATION)) == int(
+            cv2.VIDEO_ACCELERATION_VAAPI
+        )
     except Exception:
-        pass
+        return False
+
+
+def _open_vaapi(cv2, path: str):
+    params = [
+        int(cv2.CAP_PROP_HW_ACCELERATION),
+        int(cv2.VIDEO_ACCELERATION_VAAPI),
+    ]
+    return cv2.VideoCapture(path, cv2.CAP_FFMPEG, params)
 
 
 def open_capture(path: str):
-    """Open a VideoCapture with VAAPI hw decode enabled (best-effort)."""
+    """Open ``path`` with VAAPI when possible, otherwise fall back to CPU."""
     import cv2  # noqa: PLC0415
-    cap = cv2.VideoCapture(path)
-    enable_vaapi(cap)
-    return cap
+
+    if vaapi_requested() and _cv2_vaapi_supported(cv2):
+        cap = None
+        try:
+            cap = _open_vaapi(cv2, path)
+            if cap is not None and cap.isOpened():
+                return cap
+        except Exception:
+            pass
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+    return cv2.VideoCapture(path)
