@@ -148,6 +148,15 @@ def db_count() -> int:
 COVERAGE_LABELS = ["Segment", "Utterance", "Transcription", "Summary"]
 
 
+def _text_predicate(label: str) -> str:
+    """Mirror the embed stage's target per label: embed_summaries skips Summary
+    nodes with text <=10 chars, so those must not count toward `total` (they are
+    not a recovery target). reembed embeds any node carrying text."""
+    if label == "Summary":
+        return "size(n.text) > 10"
+    return "n.text IS NOT NULL AND trim(n.text) <> ''"
+
+
 def embedding_coverage(prop: str) -> Dict[str, Dict[str, Any]]:
     """embedded/total per text-bearing label for `prop` (single pass per label)."""
     out: Dict[str, Dict[str, Any]] = {}
@@ -155,7 +164,7 @@ def embedding_coverage(prop: str) -> Dict[str, Dict[str, Any]]:
         for lbl in COVERAGE_LABELS:
             try:
                 total, done = s.run(
-                    f"MATCH (n:{lbl}) WHERE n.text IS NOT NULL AND trim(n.text) <> '' "
+                    f"MATCH (n:{lbl}) WHERE {_text_predicate(lbl)} "
                     f"RETURN count(n) AS total, "
                     f"sum(CASE WHEN n.{prop} IS NOT NULL THEN 1 ELSE 0 END) AS done",
                 ).single().values()

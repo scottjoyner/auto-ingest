@@ -75,13 +75,26 @@ def indexed_props(sess) -> dict[str, list[str]]:
     return out
 
 
+def text_predicate(label: str) -> str:
+    """Match each label's embed stage so 'OK' means the embedder's target is met.
+
+    reembed embeds any node with text; embed_summaries deliberately skips
+    Summary nodes whose text is too short (<=10 chars) to embed meaningfully, so
+    those are not a recovery target and must not count toward `total`.
+    """
+    if label == "Summary":
+        return "size(n.text) > 10"
+    return "n.text IS NOT NULL AND trim(n.text) <> ''"
+
+
 def coverage(sess, label: str, prop: str) -> dict:
+    pred = text_predicate(label)
     total = sess.run(
-        f"MATCH (n:`{label}`) WHERE n.text IS NOT NULL AND trim(n.text) <> '' "
+        f"MATCH (n:`{label}`) WHERE {pred} "
         f"RETURN count(n) AS c"
     ).single()["c"]
     done = sess.run(
-        f"MATCH (n:`{label}`) WHERE n.text IS NOT NULL AND trim(n.text) <> '' "
+        f"MATCH (n:`{label}`) WHERE {pred} "
         f"AND n.`{prop}` IS NOT NULL RETURN count(n) AS c"
     ).single()["c"]
     return {"label": label, "prop": prop, "embedded": int(done), "total": int(total)}
