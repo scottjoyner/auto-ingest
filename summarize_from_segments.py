@@ -58,6 +58,7 @@ OLLAMA_USE_CLI  = os.getenv("OLLAMA_USE_CLI", "0").lower() in ("1","true","yes",
 # ---- env ----
 LLM_ENDPOINT = os.getenv("LLM_ENDPOINT", "http://localhost:1234/v1")
 LLM_MODEL      = os.getenv("LLM_MODEL", "qwen3.6-35b-a3b-claude-4.7-opus-reasoning-distilled-apex")
+LLM_DISABLE_THINKING = os.getenv("LLM_DISABLE_THINKING", "1").lower() in ("1", "true", "yes", "on")
 # ---- env ----
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "900"))  # seconds; was 180
 OLLAMA_USE_CLI  = os.getenv("OLLAMA_USE_CLI", "0").lower() in ("1","true","yes","on")
@@ -455,6 +456,10 @@ def _lmstudio_chat_json(system: str, user: str, temperature: float = 0.2) -> Opt
         # _coerce_json_dict will strip code fences / scrape JSON from text.
         "stream": False,
     }
+    # Reasoning-distilled models (e.g. qwen*-reasoning-distilled) put text in
+    # reasoning_content and leave content="" unless thinking is disabled.
+    if LLM_DISABLE_THINKING:
+        payload["thinking"] = {"type": "disabled"}
     try:
         r = requests.post(url, json=payload, timeout=OLLAMA_TIMEOUT)
         if r.status_code == 404:
