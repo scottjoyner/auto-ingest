@@ -115,6 +115,8 @@ def stage_link_speakers(args) -> int:
         cli += ["--max-speakers", str(args.max_speakers)]
     if args.workers > 1:
         cli += ["--workers", str(args.workers)]
+    if args.remote_embed:
+        cli += ["--remote-embed", args.remote_embed]
     if args.state_file:
         cli += ["--state-file", args.state_file]
     if args.dry_run:
@@ -153,6 +155,9 @@ def main():
                     help="link-speakers: optional global cap (0 = no cap; use a state-file for chunked runs)")
     ap.add_argument("--workers", type=int, default=1,
                     help="link-speakers: parallel embedding processes (1 = single-process)")
+    ap.add_argument("--remote-embed", default="",
+                    help="link-speakers: URL of a remote GPU ECAPA embed server "
+                         "(e.g. http://100.64.43.123:8901) to offload forward passes")
     ap.add_argument("--state-file", default="",
                     help="link-speakers: JSON file of already-processed speaker ids (resume)")
     ap.add_argument("--drop-clusters", action="store_true",
