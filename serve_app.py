@@ -174,6 +174,100 @@ def embedding_coverage(prop: str) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+# --- system status aggregation (/api/status) --------------------------------
+
+def _proc_pids(fragment: str) -> List[int]:
+    """PIDs whose cmdline contains `fragment` (cheap /proc scan, no ps subprocess)."""
+    pids: List[int] = []
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as f:
+                    cmd = f.read().decode(errors="replace").replace("\0", " ")
+                if fragment in cmd:
+                    pids.append(int(entry))
+            except (OSError, ValueError):
+                continue
+    except OSError:
+        pass
+    return pids
+
+
+def _lmstudio_health() -> Dict[str, Any]:
+    """Reachability + loaded model of the local LLM (LM Studio :1234/v1)."""
+    import urllib.request
+    try:
+        req = urllib.request.Request("http://localhost:1234/v1/models",
+                                     headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=2.5) as r:
+            body = json.loads(r.read().decode(errors="replace"))
+        models = [m.get("id", "") for m in body.get("data", [])]
+        return {"reachable": True, "model": models[0] if models else None,
+                "models": models}
+    except Exception as e:
+        return {"reachable": False, "error": str(e)[:120]}
+
+
+def system_status() -> Dict[str, Any]:
+    """One-stop monitoring payload: graph counts, coverage, worker processes,
+    linker progress, and LLM health."""
+    now = time.time()
+    out: Dict[str, Any] = {
+        "time": now,
+        "counts": {},
+        "coverage": {},
+        "processes": {},
+        "linker": {},
+        "llm": _lmstudio_health(),
+    }
+    try:
+        with _driver.session() as s:
+            rows = s.run("""
+                MATCH (n)
+                WITH labels(n)[0] AS lbl, count(n) AS c
+                RETURN lbl, c ORDER BY c DESC
+            """).values()
+            out["counts"] = {lbl: int(c) for lbl, c in rows}
+    except Exception as e:
+        out["counts"]["error"] = str(e)[:200]
+
+    # linker progress from the DB (SAME_PERSON edges + globals) and state file.
+    try:
+        with _driver.session() as s:
+            out["counts"]["linked"] = int(s.run(
+                "MATCH (:Speaker)-[r:SAME_PERSON]->(:GlobalSpeaker) RETURN count(r)"
+            ).single()[0])
+            out["counts"]["globals"] = int(s.run(
+                "MATCH (g:GlobalSpeaker) RETURN count(g)").single()[0])
+            out["counts"]["unlinked"] = max(0, int(s.run(
+                "MATCH (sp:Speaker) WHERE NOT (sp)-[:SAME_PERSON]->(:GlobalSpeaker) "
+                "RETURN count(sp)").single()[0]))
+    except Exception as e:
+        out["linker"]["db_error"] = str(e)[:200]
+
+    state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "linker_state.json")
+    try:
+        if os.path.isfile(state_file):
+            st = os.stat(state_file)
+            with open(state_file) as f:
+                entries = len(json.load(f))
+            out["linker"]["state_entries"] = entries
+            out["linker"]["state_mtime"] = st.st_mtime
+            out["linker"]["state_age_s"] = round(now - st.st_mtime, 1)
+    except Exception as e:
+        out["linker"]["state_error"] = str(e)[:200]
+
+    out["processes"]["linker"] = _proc_pids("link_global_speakers")
+    out["processes"]["sweep"] = _proc_pids("speakers.py")
+    out["processes"]["serve_app"] = _proc_pids("serve_app.py")
+
+    out["coverage"] = {"active_prop": EMBED_PROP,
+                       "coverage": embedding_coverage(EMBED_PROP)}
+    return out
+
+
 def search(text: str, k: int = DEFAULT_TOP_K) -> List[Dict[str, Any]]:
     """Hybrid (RRF) search across Utterance/Segment/Transcription.
 
@@ -407,6 +501,7 @@ PAGE_HTML = r"""<!doctype html>
 <body>
   <div class="card mb-3">
     <h1 class="text-lg font-bold mb-2">LOCAL graph search</h1>
+    <div class="mb-2 text-sm"><a class="nav" href="/status" style="color:#60a5fa;text-decoration:none;margin-right:12px">Status</a><a href="/clusters" style="color:#60a5fa;text-decoration:none">Clusters</a></div>
     <form id="sf" hx-get="/api/search" hx-trigger="keyup delay:350ms, change" hx-vars="q: q.value" hx-target="#hits" hx-swap="innerHTML">
       <input id="q" name="q" type="text" size="40" placeholder="Ask about anything you recorded… e.g. ‘quarterly numbers’, ‘router firmware’, ‘beach house’">
       <button type="submit">Search</button>
@@ -457,10 +552,114 @@ PAGE_HTML = r"""<!doctype html>
 """
 
 
+STATUS_PAGE_HTML = r"""<!doctype html>
+<html lang=en>
+<head>
+  <meta charset=utf-8>
+  <meta name=viewport content="width=device-width,initial-scale=1">
+  <title>LOCAL Status</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body{font-family:sans-serif;margin:0;padding:16px;background:#0f1115;color:#e5e7eb}
+    .card{background:#1e2028;border:1px solid #2e323a;border-radius:10px;padding:14px;margin-bottom:12px}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{text-align:left;padding:4px 8px;border-bottom:1px solid #2e323a}
+    th{color:#94a3b8;font-weight:600}
+    .ok{color:#4ade80}.warn{color:#facc15}.err{color:#f87171}
+    a.nav{color:#60a5fa;text-decoration:none;margin-right:12px}
+    .bar{background:#2e323a;border-radius:4px;height:8px;width:100%}
+    .fill{background:#2563eb;height:8px;border-radius:4px}
+  </style>
+</head>
+<body>
+  <div class="mb-3">
+    <a class="nav" href="/">Search</a><a class="nav" href="/status">Status</a><a class="nav" href="/clusters">Clusters</a>
+    <button onclick="loadStatus()" class="text-sm" style="background:#2563eb;color:#fff;border:0;padding:6px 12px;border-radius:6px;cursor:pointer">Refresh</button>
+  </div>
+  <div id="status"><p class=text-slate-400>loading…</p></div>
+  <script>
+  async function loadStatus(){
+    const el=document.getElementById('status');
+    try{
+      const r=await fetch('/api/status'); const s=await r.json();
+      const c=s.counts||{}, cov=((s.coverage||{}).coverage||{});
+      const proc=row=>{
+        const p=(s.processes||{})[row]||[];
+        return p.length?`<span class=ok>running (pid ${p.join(', ')})</span>`:'<span class=warn>not running</span>';
+      };
+      let rows=Object.entries(c).filter(([k])=>k!=='error').map(([k,v])=>`<tr><td>${k}</td><td>${Number(v).toLocaleString()}</td></tr>`).join('');
+      let covrows=Object.entries(cov).map(([k,v])=>{const pct=v.total?Math.round(100*v.embedded/v.total):0;return `<tr><td>${k}</td><td>${v.embedded.toLocaleString()} / ${v.total.toLocaleString()}</td><td><div class=bar><div class=fill style="width:${pct}%"></div></div></td></tr>`}).join('');
+      const llm=s.llm||{};
+      const link=s.linker||{};
+      el.innerHTML=`
+        <div class=card><h2 class=text-sm font-semibold mb-1 text-slate-400>Processes</h2>
+          <table><tr><th>linker</th><td>${proc('linker')}</td></tr>
+          <tr><th>sweep (speakers.py)</th><td>${proc('sweep')}</td></tr>
+          <tr><th>serve_app</th><td>${proc('serve_app')}</td></tr></table></div>
+        <div class=card><h2 class=text-sm font-semibold mb-1 text-slate-400>LLM (LM Studio)</h2>
+          <p>${llm.reachable?`<span class=ok>reachable</span> — model: ${llm.model||'?'}`:`<span class=err>unreachable</span>`}</p></div>
+        <div class=card><h2 class=text-sm font-semibold mb-1 text-slate-400>Linker</h2>
+          <table><tr><th>linked</th><td>${Number(c.linked||0).toLocaleString()}</td></tr>
+          <tr><th>unlinked</th><td>${Number(c.unlinked||0).toLocaleString()}</td></tr>
+          <tr><th>global speakers</th><td>${Number(c.globals||0).toLocaleString()}</td></tr>
+          <tr><th>state file entries</th><td>${Number(link.state_entries||0).toLocaleString()}</td></tr>
+          <tr><th>state file age</th><td>${link.state_age_s!==undefined?link.state_age_s+'s':'—'}</td></tr></table></div>
+        <div class=card><h2 class=text-sm font-semibold mb-1 text-slate-400>Embedding coverage (${(s.coverage||{}).active_prop||'?'})</h2>
+          <table><tr><th>label</th><th>embedded/total</th><th style=width:40%></th></tr>${covrows}</table></div>
+        <div class=card><h2 class=text-sm font-semibold mb-1 text-slate-400>Graph counts</h2><table>${rows}</table></div>`;
+    }catch(e){ el.innerHTML=`<p class=err>error: ${e}</p>`; }
+  }
+  loadStatus(); setInterval(loadStatus, 15000);
+  </script>
+</body>
+</html>
+"""
+
+
+CLUSTERS_PAGE_HTML = r"""<!doctype html>
+<html lang=en>
+<head>
+  <meta charset=utf-8>
+  <meta name=viewport content="width=device-width,initial-scale=1">
+  <title>LOCAL Clusters</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body{font-family:sans-serif;margin:0;padding:16px;background:#0f1115;color:#e5e7eb}
+    .card{background:#1e2028;border:1px solid #2e323a;border-radius:10px;padding:14px;margin-bottom:12px}
+    a.nav{color:#60a5fa;text-decoration:none;margin-right:12px}
+    .member{border-bottom:1px solid #2e323a;padding:8px 0;font-size:13px}
+    button{background:#2563eb;color:#fff;border:0;padding:4px 10px;border-radius:6px;cursor:pointer;margin-left:8px}
+  </style>
+</head>
+<body>
+  <div class="mb-3">
+    <a class="nav" href="/">Search</a><a class="nav" href="/status">Status</a><a class="nav" href="/clusters">Clusters</a>
+  </div>
+  <div class="card"><h2 class="text-sm font-semibold mb-2 text-slate-400">Clusters (by size)</h2><div id=clusters></div></div>
+  <div class="card" id=detail></div>
+  <script>
+  async function loadClusters(){
+    const r=await fetch('/api/clusters?limit=200'); const d=await r.json();
+    const el=document.getElementById('clusters');
+    el.innerHTML=d.clusters.map(c=>`<div class=member><b>${c.label||c.cid}</b> <span class=text-slate-500>(${c.size} members, ${c.algo||'?'})</span><button onclick='loadCluster("${c.cid}")'>view</button></div>`).join('');
+  }
+  async function loadCluster(cid){
+    const r=await fetch('/api/cluster?id='+encodeURIComponent(cid)); const d=await r.json();
+    const el=document.getElementById('detail');
+    if(!d.cid){ el.innerHTML='<p class=text-slate-400>no data</p>'; return; }
+    el.innerHTML=`<h2 class="text-sm font-semibold mb-2 text-slate-400">${d.label} (${d.total} members)</h2>`+
+      (d.members||[]).map(m=>`<div class=member>${m.text||''}</div>`).join('');
+  }
+  loadClusters();
+  </script>
+</body>
+</html>
+"""
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # silence default stderr noise
         pass
-
     def _send(self, status: HTTPStatus, body: bytes, ctype: str = "text/html", extra: Optional[Dict] = None):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
@@ -481,6 +680,10 @@ class Handler(BaseHTTPRequestHandler):
         path, qs = parsed.path, parse_qs(parsed.query)
         if path == "/":
             self._send(HTTPStatus.OK, PAGE_HTML.encode())
+        elif path == "/status":
+            self._send(HTTPStatus.OK, STATUS_PAGE_HTML.encode())
+        elif path == "/clusters":
+            self._send(HTTPStatus.OK, CLUSTERS_PAGE_HTML.encode())
         elif path == "/api/health":
             bi = backend_info()
             self._json(HTTPStatus.OK, {
@@ -517,6 +720,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, {"clusters": cluster_list(limit, min_size)})
         elif path == "/api/cluster":
             self._json(HTTPStatus.OK, cluster_members(unquote(qs.get("id", [""])[0] or "")))
+        elif path == "/api/status":
+            self._json(HTTPStatus.OK, system_status())
         elif path == "/api/media":
             raw = unquote(qs.get("file", [""])[0] or "")
             rng = self.headers.get("Range")
