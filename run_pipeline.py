@@ -113,6 +113,8 @@ def stage_link_speakers(args) -> int:
            "--emb-cache", "./emb_cache.sqlite"]
     if args.max_speakers:
         cli += ["--max-speakers", str(args.max_speakers)]
+    if args.workers > 1:
+        cli += ["--workers", str(args.workers)]
     if args.state_file:
         cli += ["--state-file", args.state_file]
     if args.dry_run:
@@ -149,6 +151,8 @@ def main():
     ap.add_argument("--torch-threads", type=int, default=int(os.getenv("TORCH_THREADS", "6")))
     ap.add_argument("--max-speakers", type=int, default=0,
                     help="link-speakers: optional global cap (0 = no cap; use a state-file for chunked runs)")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="link-speakers: parallel embedding processes (1 = single-process)")
     ap.add_argument("--state-file", default="",
                     help="link-speakers: JSON file of already-processed speaker ids (resume)")
     ap.add_argument("--drop-clusters", action="store_true",
