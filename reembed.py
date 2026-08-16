@@ -58,7 +58,11 @@ SCHEMA: Dict[str, str] = {
 
 
 def ensure_vector_index(sess, label: str, prop: str, dim: int, drop_first: bool = True):
-    idx_name = f"{prop}_index"
+    # Per-label index name (Neo4j vector indexes target exactly ONE label, so a
+    # shared name like `emb_gte_small_index` would silently drop the previous
+    # label's index as each label is processed). Matches the ingest convention
+    # (`segment_embedding_index`, `utterance_embedding_index`, ...).
+    idx_name = f"{label}_{prop}_index"
     # Index hygiene: if the index already exists with the right dimensions, leave it
     # in place — rebuilding from scratch on 400k+ nodes wastes minutes each run.
     existing = sess.run(
