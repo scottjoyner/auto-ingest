@@ -704,7 +704,7 @@ def fetch_speakers_and_segments(drv, min_seg_sec: float, min_prop: float,
             {no_audio_pred}
             {excl_pred}
             WITH sp ORDER BY sp.id LIMIT $batch
-            CALL {{
+            CALL (sp) {{
                 WITH sp
                 MATCH (sp)<-[r:SPOKEN_BY]-(s:Segment)<-[:HAS_SEGMENT]-(t:Transcription)
                 WHERE coalesce(s.end,0) - coalesce(s.start,0) >= $min_seg
