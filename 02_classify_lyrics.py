@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import logging
 import os
 import re
 
@@ -67,13 +68,28 @@ class Utt:
     end: Optional[float]
     audio_key: Optional[str]
 
-def _fetch_utterances(tx, lim: int) -> List[Utt]:
-    q = """
+def _fetch_utterances(tx, lim: int, only_unclassified: bool = False) -> List[Utt]:
+    where = "u.lyrics_score IS NULL" if only_unclassified else "u.lyrics_score IS NULL OR u.review_needed = true"
+    q = f"""
     MATCH (u:Utterance)
-    WHERE u.lyrics_score IS NULL OR u.review_needed = true
+    WHERE {where}
     OPTIONAL MATCH (t:Transcription)-[:HAS_UTTERANCE]->(u)
     RETURN u.id AS uid, u.text AS text, u.start AS start, u.end AS end,
            coalesce(u.audio_key, t.key) AS audio_key
+    LIMIT $lim
+    """
+    rows = tx.run(q, lim=lim).data()
+    return [Utt(r["uid"], r.get("text") or "", r.get("start"), r.get("end"), r.get("audio_key")) for r in rows]
+
+
+def _fetch_flagged_utterances(tx, lim: int) -> List[Utt]:
+    """Utterances already classified as lyrics/music (for --mark-only backfill)."""
+    q = """
+    MATCH (u:Utterance)
+    WHERE (u.is_lyrics = true OR u.music_overlap >= 0.5)
+      AND u.lyrics_score IS NOT NULL
+    RETURN u.id AS uid, u.text AS text, u.start AS start, u.end AS end,
+           u.audio_key AS audio_key
     LIMIT $lim
     """
     rows = tx.run(q, lim=lim).data()
@@ -123,13 +139,28 @@ def _load_segments_from_neo4j(tx, key: str) -> List[Tuple[float,float]]:
     return [(float(r["start"]), float(r["end"])) for r in tx.run(q, key=key).data()]
 
 def _sidecar_paths_for_key(key: str) -> List[str]:
-    cands = []
-    for root in AUDIO_ROOTS:
-        # try exact stem match
-        cands.extend([os.path.join(root, p) for p in os.listdir(root) if False]) # placeholder to avoid os error
-    # robust scan:
+    """Resolve sidecar candidate paths for `key` in O(1) via the audio index.
+
+    Walks the audio tree only when the key is not present in the index (rare,
+    e.g. audio added after the last index build). Never lists a missing root.
+    """
+    audio_index: Dict[str, List[str]] = {}
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio_index.json")) as fh:
+            audio_index = json.load(fh)
+    except Exception:
+        audio_index = {}
     sidecars = []
+    for path in audio_index.get(key, []):
+        sc = path + SIDECAR_SUFFIX
+        if os.path.exists(sc):
+            sidecars.append(sc)
+    if sidecars:
+        return sidecars
+    # fallback: guarded walk for keys missing from the index
     for root in AUDIO_ROOTS:
+        if not os.path.isdir(root):
+            continue
         for dirpath, _, files in os.walk(root):
             for f in files:
                 stem, ext = os.path.splitext(f)
@@ -222,10 +253,19 @@ def ensemble(audio_p: float, text_p: float, rules_p: float) -> Tuple[float, bool
 
 # --------------- Main ---------------
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=BATCH_LIMIT)
     ap.add_argument("--model", type=str, default=MODEL_DIR)
     ap.add_argument("--segments-source", choices=["neo4j","sidecar"], default=SEGMENTS_SOURCE)
+    ap.add_argument("--all", action="store_true",
+                    help="Loop in batches until every Utterance with lyrics_score IS NULL is "
+                         "classified (review_needed=true re-reviews are excluded so the loop "
+                         "terminates; re-run manually to revisit borderline cases).")
+    ap.add_argument("--mark-only", action="store_true",
+                    help="Skip classification; only backfill Segment.segment_type from "
+                         "existing flags (is_lyrics=true OR music_overlap>=0.5). One-time "
+                         "migration for utterances classified before segment marking existed.")
     args = ap.parse_args()
 
     zs = build_zs(args.model)
@@ -234,53 +274,67 @@ def main():
     seg_cache: Dict[str, List[Tuple[float,float]]] = {}
 
     with driver.session() as sess:
-        utts = sess.execute_read(_fetch_utterances, args.limit)
+        while True:
+            if args.mark_only:
+                utts = sess.execute_read(_fetch_flagged_utterances, args.limit)
+                if not utts:
+                    logging.info("No more flagged utterances to backfill; done.")
+                    break
+                for u in tqdm(utts, desc="mark"):
+                    sess.execute_write(_mark_overlapping_segments, u.uid, "music_or_media")
+                break
+            utts = sess.execute_read(_fetch_utterances, args.limit, only_unclassified=args.all)
+            if not utts:
+                logging.info("No more unclassified utterances; done.")
+                break
+            # Preload segments for all keys in this batch (1 round trip per key if Neo4j)
+            keys = sorted({u.audio_key for u in utts if u.audio_key})
+            if args.segments_source == "neo4j":
+                for k in keys:
+                    segs = sess.execute_read(_load_segments_from_neo4j, k)
+                    seg_cache[k] = segs
+            else:
+                for k in keys:
+                    seg_cache[k] = _load_segments_from_sidecar(k)
 
-        # Preload segments for all keys in this batch (1 round trip per key if Neo4j)
-        keys = sorted({u.audio_key for u in utts if u.audio_key})
-        if args.segments_source == "neo4j":
-            for k in keys:
-                segs = sess.execute_read(_load_segments_from_neo4j, k)
-                seg_cache[k] = segs
-        else:
-            for k in keys:
-                seg_cache[k] = _load_segments_from_sidecar(k)
+            for u in tqdm(utts, desc="classify"):
+                # audio overlap
+                segs = seg_cache.get(u.audio_key or "", [])
+                overlap = music_overlap_fraction(segs, u.start, u.end)
+                # map overlap -> audio probability (simple identity works well)
+                audio_prob = overlap
 
-        for u in tqdm(utts, desc="classify"):
-            # audio overlap
-            segs = seg_cache.get(u.audio_key or "", [])
-            overlap = music_overlap_fraction(segs, u.start, u.end)
-            # map overlap -> audio probability (simple identity works well)
-            audio_prob = overlap
+                # text
+                text_prob = text_lyrics_prob(zs, u.text)
+                rules_prob, rules_vals = rules_features_prob(u.text)
 
-            # text
-            text_prob = text_lyrics_prob(zs, u.text)
-            rules_prob, rules_vals = rules_features_prob(u.text)
+                score, is_lyrics, needs_review = ensemble(audio_prob, text_prob, rules_prob)
 
-            score, is_lyrics, needs_review = ensemble(audio_prob, text_prob, rules_prob)
+                evidence = {
+                    "audio_prob": audio_prob,
+                    "music_overlap": overlap,
+                    "text_prob": text_prob,
+                    "rules_prob": rules_prob,
+                    "rules": rules_vals,
+                    "weights": {"audio":W_AUDIO,"text":W_TEXT,"rules":W_RULES},
+                    "model": os.path.basename(args.model.rstrip("/")),
+                    "segments_source": args.segments_source
+                }
+                payload = {
+                    "is_lyrics": bool(is_lyrics),
+                    "lyrics_score": float(score),
+                    "lyrics_evidence": evidence,
+                    "music_overlap": float(overlap),
+                    "review_needed": bool(needs_review)
+                }
+                sess.execute_write(_write_back, u.uid, payload)
+                # Flag overlapping Segment nodes as non-speech so the global linker
+                # excludes them from ECAPA/pyannote embedding + linking.
+                if is_lyrics or overlap >= 0.5:
+                    sess.execute_write(_mark_overlapping_segments, u.uid, "music_or_media")
 
-            evidence = {
-                "audio_prob": audio_prob,
-                "music_overlap": overlap,
-                "text_prob": text_prob,
-                "rules_prob": rules_prob,
-                "rules": rules_vals,
-                "weights": {"audio":W_AUDIO,"text":W_TEXT,"rules":W_RULES},
-                "model": os.path.basename(args.model.rstrip("/")),
-                "segments_source": args.segments_source
-            }
-            payload = {
-                "is_lyrics": bool(is_lyrics),
-                "lyrics_score": float(score),
-                "lyrics_evidence": evidence,
-                "music_overlap": float(overlap),
-                "review_needed": bool(needs_review)
-            }
-            sess.execute_write(_write_back, u.uid, payload)
-            # Flag overlapping Segment nodes as non-speech so the global linker
-            # excludes them from ECAPA/pyannote embedding + linking.
-            if is_lyrics or overlap >= 0.5:
-                sess.execute_write(_mark_overlapping_segments, u.uid, "music_or_media")
+            if not args.all:
+                break
 
     driver.close()
 
