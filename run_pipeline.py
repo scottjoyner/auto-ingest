@@ -50,8 +50,8 @@ ENV = {
 DEFAULT_MODEL = os.environ.get("EMBED_MODEL_NAME", "thenlper/gte-small")
 DEFAULT_PROP = "emb_gte_small"
 
-STAGES = ["reembed", "embed_summaries", "cluster", "link-speakers", "summarize",
-          "replay-outbox"]
+STAGES = ["reembed", "embed_summaries", "classify", "cluster", "link-speakers",
+          "summarize", "replay-outbox"]
 
 LINKER = "auto_ingest.diarize.link_global_speakers"
 
@@ -84,6 +84,14 @@ def stage_embed_summaries(args) -> int:
     if args.dry_run:
         cli += ["--dry-run"]
     return _run(cli, "embed_summaries")
+
+
+def stage_classify(args) -> int:
+    cli = [PY, "-u", "02_classify_lyrics.py", "--all",
+           "--segments-source", args.classify_segments_source]
+    if args.dry_run:
+        cli += ["--limit", str(args.classify_limit)]
+    return _run(cli, "classify")
 
 
 def stage_cluster(args) -> int:
@@ -145,6 +153,10 @@ def main():
                     help="link-speakers: JSON file of already-processed speaker ids (resume)")
     ap.add_argument("--drop-clusters", action="store_true",
                     help="cluster: delete existing Cluster nodes before writing")
+    ap.add_argument("--classify-segments-source", default="neo4j",
+                    help="classify: 'neo4j' (AudioSegment nodes) or 'sidecar' (music.json sidecars)")
+    ap.add_argument("--classify-limit", type=int, default=64,
+                    help="classify: batch size per loop iteration")
     ap.add_argument("--label-llm", action="store_true", help="cluster: LLM cluster labels")
     ap.add_argument("--summarize", action="store_true", help="include LLM summarize stage")
     ap.add_argument("--summarize-limit", type=int, default=50)
@@ -164,6 +176,7 @@ def main():
     dispatch = {
         "reembed": stage_reembed,
         "embed_summaries": stage_embed_summaries,
+        "classify": stage_classify,
         "cluster": stage_cluster,
         "link-speakers": stage_link_speakers,
         "summarize": stage_summarize,
