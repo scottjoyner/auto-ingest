@@ -911,6 +911,69 @@ class SpkEmbedder:
             return [self.embed(w, sr) for w in wavs]
 
 
+class RemoteSpkEmbedder:
+    """Drop-in SpkEmbedder that offloads the ECAPA forward pass to a remote
+    GPU embed server (see remote_embed_server.py). The caller still clips +
+    gates snips locally; we send raw float32 PCM inline and get 192-d vectors.
+
+    Embedding across ALL speakers at once would beat per-speaker batching (the
+    server pads to longest snip, so a fat batch wastes little), but we keep the
+    per-speaker call shape identical to SpkEmbedder for a clean swap.
+    """
+
+    def __init__(self, url: str, timeout: float = 60.0):
+        self.url = url.rstrip("/")
+        self.timeout = timeout
+        self.backend = "remote"
+        self._health = None
+
+    def _check(self):
+        if self._health is not None:
+            return
+        import urllib.request
+        try:
+            with urllib.request.urlopen(f"{self.url}/health", timeout=10) as r:
+                self._health = r.read().decode()
+                logging.info(f"remote embed server: {self._health}")
+        except Exception as e:
+            raise RuntimeError(f"remote embed server {self.url} unreachable: {e}")
+
+    @torch.inference_mode()
+    def embed_batch(self, wavs: List[torch.Tensor], sr: int) -> List[np.ndarray]:
+        if not wavs:
+            return []
+        self._check()
+        import base64 as _b64
+        import urllib.request
+        import numpy as _np
+
+        # pad each snip to a common length? No — send raw lengths; the server
+        # pads once per batch. Convert each wav to contiguous f32 bytes.
+        snips = []
+        for i, w in enumerate(wavs):
+            arr = w.detach().cpu().numpy().astype(np.float32, copy=False)
+            snips.append({"idx": i, "audio": _b64.b64encode(arr.tobytes()).decode("ascii")})
+        body = json.dumps({"sr": sr, "snips": snips}).encode()
+        req = urllib.request.Request(f"{self.url}/embed", data=body,
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                resp = json.loads(r.read().decode())
+        except Exception as e:
+            raise RuntimeError(f"remote embed call failed: {e}")
+        vecs = resp.get("vectors", {})
+        # The server keys by idx 0..n-1 in send order.
+        out = []
+        for i in range(len(wavs)):
+            v = vecs.get(str(i))
+            if v is None:
+                v = vecs.get(i)
+            if v is None:
+                raise RuntimeError(f"remote embed missing vector {i}")
+            out.append(_np.asarray(v, dtype=_np.float32))
+        return out
+
+
 # -----------------------
 # SQLite per-snippet embedding cache
 # -----------------------
@@ -1055,11 +1118,15 @@ def _worker_init(args, audio_cache, model_name, backend, out_dir, torch_threads)
     emb = EmbCache(Path(args.emb_cache) if args.emb_cache else None,
                    refresh=args.emb_refresh, backend=backend, model_name=model_name,
                    snip_len=args.snip_len, sr=DEFAULT_SR)
+    if args.remote_embed:
+        embedder = RemoteSpkEmbedder(args.remote_embed)
+    else:
+        embedder = SpkEmbedder(backend)
     _WORKER = {
         "args": args,
         "audio_cache": audio_cache,
         "emb_cache": emb,
-        "embedder": SpkEmbedder(backend),
+        "embedder": embedder,
         "out_dir": out_dir,
     }
 
@@ -1646,6 +1713,7 @@ class Args:
     include_unknown: bool
     limit_speakers: int
     backend: str
+    remote_embed: Optional[str]
     write_snips: bool
     dry_run: bool
     snips_dir: Optional[Path]
@@ -1722,6 +1790,10 @@ def parse_args():
     p.add_argument("--include-unknown", action="store_true")
     p.add_argument("--limit-speakers", type=int, default=0)
     p.add_argument("--backend", type=str, choices=["speechbrain","pyannote"], default=SPK_MODEL)
+    p.add_argument("--remote-embed", type=str, default=None, metavar="URL",
+                   help="Offload ECAPA forward passes to a remote GPU embed server "
+                        "e.g. http://100.64.43.123:8901 (see remote_embed_server.py). "
+                        "Overrides --backend; snips are still clipped/gated locally.")
     p.add_argument("--write-snips", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--snips-dir", type=str, default=None)
@@ -1875,7 +1947,11 @@ def main():
 
     # per-snippet embedding cache
     model_name = ECAPA_NAME if args.backend == "speechbrain" else "pyannote/embedding"
-    embedder = SpkEmbedder(args.backend)
+    if args.remote_embed:
+        embedder = RemoteSpkEmbedder(args.remote_embed)
+        model_name = f"remote:{args.remote_embed}"
+    else:
+        embedder = SpkEmbedder(args.backend)
     rng = random.Random(1337)
 
     # outputs
