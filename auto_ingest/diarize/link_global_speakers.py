@@ -1069,8 +1069,13 @@ def _worker_embed(payload) -> Dict[str, Any]:
     sid, meta = payload
     w = _WORKER
     rng = random.Random(1337)
-    return _embed_one_speaker(sid, meta, w["args"], w["audio_cache"],
-                              w["emb_cache"], w["embedder"], rng, w["out_dir"])
+    res = _embed_one_speaker(sid, meta, w["args"], w["audio_cache"],
+                             w["emb_cache"], w["embedder"], rng, w["out_dir"])
+    # Each worker owns its own sqlite connection; commit per speaker so cache
+    # writes survive a pool shutdown and other workers never wait on a long
+    # open transaction (WAL + busy_timeout still protects against contention).
+    w["emb_cache"].flush()
+    return res
 
 
 def _embed_one_speaker(sid: str, meta: Dict[str, Any], args, audio_cache,
@@ -1870,13 +1875,6 @@ def main():
 
     # per-snippet embedding cache
     model_name = ECAPA_NAME if args.backend == "speechbrain" else "pyannote/embedding"
-    emb_cache = EmbCache(Path(args.emb_cache) if args.emb_cache else None,
-                         refresh=args.emb_refresh,
-                         backend=args.backend,
-                         model_name=model_name,
-                         snip_len=args.snip_len,
-                         sr=DEFAULT_SR)
-
     embedder = SpkEmbedder(args.backend)
     rng = random.Random(1337)
 
@@ -1896,8 +1894,10 @@ def main():
 
     if args.workers > 1 and len(speakers) > 1:
         # Parallel path: a pool of `workers` processes each embeds a subset of
-        # speakers with its own ECAPA model. ECAPA inference is CPU-bound and
-        # per-snip cost is flat w.r.t. batch size, so N processes ≈ Nx snips/s.
+        # speakers with its own ECAPA model + emb-cache connection. ECAPA
+        # inference is CPU-bound and per-snip cost is flat w.r.t. batch size,
+        # so N processes ≈ Nx snips/s. The parent opens NO sqlite connection
+        # here (workers own their own; avoids fork-inherited locks).
         import multiprocessing as _mp
         import torch as _torch
         _torch.set_num_threads(1)  # each worker sets its own; avoid oversubscribe
@@ -1912,17 +1912,25 @@ def main():
                 _apply_embed_result(res, spk_centroids, spk_weights, counts,
                                     holdout_embs, no_audio_sids, gated_sids)
     else:
+        emb_cache = EmbCache(Path(args.emb_cache) if args.emb_cache else None,
+                             refresh=args.emb_refresh,
+                             backend=args.backend,
+                             model_name=model_name,
+                             snip_len=args.snip_len,
+                             sr=DEFAULT_SR)
         for sid, meta in speakers.items():
             res = _embed_one_speaker(sid, meta, args, audio_cache, emb_cache,
                                      embedder, rng, out_dir)
             _apply_embed_result(res, spk_centroids, spk_weights, counts,
                                 holdout_embs, no_audio_sids, gated_sids)
+        emb_cache.flush()
 
     if cache_path:
         save_audio_cache(cache_path, audio_cache)
-    emb_cache.flush()
-    if args.prune_cache_days:
-        emb_cache.prune(max_age_days=args.prune_cache_days)
+    if args.workers <= 1 or len(speakers) <= 1:
+        emb_cache.flush()
+        if args.prune_cache_days:
+            emb_cache.prune(max_age_days=args.prune_cache_days)
 
     # Mark speakers we attempted but could not embed (no usable audio / all gated out)
     # so that chunked / resumed runs skip them and make monotonic forward progress.
