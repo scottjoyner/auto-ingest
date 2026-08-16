@@ -38,7 +38,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Any, Dict, List, Set, Tuple, Optional
 import subprocess
 
 import numpy as np
@@ -250,6 +250,48 @@ def _is_audio_path(p: Path) -> bool:
 
 def _looks_like_audio_dir(p: Path) -> bool:
     return any(tok in p.as_posix().lower().split("/") for tok in AUDIO_ONLY_DIR_HINTS)
+
+def _get_audio_for_key(key: str, audio_cache: Dict[str, str]) -> Optional[Tuple[torch.Tensor, int, Path]]:
+    """Module-level version of the (formerly closure) audio resolver so it can
+    be pickled for use by pool worker processes. `audio_cache` is a per-process
+    dict (each worker resolves its own cache misses)."""
+    p_str = audio_cache.get(key)
+    if p_str:
+        p = Path(p_str)
+        try:
+            if _is_audio_path(p):
+                hit = _wav_cache_get(str(p))
+                if hit is not None:
+                    wav, sr = hit
+                    return wav, sr, p
+                wav, sr = load_audio(p, DEFAULT_SR)
+                _wav_cache_put(str(p), wav, sr)
+                return wav, sr, p
+            else:
+                audio_cache.pop(key, None)
+        except Exception as ex:
+            logging.warning(f"Cached audio failed for key={key}: {p} ({ex}); removing from cache.")
+            audio_cache.pop(key, None)
+
+    p = discover_audio_for_key(key)
+    if not p or not p.exists():
+        logging.warning(f"Audio missing for key={key}")
+        return None
+
+    try:
+        hit = _wav_cache_get(str(p))
+        if hit is not None:
+            wav, sr = hit
+        else:
+            wav, sr = load_audio(p, DEFAULT_SR)
+            _wav_cache_put(str(p), wav, sr)
+    except Exception as ex:
+        logging.warning(f"Discovered audio failed for key={key}: {p} ({ex})")
+        return None
+
+    audio_cache[key] = str(p)
+    return wav, sr, p
+
 
 def discover_audio_for_key(key: str) -> Optional[Path]:
     """
@@ -887,7 +929,12 @@ class EmbCache:
             self._open()
 
     def _open(self):
-        self.conn = sqlite3.connect(str(self.path))
+        self.conn = sqlite3.connect(str(self.path), timeout=30.0)
+        # WAL lets multiple worker processes write concurrently without
+        # blocking readers; busy_timeout keeps writers from erroring when
+        # another worker holds the write lock briefly.
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
         self.conn.execute("""
         CREATE TABLE IF NOT EXISTS emb_cache (
@@ -989,6 +1036,164 @@ def cap_snips_per_file(items: List[Tuple[str, float, float, str, float]],
         rng.shuffle(selected)
         selected = selected[:max_total]
     return selected
+
+
+# -----------------------
+# Parallel speaker-embedding worker (multiprocessing)
+# -----------------------
+# Each worker process owns its own SpkEmbedder (lazy ECAPA load) + EmbCache
+# connection (WAL mode makes concurrent writers safe). The audio index is set
+# via set_audio_index() so discover_audio_for_key stays O(1) in every worker.
+_WORKER = None  # per-process worker context, set by _worker_init
+
+
+def _worker_init(args, audio_cache, model_name, backend, out_dir, torch_threads):
+    global _WORKER
+    import torch as _torch
+    if torch_threads:
+        _torch.set_num_threads(int(torch_threads))
+    emb = EmbCache(Path(args.emb_cache) if args.emb_cache else None,
+                   refresh=args.emb_refresh, backend=backend, model_name=model_name,
+                   snip_len=args.snip_len, sr=DEFAULT_SR)
+    _WORKER = {
+        "args": args,
+        "audio_cache": audio_cache,
+        "emb_cache": emb,
+        "embedder": SpkEmbedder(backend),
+        "out_dir": out_dir,
+    }
+
+
+def _worker_embed(payload) -> Dict[str, Any]:
+    """Embed one speaker inside a pool worker. `payload` is (sid, meta)."""
+    sid, meta = payload
+    w = _WORKER
+    rng = random.Random(1337)
+    return _embed_one_speaker(sid, meta, w["args"], w["audio_cache"],
+                              w["emb_cache"], w["embedder"], rng, w["out_dir"])
+
+
+def _embed_one_speaker(sid: str, meta: Dict[str, Any], args, audio_cache,
+                       emb_cache, embedder, rng, out_dir) -> Dict[str, Any]:
+    """Select, gate, clip & embed one speaker. Returns a result dict:
+
+    {"sid", "status": "embedded"|"no_audio"|"gated", "centroid", "weight",
+     "count", "holdout"} where the numeric fields are None unless status
+     == "embedded".
+    """
+    items = meta["items"]  # (key, start, end, text, prop)
+    items.sort(key=lambda x: (x[4], x[2]-x[1]), reverse=True)
+
+    # basic text filter to avoid non-speech
+    items_text = [it for it in items if sum(c.isalpha() for c in (it[3] or "")) >= TEXT_ALPHA_MIN] or items
+
+    # cap per file and max total
+    chosen = cap_snips_per_file(items_text, args.max_per_file, args.max_snips, rng)
+    if not chosen:
+        logging.warning(f"No eligible segments for speaker {sid}")
+        return {"sid": sid, "status": "no_audio", "centroid": None,
+                "weight": 0.0, "count": 0, "holdout": None}
+
+    # hold-out candidate
+    hold_idx = (len(chosen) - 1) if (args.holdout and len(chosen) >= 2) else None
+
+    # Pass 1: clip + gate each chosen snip. Cache hits are resolved inline;
+    # misses are queued for ONE batched ECAPA forward pass below.
+    emb_for_idx: Dict[int, np.ndarray] = {}
+    pending: List[Tuple[int, torch.Tensor, str, float, float]] = []  # (idx, snip, key, s, e)
+    snr_for_idx: Dict[int, float] = {}
+    rms_for_idx: Dict[int, float] = {}
+    got_audio = False
+    for idx, (key, s, e, text, prop) in enumerate(chosen):
+        pack = _get_audio_for_key(key, audio_cache)
+        if pack is None:
+            continue
+        got_audio = True
+        wav, sr, _ = pack
+        snip = fixed_snip(wav, sr, s, e, args.pad, args.snip_len)
+        if snip.numel() == 0:
+            continue
+
+        # gating
+        rms, snr_db = rms_and_snr_db(snip)
+        if rms < args.min_rms or snr_db < args.min_snr_db:
+            continue
+        snr_for_idx[idx] = snr_db
+        rms_for_idx[idx] = rms
+
+        if out_dir:
+            safe_key = re.sub(r"[^A-Za-z0-9_-]", "", key)
+            name = f"{sid}_{safe_key}_{s:.2f}-{e:.2f}_p{prop:.2f}_r{rms:.3f}_snr{snr_db:.1f}{'_hold' if hold_idx==idx else ''}"
+            sf.write(str(out_dir / f"{name}.wav"), snip.cpu().numpy(), sr, subtype="PCM_16")
+
+        cached = emb_cache.get(sid, key, s, e)
+        if cached is None:
+            pending.append((idx, snip, key, s, e))
+        else:
+            emb_for_idx[idx], _, _ = cached
+
+    # Pass 2: embed all cache misses in a single model forward pass.
+    if pending:
+        batch_embs = embedder.embed_batch([p[1] for p in pending], DEFAULT_SR)
+        for (idx, _snip, key, s, e), emb in zip(pending, batch_embs):
+            emb_for_idx[idx] = emb
+            emb_cache.set(sid, key, s, e, emb, rms_for_idx[idx], snr_for_idx[idx])
+
+    # Pass 3: accumulate weighted centroid.
+    sum_vec = None
+    wsum = 0.0
+    used = 0
+    held: Optional[np.ndarray] = None
+    for idx, (key, s, e, text, prop) in enumerate(chosen):
+        emb = emb_for_idx.get(idx)
+        if emb is None:
+            continue
+
+        # per-snippet weight
+        duration = max(float(e - s), 0.0)
+        qscale = 1.0
+        if args.weight_quality:
+            snr_db = snr_for_idx.get(idx, args.min_snr_db)
+            qscale = max(0.5, min(2.0, (snr_db - args.min_snr_db) / 10.0 + 1.0))
+        w = float(prop) * duration * qscale
+
+        emb_u = unit(np.asarray(emb, dtype=np.float32))
+        sum_vec = (emb_u * w) if sum_vec is None else (sum_vec + emb_u * w)
+        wsum += w
+        used += 1
+
+        if hold_idx is not None and idx == hold_idx:
+            held = emb_u
+
+    if used == 0:
+        if not got_audio:
+            logging.warning(f"No audio available for speaker {sid}")
+            return {"sid": sid, "status": "no_audio", "centroid": None,
+                    "weight": 0.0, "count": 0, "holdout": None}
+        logging.warning(f"All snips gated out for speaker {sid}")
+        return {"sid": sid, "status": "gated", "centroid": None,
+                "weight": 0.0, "count": 0, "holdout": None}
+
+    cen = unit(sum_vec if sum_vec is not None else np.zeros_like(emb_for_idx[list(emb_for_idx)[0]]))
+    return {"sid": sid, "status": "embedded", "centroid": cen,
+            "weight": max(wsum, 1e-6), "count": used, "holdout": held}
+
+
+def _apply_embed_result(res: Dict[str, Any],
+                        spk_centroids, spk_weights, counts, holdout_embs,
+                        no_audio_sids, gated_sids) -> None:
+    """Fold one _embed_one_speaker result into the shared output dicts."""
+    sid = res["sid"]
+    if res["status"] == "no_audio":
+        no_audio_sids.append(sid)
+        return
+    if res["status"] == "gated":
+        gated_sids.append(sid)
+        return
+    spk_centroids[sid] = res["centroid"]
+    spk_weights[sid] = res["weight"]
+    counts[sid] = res["count"]
+    holdout_embs[sid] = res["holdout"]
 
 
 # -----------------------
@@ -1443,6 +1648,7 @@ class Args:
     speaker_batch: int
     items_per_speaker: int
     max_speakers: int
+    workers: int
     # holdout
     holdout: bool
     holdout_min: float
@@ -1576,6 +1782,10 @@ def parse_args():
                 help="Upper bound of (Segment, proportion) rows fetched per speaker before local caps.")
     p.add_argument("--max-speakers", type=int, default=0,
                  help="Optional global cap of speakers processed this run (0 = no cap).")
+    p.add_argument("--workers", type=int, default=1,
+                 help="Parallel speaker-embedding processes (each embeds a subset of "
+                      "speakers with its own ECAPA model + emb-cache connection; "
+                      "scales to ~nproc on CPU since ECAPA inference is the bottleneck).")
     p.add_argument("--include-no-audio", action="store_true", default=False,
                  help="Include speakers previously marked no_audio (default skips them so resumed runs make progress).")
     p.add_argument("--state-file", type=str, default="",
@@ -1655,47 +1865,7 @@ def main():
     audio_cache: Dict[str, str] = load_audio_cache(cache_path, args.cache_refresh)
 
     def get_audio_for_key(key: str) -> Optional[Tuple[torch.Tensor, int, Path]]:
-        # 1) Try cache
-        p_str = audio_cache.get(key)
-        if p_str:
-            p = Path(p_str)
-            try:
-                if _is_audio_path(p):
-                    # decoded-waveform LRU avoids re-decoding the same file per speaker
-                    hit = _wav_cache_get(str(p))
-                    if hit is not None:
-                        wav, sr = hit
-                        return wav, sr, p
-                    wav, sr = load_audio(p, DEFAULT_SR)
-                    _wav_cache_put(str(p), wav, sr)
-                    return wav, sr, p
-                else:
-                    # cached path is not audio; drop it
-                    audio_cache.pop(key, None)
-            except Exception as ex:
-                logging.warning(f"Cached audio failed for key={key}: {p} ({ex}); removing from cache.")
-                audio_cache.pop(key, None)
-
-        # 2) Discover afresh
-        p = discover_audio_for_key(key)
-        if not p or not p.exists():
-            logging.warning(f"Audio missing for key={key}")
-            return None
-
-        # Validate + load (decoded-waveform LRU)
-        try:
-            hit = _wav_cache_get(str(p))
-            if hit is not None:
-                wav, sr = hit
-            else:
-                wav, sr = load_audio(p, DEFAULT_SR)
-                _wav_cache_put(str(p), wav, sr)
-        except Exception as ex:
-            logging.warning(f"Discovered audio failed for key={key}: {p} ({ex})")
-            return None
-
-        audio_cache[key] = str(p)
-        return wav, sr, p
+        return _get_audio_for_key(key, audio_cache)
 
 
     # per-snippet embedding cache
@@ -1723,107 +1893,30 @@ def main():
     logging.info("Selecting, gating, clipping & embedding per Speaker…")
     no_audio_sids: List[str] = []  # attempted but no usable audio -> mark to skip on resume
     gated_sids: List[str] = []     # attempted, audio existed, but every snip gated out
-    for sid, meta in speakers.items():
-        items = meta["items"]  # (key, start, end, text, prop)
-        items.sort(key=lambda x: (x[4], x[2]-x[1]), reverse=True)
 
-        # basic text filter to avoid non-speech
-        items_text = [it for it in items if sum(c.isalpha() for c in (it[3] or "")) >= TEXT_ALPHA_MIN] or items
-
-        # cap per file and max total
-        chosen = cap_snips_per_file(items_text, args.max_per_file, args.max_snips, rng)
-        if not chosen:
-            logging.warning(f"No eligible segments for speaker {sid}")
-            no_audio_sids.append(sid)
-            continue
-
-        # hold-out candidate
-        hold_idx = (len(chosen) - 1) if (args.holdout and len(chosen) >= 2) else None
-
-        # Pass 1: clip + gate each chosen snip. Cache hits are resolved inline;
-        # misses are queued for ONE batched ECAPA forward pass below.
-        emb_for_idx: Dict[int, np.ndarray] = {}
-        pending: List[Tuple[int, torch.Tensor, str, float, float]] = []  # (idx, snip, key, s, e)
-        snr_for_idx: Dict[int, float] = {}
-        rms_for_idx: Dict[int, float] = {}
-        got_audio = False
-        for idx, (key, s, e, text, prop) in enumerate(chosen):
-            pack = get_audio_for_key(key)
-            if pack is None:
-                continue
-            got_audio = True
-            wav, sr, _ = pack
-            snip = fixed_snip(wav, sr, s, e, args.pad, args.snip_len)
-            if snip.numel() == 0:
-                continue
-
-            # gating
-            rms, snr_db = rms_and_snr_db(snip)
-            if rms < args.min_rms or snr_db < args.min_snr_db:
-                continue
-            snr_for_idx[idx] = snr_db
-            rms_for_idx[idx] = rms
-
-            if out_dir:
-                safe_key = re.sub(r"[^A-Za-z0-9_-]", "", key)
-                name = f"{sid}_{safe_key}_{s:.2f}-{e:.2f}_p{prop:.2f}_r{rms:.3f}_snr{snr_db:.1f}{'_hold' if hold_idx==idx else ''}"
-                sf.write(str(out_dir / f"{name}.wav"), snip.cpu().numpy(), sr, subtype="PCM_16")
-
-            cached = emb_cache.get(sid, key, s, e)
-            if cached is None:
-                pending.append((idx, snip, key, s, e))
-            else:
-                emb_for_idx[idx], _, _ = cached
-
-        # Pass 2: embed all cache misses in a single model forward pass.
-        if pending:
-            batch_embs = embedder.embed_batch([p[1] for p in pending], DEFAULT_SR)
-            for (idx, _snip, key, s, e), emb in zip(pending, batch_embs):
-                emb_for_idx[idx] = emb
-                emb_cache.set(sid, key, s, e, emb, rms_for_idx[idx], snr_for_idx[idx])
-
-        # Pass 3: accumulate weighted centroid.
-        sum_vec = None
-        wsum = 0.0
-        used = 0
-        held: Optional[np.ndarray] = None
-        for idx, (key, s, e, text, prop) in enumerate(chosen):
-            emb = emb_for_idx.get(idx)
-            if emb is None:
-                continue
-
-            # per-snippet weight
-            duration = max(float(e - s), 0.0)
-            qscale = 1.0
-            if args.weight_quality:
-                snr_db = snr_for_idx.get(idx, args.min_snr_db)
-                qscale = max(0.5, min(2.0, (snr_db - args.min_snr_db) / 10.0 + 1.0))
-            w = float(prop) * duration * qscale
-
-            emb_u = unit(np.asarray(emb, dtype=np.float32))
-            sum_vec = (emb_u * w) if sum_vec is None else (sum_vec + emb_u * w)
-            wsum += w
-            used += 1
-
-            if hold_idx is not None and idx == hold_idx:
-                held = emb_u
-
-        if used == 0:
-            if not got_audio:
-                # No audio file could be located for any segment of this speaker;
-                # nothing a future run (even more-aggressive) can do -> skip on resume.
-                logging.warning(f"No audio available for speaker {sid}")
-                no_audio_sids.append(sid)
-            else:
-                logging.warning(f"All snips gated out for speaker {sid}")
-                gated_sids.append(sid)
-            continue
-
-        cen = unit(sum_vec if sum_vec is not None else np.zeros_like(emb_for_idx[list(emb_for_idx)[0]]))
-        spk_centroids[sid] = cen
-        spk_weights[sid] = max(wsum, 1e-6)
-        counts[sid] = used
-        holdout_embs[sid] = held
+    if args.workers > 1 and len(speakers) > 1:
+        # Parallel path: a pool of `workers` processes each embeds a subset of
+        # speakers with its own ECAPA model. ECAPA inference is CPU-bound and
+        # per-snip cost is flat w.r.t. batch size, so N processes ≈ Nx snips/s.
+        import multiprocessing as _mp
+        import torch as _torch
+        _torch.set_num_threads(1)  # each worker sets its own; avoid oversubscribe
+        ctx = _mp.get_context("fork")
+        logging.info(f"Embedding {len(speakers)} speakers across {args.workers} workers…")
+        with ctx.Pool(processes=args.workers,
+                      initializer=_worker_init,
+                      initargs=(args, audio_cache, model_name, args.backend, out_dir,
+                                max(1, (os.cpu_count() or 1) // args.workers))) as pool:
+            results = pool.imap_unordered(_worker_embed, list(speakers.items()), chunksize=8)
+            for res in results:
+                _apply_embed_result(res, spk_centroids, spk_weights, counts,
+                                    holdout_embs, no_audio_sids, gated_sids)
+    else:
+        for sid, meta in speakers.items():
+            res = _embed_one_speaker(sid, meta, args, audio_cache, emb_cache,
+                                     embedder, rng, out_dir)
+            _apply_embed_result(res, spk_centroids, spk_weights, counts,
+                                holdout_embs, no_audio_sids, gated_sids)
 
     if cache_path:
         save_audio_cache(cache_path, audio_cache)
