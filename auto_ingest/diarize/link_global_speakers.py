@@ -1589,6 +1589,24 @@ def parse_args():
     return Args(**vars(p.parse_args()))
 
 
+def _persist_state(state_file: str, done: Set[str]) -> None:
+    """Atomically persist processed speaker ids so chunked runs resume correctly.
+
+    The state file only records speakers that are truly finished with: a speaker
+    is either linked to a GlobalSpeaker (skip_already_linked covers it) or was
+    attempted and determined un-linkable (no audio / all snips gated out). We
+    never persist speakers merely because they were *fetched*, otherwise a crash
+    mid-processing would permanently skip the never-processed remainder.
+    """
+    if not state_file:
+        return
+    tmp = f"{state_file}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(sorted(done), fh)
+    os.replace(tmp, state_file)
+    logging.info(f"Saved {len(done)} processed speakers to {state_file}.")
+
+
 # -----------------------
 # Main
 # -----------------------
@@ -1597,7 +1615,7 @@ def main():
     drv = driver()
     ensure_schema(drv)
 
-    # Persistent state: speakers already fetched in prior (chunked) runs are
+    # Persistent state: speakers already processed in prior (chunked) runs are
     # excluded so each run advances monotonically through never-seen speakers.
     done: Set[str] = set()
     if args.state_file:
@@ -1625,12 +1643,6 @@ def main():
         exclude_non_speech=args.exclude_non_speech,
     )
     logging.info(f"Found {len(speakers)} speakers with qualifying items.")
-
-    if args.state_file and speakers:
-        done.update(speakers.keys())
-        with open(args.state_file, "w") as fh:
-            json.dump(sorted(done), fh)
-        logging.info(f"Saved {len(done)} processed speakers to {args.state_file}.")
 
     # audio index (one-time walk; O(1) per-key lookup) — built before the embed loop
     index_path = Path(args.audio_index) if args.audio_index else None
@@ -1710,6 +1722,7 @@ def main():
 
     logging.info("Selecting, gating, clipping & embedding per Speaker…")
     no_audio_sids: List[str] = []  # attempted but no usable audio -> mark to skip on resume
+    gated_sids: List[str] = []     # attempted, audio existed, but every snip gated out
     for sid, meta in speakers.items():
         items = meta["items"]  # (key, start, end, text, prop)
         items.sort(key=lambda x: (x[4], x[2]-x[1]), reverse=True)
@@ -1803,6 +1816,7 @@ def main():
                 no_audio_sids.append(sid)
             else:
                 logging.warning(f"All snips gated out for speaker {sid}")
+                gated_sids.append(sid)
             continue
 
         cen = unit(sum_vec if sum_vec is not None else np.zeros_like(emb_for_idx[list(emb_for_idx)[0]]))
@@ -1822,6 +1836,13 @@ def main():
     if no_audio_sids:
         _mark_no_audio(drv, no_audio_sids)
         logging.info(f"Marked {len(no_audio_sids)} speakers as no_audio (skipped on resume).")
+    # Persist terminal outcomes immediately: no-audio and all-snips-gated speakers
+    # are permanently done regardless of what happens later (crash-safe: never
+    # persist speakers that were only fetched, never processed).
+    if args.state_file:
+        done.update(no_audio_sids)
+        done.update(gated_sids)
+        _persist_state(args.state_file, done)
 
     if not spk_centroids:
         logging.warning("No centroids built; nothing to cluster.")
@@ -2021,6 +2042,13 @@ def main():
         promote_by_evidence(drv, min_weight=args.promote_min_weight, dry_run=args.dry_run)
         logging.info("Evidence-based promotion pass complete.")
 
+    # All embedded speakers have now been clustered/linked (or intentionally left
+    # unlinked). Record them in the state file so a later chunked run moves past
+    # them; without this, a run that fetched them but never finished would leave
+    # the state file empty and re-process them forever.
+    if args.state_file and spk_centroids:
+        done.update(spk_centroids.keys())
+        _persist_state(args.state_file, done)
 
     logging.info("Done.")
 
