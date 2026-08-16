@@ -46,3 +46,7 @@ speed.png
 shorts_out_smoke/
 *__tmp__TEMP_MPY*
 .venv-tts/
+
+# re-embed resume checkpoints + durable outbox (runtime state, not source)
+.reembed_*.cursor
+.auto_ingest_outbox.sqlite
