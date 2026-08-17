@@ -195,8 +195,15 @@ def music_overlap_fraction(segments: List[Tuple[float,float]], ustart: Optional[
     return max(0.0, min(1.0, inter / dur))
 
 # --------- Text scoring ----------
+ZS_BATCH = 32  # zero-shot texts per pipeline call (CPU throughput sweet spot)
+
 def build_zs(model_dir: str):
-    return pipeline("zero-shot-classification", model=model_dir, device=-1)
+    try:
+        import torch
+        dev = "cuda" if torch.cuda.is_available() else -1
+    except Exception:
+        dev = -1
+    return pipeline("zero-shot-classification", model=model_dir, device=dev, batch_size=ZS_BATCH)
 
 def text_lyrics_prob(zs, text: str) -> float:
     t = (text or "").strip()
@@ -206,6 +213,28 @@ def text_lyrics_prob(zs, text: str) -> float:
     labs = out["labels"]; scores = out["scores"]
     d = dict(zip(labs, scores))
     return float(d.get("song lyrics", 0.0))
+
+def text_lyrics_prob_batch(zs, texts: List[str]) -> List[float]:
+    """Batched zero-shot scoring. HF pipeline preserves input order in its
+    list output, so one call per N texts is far faster than per-text on CPU.
+    Empty/whitespace texts are returned as 0.0 (zero-shot rejects blanks)."""
+    probs = [0.0] * len(texts)
+    idxs = [i for i, t in enumerate(texts) if (t or "").strip()]
+    if not idxs:
+        return probs
+    batch = [texts[i] for i in idxs]
+    try:
+        results = zs(batch, candidate_labels=CANDIDATES, multi_label=False)
+        for slot, i in enumerate(idxs):
+            res = results[slot]
+            d = dict(zip(res["labels"], res["scores"]))
+            probs[i] = float(d.get("song lyrics", 0.0))
+    except Exception as e:
+        # Fall back to per-item scoring if the batch call rejects the input.
+        logging.warning(f"zero-shot batch call failed ({e!r}); falling back to per-item")
+        for i in idxs:
+            probs[i] = text_lyrics_prob(zs, texts[i])
+    return probs
 
 def rules_features_prob(text: str) -> Tuple[float, Dict[str,float]]:
     t = (text or "").lower().strip()
@@ -297,41 +326,45 @@ def main():
                 for k in keys:
                     seg_cache[k] = _load_segments_from_sidecar(k)
 
-            for u in tqdm(utts, desc="classify"):
-                # audio overlap
-                segs = seg_cache.get(u.audio_key or "", [])
-                overlap = music_overlap_fraction(segs, u.start, u.end)
-                # map overlap -> audio probability (simple identity works well)
-                audio_prob = overlap
+            # Batch the zero-shot text calls: the model is the bottleneck and HF's
+            # pipeline accepts a list of texts (output follows input order), so one
+            # call per ZS_BATCH texts is far faster than one call per text on CPU.
+            for i in range(0, len(utts), ZS_BATCH):
+                chunk = utts[i:i + ZS_BATCH]
+                text_probs = text_lyrics_prob_batch(zs, [u.text for u in chunk])
+                for u, text_prob in zip(tqdm(chunk, desc="classify"), text_probs):
+                    # audio overlap
+                    segs = seg_cache.get(u.audio_key or "", [])
+                    overlap = music_overlap_fraction(segs, u.start, u.end)
+                    # map overlap -> audio probability (simple identity works well)
+                    audio_prob = overlap
 
-                # text
-                text_prob = text_lyrics_prob(zs, u.text)
-                rules_prob, rules_vals = rules_features_prob(u.text)
+                    rules_prob, rules_vals = rules_features_prob(u.text)
 
-                score, is_lyrics, needs_review = ensemble(audio_prob, text_prob, rules_prob)
+                    score, is_lyrics, needs_review = ensemble(audio_prob, text_prob, rules_prob)
 
-                evidence = {
-                    "audio_prob": audio_prob,
-                    "music_overlap": overlap,
-                    "text_prob": text_prob,
-                    "rules_prob": rules_prob,
-                    "rules": rules_vals,
-                    "weights": {"audio":W_AUDIO,"text":W_TEXT,"rules":W_RULES},
-                    "model": os.path.basename(args.model.rstrip("/")),
-                    "segments_source": args.segments_source
-                }
-                payload = {
-                    "is_lyrics": bool(is_lyrics),
-                    "lyrics_score": float(score),
-                    "lyrics_evidence": evidence,
-                    "music_overlap": float(overlap),
-                    "review_needed": bool(needs_review)
-                }
-                sess.execute_write(_write_back, u.uid, payload)
-                # Flag overlapping Segment nodes as non-speech so the global linker
-                # excludes them from ECAPA/pyannote embedding + linking.
-                if is_lyrics or overlap >= 0.5:
-                    sess.execute_write(_mark_overlapping_segments, u.uid, "music_or_media")
+                    evidence = {
+                        "audio_prob": audio_prob,
+                        "music_overlap": overlap,
+                        "text_prob": text_prob,
+                        "rules_prob": rules_prob,
+                        "rules": rules_vals,
+                        "weights": {"audio":W_AUDIO,"text":W_TEXT,"rules":W_RULES},
+                        "model": os.path.basename(args.model.rstrip("/")),
+                        "segments_source": args.segments_source
+                    }
+                    payload = {
+                        "is_lyrics": bool(is_lyrics),
+                        "lyrics_score": float(score),
+                        "lyrics_evidence": evidence,
+                        "music_overlap": float(overlap),
+                        "review_needed": bool(needs_review)
+                    }
+                    sess.execute_write(_write_back, u.uid, payload)
+                    # Flag overlapping Segment nodes as non-speech so the global linker
+                    # excludes them from ECAPA/pyannote embedding + linking.
+                    if is_lyrics or overlap >= 0.5:
+                        sess.execute_write(_mark_overlapping_segments, u.uid, "music_or_media")
 
             if not args.all:
                 break

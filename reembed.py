@@ -54,6 +54,17 @@ SCHEMA: Dict[str, str] = {
     "Segment": "text",
     "Transcription": "text",
     "Utterance": "text",
+    "Chunk": "text",
+    "Summary": "text",
+    # Entity / taxonomy nodes store text in non-`text` properties
+    "Entity": "text",
+    "Concept": "name",
+    "Topic": "name",
+    "Keyword": "name",
+    "KgNode": "title",
+    "Note": "text",
+    "Speaker": "label",
+    "GlobalSpeaker": "display_label",
 }
 
 
@@ -119,12 +130,12 @@ def _cursor_path(label: str, prop: str) -> str:
     return f".reembed_{label}_{prop}.cursor"
 
 
-def page_rows(sess, label: str, prop: str, start_id: int, limit: int):
+def page_rows(sess, label: str, prop: str, text_prop: str, start_id: int, limit: int):
     """Resumable page: nodes still missing `prop`, ordered by internal id(n)."""
     rows = sess.run(
         f"MATCH (n:{label}) "
-        f"WHERE n.text IS NOT NULL AND n.{prop} IS NULL AND id(n) > $start "
-        f"RETURN id(n) AS nid, n.text AS text "
+        f"WHERE n.{text_prop} IS NOT NULL AND n.{prop} IS NULL AND id(n) > $start "
+        f"RETURN id(n) AS nid, n.{text_prop} AS text "
         f"ORDER BY id(n) ASC LIMIT $lim",
         start=start_id, lim=limit,
     )
@@ -175,8 +186,8 @@ def run(label: str, model_name: str, prop: str, batch_size: int, resume: bool,
             passes = 0
             while True:
                 passes += 1
-                embedded = _embed_pass(sess, label, model, prop, batch_size,
-                                       start_id=0, log_every=0)
+                embedded = _embed_pass(sess, label, model, prop, text_prop, batch_size,
+                                        start_id=0, log_every=0)
                 log.info("%s: catch-up pass %d embedded %d stragglers",
                          label, passes, embedded)
                 if embedded == 0:
@@ -197,21 +208,24 @@ def run(label: str, model_name: str, prop: str, batch_size: int, resume: bool,
             start_id = int(open(cursor_file).read().strip())
             log.info("resuming %s from id > %d (cursor file)", label, start_id)
 
-        done = _embed_pass(sess, label, model, prop, batch_size, start_id,
-                           cursor_file=cursor_file if resume else None,
-                           target=need)
-        log.info("%s complete: %d vectors written to .%s", label, done, prop)
+        done = _embed_pass(sess, label, model, prop, text_prop, batch_size, start_id,
+                            cursor_file=cursor_file if resume else None,
+                            target=need)
+        remaining = max(need - done, 0)
+        log.info("%s complete: %d vectors written to .%s (%d still missing)",
+                 label, done, prop, remaining)
     driver.close()
+    return remaining
 
 
-def _embed_pass(sess, label: str, model, prop: str, batch_size: int,
+def _embed_pass(sess, label: str, model, prop: str, text_prop: str, batch_size: int,
                 start_id: int, cursor_file: str = None, target: int = 0,
                 log_every: int = 1) -> int:
     """Embed every node still missing `prop` above `start_id`. Returns count."""
     done = 0
     t0 = time.perf_counter()
     while True:
-        rows = page_rows(sess, label, prop, start_id, batch_size)
+        rows = page_rows(sess, label, prop, text_prop, start_id, batch_size)
         if not rows:
             break
         texts = [t or "" for _, t in rows]

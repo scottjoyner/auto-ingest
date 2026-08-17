@@ -210,10 +210,19 @@ def _lmstudio_health() -> Dict[str, Any]:
         return {"reachable": False, "error": str(e)[:120]}
 
 
+_STATUS_CACHE: Dict[str, Any] = {"ts": 0.0, "val": None}
+_STATUS_TTL = 30.0
+
+
 def system_status() -> Dict[str, Any]:
     """One-stop monitoring payload: graph counts, coverage, worker processes,
-    linker progress, and LLM health."""
+    linker progress, and LLM health. Cached for a few seconds: each call runs
+    several Neo4j count-scans + /proc traversals, which are expensive under load
+    and would blow past clients' read timeouts."""
+    cached = _STATUS_CACHE
     now = time.time()
+    if cached["val"] is not None and (now - cached["ts"]) < _STATUS_TTL:
+        return cached["val"]
     out: Dict[str, Any] = {
         "time": now,
         "counts": {},
@@ -265,6 +274,8 @@ def system_status() -> Dict[str, Any]:
 
     out["coverage"] = {"active_prop": EMBED_PROP,
                        "coverage": embedding_coverage(EMBED_PROP)}
+    _STATUS_CACHE["ts"] = now
+    _STATUS_CACHE["val"] = out
     return out
 
 

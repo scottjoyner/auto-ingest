@@ -50,3 +50,10 @@ shorts_out_smoke/
 # re-embed resume checkpoints + durable outbox (runtime state, not source)
 .reembed_*.cursor
 .auto_ingest_outbox.sqlite
+
+# embed-cache WAL/shm siblings (runtime state, not source)
+emb_cache.sqlite-shm
+emb_cache.sqlite-wal
+
+# gpu speaker-linker runtime state
+linker_state_gpu.json

@@ -68,8 +68,9 @@ SUMMARY_FAILOPEN = os.getenv("SUMMARY_FAILOPEN", "copy")  # copy | skip
 SUMMARIZE_INSTR = """You are given a conversation transcript composed of time-ordered items.
 Rules:
 - Treat SEGMENT items as authoritative.
+- SEGMENT items may carry bracket tags from ASR metadata: [spk:X] = speaker label, [m:0.X] = music overlap strength (0..1; do NOT treat music-overlap regions as factual conversation), [lyrics:0.X] = singing/lyrics present (do not summarize lyrics as spoken statements), [lowconf] = low-confidence ASR region (use only if corroborated by surrounding SEGMENTs).
 - Items marked LOW_CONF (from UTTERANCE) are lower confidence; only use them if consistent with SEGMENT content.
-- Output must be faithful, concise, and specific. Avoid speculation.
+- Output must be faithful, concise, and specific. Avoid speculation and do not fabricate details from music/lyrics/low-confidence regions.
 
 Return ONLY a JSON object with:
 {
@@ -103,7 +104,7 @@ Guidelines:
 - Prefer MEDIUM unless urgency suggests HIGH.
 - Include a due date only if stated or clearly implied.
 - Confidence in [0,1].
-- IMPORTANT: ACCEPTANCE IS REQUIRED WHENEVER POSSIBLE. Prefer outputs under artifacts/{TASK_ID}/output.txt to enable verification.
+- IMPORTANT: ACCEPTANCE IS REQUIRED WHENEVER POSSIBLE. ALWAYS use acceptance type "file_exists" with args.path = "artifacts/{TASK_ID}/output.txt" (the executor writes that file). Do NOT invent URLs or other file paths.
 Return ONLY JSON (no prose)."""
 
 
@@ -130,7 +131,7 @@ def fetch_one(session, trans_id: Optional[str], latest: bool) -> Optional[Dict[s
         MATCH (t:Transcription {id:$id})
         OPTIONAL MATCH (t)-[:HAS_SEGMENT]->(s:Segment)
         WITH t, s ORDER BY coalesce(s.start, s.idx, 0)
-        WITH t, collect({id:s.id, start:coalesce(s.start,0.0), end:coalesce(s.end,0.0), text:s.text, type:'SEGMENT', low_conf:false}) AS segs
+        WITH t, collect({id:s.id, start:coalesce(s.start,0.0), end:coalesce(s.end,0.0), text:s.text, type:'SEGMENT', low_conf:false, music_overlap:coalesce(s.music_overlap,0.0), lyrics_score:coalesce(s.lyrics_score,0.0), is_lyrics:s.is_lyrics, review_needed:coalesce(s.review_needed,false), speaker_label:s.speaker_label}) AS segs
         OPTIONAL MATCH (t)-[:HAS_UTTERANCE]->(u)
         WITH t, segs, u ORDER BY coalesce(u.start, u.idx, 0)
         RETURN t, segs, collect({id:u.id, start:coalesce(u.start,0.0), end:coalesce(u.end,0.0), text:u.text, type:'UTTERANCE', low_conf:true}) AS utts
@@ -143,7 +144,7 @@ def fetch_one(session, trans_id: Optional[str], latest: bool) -> Optional[Dict[s
         LIMIT 1
         OPTIONAL MATCH (t)-[:HAS_SEGMENT]->(s:Segment)
         WITH t, s ORDER BY coalesce(s.start, s.idx, 0)
-        WITH t, collect({id:s.id, start:coalesce(s.start,0.0), end:coalesce(s.end,0.0), text:s.text, type:'SEGMENT', low_conf:false}) AS segs
+        WITH t, collect({id:s.id, start:coalesce(s.start,0.0), end:coalesce(s.end,0.0), text:s.text, type:'SEGMENT', low_conf:false, music_overlap:coalesce(s.music_overlap,0.0), lyrics_score:coalesce(s.lyrics_score,0.0), is_lyrics:s.is_lyrics, review_needed:coalesce(s.review_needed,false), speaker_label:s.speaker_label}) AS segs
         OPTIONAL MATCH (t)-[:HAS_UTTERANCE]->(u)
         WITH t, segs, u ORDER BY coalesce(u.start, u.idx, 0)
         RETURN t, segs, collect({id:u.id, start:coalesce(u.start,0.0), end:coalesce(u.end,0.0), text:u.text, type:'UTTERANCE', low_conf:true}) AS utts
@@ -197,7 +198,19 @@ def build_transcript(segments: List[Dict[str,Any]], utterances: List[Dict[str,An
         if it["type"] == "UTTERANCE":
             lines.append(f"[LOW_CONF] {txt}")
         else:
-            lines.append(txt)
+            prefix = ""
+            spk = it.get("speaker_label")
+            if spk:
+                prefix += f"[spk:{spk}]"
+            mo = float(it.get("music_overlap") or 0.0)
+            if mo > 0.5:
+                prefix += f"[m:{round(mo,2)}]"
+            ls = float(it.get("lyrics_score") or 0.0)
+            if ls > 0.3:
+                prefix += f"[lyrics:{round(ls,2)}]"
+            if it.get("review_needed"):
+                prefix += "[lowconf]"
+            lines.append(f"{prefix} {txt}" if prefix else txt)
     return "\n".join(lines)
 
 # =========================
@@ -691,7 +704,7 @@ def fetch_segments_for(session, tnode: Dict[str, Any]) -> Dict[str, Any]:
     MATCH (t:Transcription {id:$id})
     OPTIONAL MATCH (t)-[:HAS_SEGMENT]->(s:Segment)
     WITH t, s ORDER BY coalesce(s.start, s.idx, 0)
-    WITH t, collect({id:s.id, start:coalesce(s.start,0.0), end:coalesce(s.end,0.0), text:s.text, type:'SEGMENT', low_conf:false}) AS segs
+    WITH t, collect({id:s.id, start:coalesce(s.start,0.0), end:coalesce(s.end,0.0), text:s.text, type:'SEGMENT', low_conf:false, music_overlap:coalesce(s.music_overlap,0.0), lyrics_score:coalesce(s.lyrics_score,0.0), is_lyrics:s.is_lyrics, review_needed:coalesce(s.review_needed,false), speaker_label:s.speaker_label}) AS segs
     OPTIONAL MATCH (t)-[:HAS_UTTERANCE]->(u)
     WITH t, segs, u ORDER BY coalesce(u.start, u.idx, 0)
     RETURN t, segs, collect({id:u.id, start:coalesce(u.start,0.0), end:coalesce(u.end,0.0), text:u.text, type:'UTTERANCE', low_conf:true}) AS utts

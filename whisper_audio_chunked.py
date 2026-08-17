@@ -27,6 +27,7 @@ Example:
 import argparse
 import csv
 import json
+import inspect
 import logging
 import os
 import re
@@ -239,11 +240,11 @@ def cut_chunk_to(
 
 # -------------------- Whisper --------------------
 
-def load_model(model_name: str, device: str, backend: str, compute_type: str):
+def load_model(model_name: str, device: str, backend: str, compute_type: str, cpu_threads: int = 0):
     if backend in ("auto", "faster") and FasterWhisperModel is not None:
         try:
             LOG.info("Loading faster-whisper model '%s' on '%s' compute_type=%s", model_name, device, compute_type)
-            return ("faster", FasterWhisperModel(model_name, device=device, compute_type=compute_type))
+            return ("faster", FasterWhisperModel(model_name, device=device, compute_type=compute_type, cpu_threads=cpu_threads))
         except Exception as e:
             if backend == "faster":
                 LOG.error("Failed to load faster-whisper model '%s' on '%s': %s", model_name, device, e)
@@ -263,17 +264,20 @@ def transcribe_file(
     language: Optional[str],
     temperature: float,
     beam_size: int,
+    batch_size: int = 1,
 ) -> dict:
     backend, actual_model = model
     if backend == "faster":
-        segments_iter, info = actual_model.transcribe(
-            str(audio_path),
+        _transcribe_kwargs = dict(
             language=language,
             temperature=temperature,
             beam_size=beam_size,
             word_timestamps=True,
             vad_filter=True,
         )
+        if "batch_size" in inspect.signature(actual_model.transcribe).parameters:
+            _transcribe_kwargs["batch_size"] = batch_size
+        segments_iter, info = actual_model.transcribe(str(audio_path), **_transcribe_kwargs)
         segments = []
         texts = []
         for i, seg in enumerate(segments_iter):
@@ -468,6 +472,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="Beam size for decoding.")
     p.add_argument("--temperature", type=float, default=0.0,
                    help="Decoding temperature.")
+    p.add_argument("--batch-size", type=int, default=1,
+                   help="faster-whisper segment batch size (CPU: 8-32; higher = faster, more RAM).")
+    p.add_argument("--cpu-threads", type=int, default=0,
+                   help="CTranslate2 CPU threads (0 = all available cores).")
 
     # Skipping and overwrite controls
     p.add_argument("--overwrite", action="store_true",
@@ -578,7 +586,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     # Load model only if we have work
     compute_type = args.compute_type or ("float16" if device == "cuda" else "int8")
-    model = load_model(args.model, device, args.backend, compute_type)
+    model = load_model(args.model, device, args.backend, compute_type, args.cpu_threads)
     total_errors = 0
 
     for audio_path in worklist:
@@ -610,6 +618,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                     language=args.language,
                     temperature=args.temperature,
                     beam_size=args.beam_size,
+                    batch_size=args.batch_size,
                 )
                 if args.overwrite or not _is_up_to_date(audio_path, merged_dump, merged_csv):
                     save_raw_result(res, merged_dump)
@@ -693,6 +702,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                     language=args.language,
                     temperature=args.temperature,
                     beam_size=args.beam_size,
+                    batch_size=args.batch_size,
                 )
                 save_raw_result(res, dump_path)
                 save_transcription_segments_to_csv(res, csv_path)
