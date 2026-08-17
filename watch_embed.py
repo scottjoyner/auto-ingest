@@ -37,6 +37,7 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--labels", nargs="*", default=DEFAULT_LABELS)
     ap.add_argument("--once", action="store_true", help="Run one sweep then exit (for wrapper loops).")
+    ap.add_argument("--stale", action="store_true", help="Pass --stale to reembed.py (re-embed changed-text nodes; needs embed_hash backfill first).")
     args = ap.parse_args()
 
     if not REEMBED.exists():
@@ -49,8 +50,10 @@ def main() -> int:
             cmd = [
                 VENV_PY, str(REEMBED), lbl,
                 "--model", args.model, "--prop", args.prop,
-                "--batch-size", str(args.batch_size), "--resume",
+                "--batch-size", args.batch_size, "--resume",
             ]
+            if args.stale:
+                cmd.append("--stale")
             print(f"[watch_embed] {time.strftime('%H:%M:%S')} sweep {lbl}", flush=True)
             subprocess.run(cmd, check=False)
         dt = int(time.time() - t0)

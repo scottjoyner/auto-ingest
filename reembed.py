@@ -30,6 +30,16 @@ import logging
 import os
 import time
 from typing import Dict, List, Tuple
+import hashlib
+
+# Property that stores a sha1 of the source text, so --stale can detect nodes
+# whose text changed after they were embedded (re-embed only those).
+HASH_PROP = "embed_hash"
+
+
+def _text_hash(text: str) -> str:
+    return hashlib.sha1((text or "").encode("utf-8")).hexdigest()
+
 
 # Cap CPU threads so the re-embed doesn't starve the still-running speakers.py
 # sweep on deathstar. Override with TORCH_THREADS / OMP_NUM_THREADS.
@@ -116,34 +126,67 @@ def ensure_vector_index(sess, label: str, prop: str, dim: int, drop_first: bool 
         time.sleep(1.0)
 
 
-def count_needing(sess, label: str, text_prop: str, prop: str) -> Tuple[int, int]:
+def count_needing(sess, label: str, text_prop: str, prop: str, stale: bool = False) -> Tuple[int, int]:
     total = sess.run(
         f"MATCH (n:{label}) WHERE n.{text_prop} IS NOT NULL RETURN count(n)"
     ).single().values()[0]
-    done = sess.run(
-        f"MATCH (n:{label}) WHERE n.{text_prop} IS NOT NULL AND n.{prop} IS NOT NULL RETURN count(n)"
-    ).single().values()[0]
-    return total - done, total
+    if not stale:
+        done = sess.run(
+            f"MATCH (n:{label}) WHERE n.{text_prop} IS NOT NULL AND n.{prop} IS NOT NULL RETURN count(n)"
+        ).single().values()[0]
+        return total - done, total
+    # --stale: scan and compare stored hashes to current text (full scan, read-only).
+    need = 0
+    start = -1
+    while True:
+        rows = sess.run(
+            f"MATCH (n:{label}) WHERE n.{text_prop} IS NOT NULL AND id(n) > $start "
+            f"RETURN id(n) AS nid, n.{text_prop} AS text, n.{prop} AS vec, n.{HASH_PROP} AS h "
+            f"ORDER BY id(n) ASC LIMIT $lim",
+            start=start, lim=2000,
+        ).data()
+        if not rows:
+            break
+        start = rows[-1]["nid"]
+        for r in rows:
+            if r["vec"] is None or r["h"] != _text_hash(r["text"]):
+                need += 1
+    return need, total
 
 
 def _cursor_path(label: str, prop: str) -> str:
     return f".reembed_{label}_{prop}.cursor"
 
 
-def page_rows(sess, label: str, prop: str, text_prop: str, start_id: int, limit: int):
-    """Resumable page: nodes still missing `prop`, ordered by internal id(n)."""
+def page_rows(sess, label: str, prop: str, text_prop: str, start_id: int, limit: int, stale: bool = False):
+    """Resumable page of nodes needing `prop` (missing, or --stale: text changed)."""
+    if not stale:
+        rows = sess.run(
+            f"MATCH (n:{label}) "
+            f"WHERE n.{text_prop} IS NOT NULL AND n.{prop} IS NULL AND id(n) > $start "
+            f"RETURN id(n) AS nid, n.{text_prop} AS text "
+            f"ORDER BY id(n) ASC LIMIT $lim",
+            start=start_id, lim=limit,
+        ).data()
+        return [(r["nid"], r["text"]) for r in rows]
+    # --stale: fetch nodes with text, filter out ones whose hash still matches.
     rows = sess.run(
         f"MATCH (n:{label}) "
-        f"WHERE n.{text_prop} IS NOT NULL AND n.{prop} IS NULL AND id(n) > $start "
-        f"RETURN id(n) AS nid, n.{text_prop} AS text "
+        f"WHERE n.{text_prop} IS NOT NULL AND id(n) > $start "
+        f"RETURN id(n) AS nid, n.{text_prop} AS text, n.{prop} AS vec, n.{HASH_PROP} AS h "
         f"ORDER BY id(n) ASC LIMIT $lim",
         start=start_id, lim=limit,
-    )
-    return [(r["nid"], r["text"]) for r in rows]
+    ).data()
+    out = []
+    for r in rows:
+        if r["vec"] is None or r["h"] != _text_hash(r["text"]):
+            out.append((r["nid"], r["text"]))
+    return out
 
 
 def run(label: str, model_name: str, prop: str, batch_size: int, resume: bool,
-        verify_only: bool = False, catchup: bool = False, engine: str = "torch"):
+        verify_only: bool = False, catchup: bool = False, engine: str = "torch",
+        stale: bool = False, backfill_hash: bool = False):
     cfg = get_neo4j_config()
     from neo4j import GraphDatabase
 
@@ -156,23 +199,36 @@ def run(label: str, model_name: str, prop: str, batch_size: int, resume: bool,
         notifications_disabled_classifications=["DEPRECATION"],
     )
     text_prop = SCHEMA[label]
-    model = load_embed_model(model_name, engine=engine)
-
     with driver.session() as sess:
-        if not verify_only:
-            log.info(
-                "reembed %s  model=%s  prop=%s  dim=%d  device=%s  rocm=%s  gpu_target=%s  engine=%s",
-                label, model_name, prop, model.dim, model.device, has_rocm(),
-                (gpu_target_machine() or {}).get("name"), engine,
-            )
-
-        need, total = count_needing(sess, label, text_prop, prop)
         if verify_only:
+            need, total = count_needing(sess, label, text_prop, prop, stale=stale)
             log.info("%s: %d/%d nodes still missing %s vector%s",
                      label, need, total, prop,
                      "  [OK]" if need == 0 else "  [MISSING]")
             driver.close()
             return need
+
+        if backfill_hash:
+            n = _backfill_hash(sess, label, text_prop, prop, batch_size)
+            log.info("%s: backfilled %s on %d nodes (no re-embed)", label, HASH_PROP, n)
+            driver.close()
+            return 0
+
+        # Short-circuit: only load the (large) model if something actually needs
+        # embedding. Saves a full model load per label on every watcher sweep.
+        need, total = count_needing(sess, label, text_prop, prop, stale=stale)
+        if need == 0:
+            log.info("%s: %d/%d missing %s — nothing to do, skipping model load",
+                     label, need, total, prop)
+            driver.close()
+            return 0
+
+        model = load_embed_model(model_name, engine=engine)
+        log.info(
+            "reembed %s  model=%s  prop=%s  dim=%d  device=%s  rocm=%s  gpu_target=%s  engine=%s",
+            label, model_name, prop, model.dim, model.device, has_rocm(),
+            (gpu_target_machine() or {}).get("name"), engine,
+        )
 
         ensure_vector_index(sess, label, prop, model.dim, drop_first=not catchup)
         log.info("%s: %d/%d nodes missing %s vector", label, need, total, prop)
@@ -187,7 +243,7 @@ def run(label: str, model_name: str, prop: str, batch_size: int, resume: bool,
             while True:
                 passes += 1
                 embedded = _embed_pass(sess, label, model, prop, text_prop, batch_size,
-                                        start_id=0, log_every=0)
+                                        start_id=0, log_every=0, stale=stale)
                 log.info("%s: catch-up pass %d embedded %d stragglers",
                          label, passes, embedded)
                 if embedded == 0:
@@ -210,7 +266,7 @@ def run(label: str, model_name: str, prop: str, batch_size: int, resume: bool,
 
         done = _embed_pass(sess, label, model, prop, text_prop, batch_size, start_id,
                             cursor_file=cursor_file if resume else None,
-                            target=need)
+                            target=need, stale=stale)
         remaining = max(need - done, 0)
         log.info("%s complete: %d vectors written to .%s (%d still missing)",
                  label, done, prop, remaining)
@@ -220,24 +276,25 @@ def run(label: str, model_name: str, prop: str, batch_size: int, resume: bool,
 
 def _embed_pass(sess, label: str, model, prop: str, text_prop: str, batch_size: int,
                 start_id: int, cursor_file: str = None, target: int = 0,
-                log_every: int = 1) -> int:
-    """Embed every node still missing `prop` above `start_id`. Returns count."""
+                stale: bool = False, log_every: int = 1) -> int:
+    """Embed every node still missing `prop` above `start_id`. Returns count.
+    Also stamps embed_hash so a later --stale run can detect text edits."""
     done = 0
     t0 = time.perf_counter()
     while True:
-        rows = page_rows(sess, label, prop, text_prop, start_id, batch_size)
+        rows = page_rows(sess, label, prop, text_prop, start_id, batch_size, stale=stale)
         if not rows:
             break
         texts = [t or "" for _, t in rows]
         vecs = model.embed(texts, batch_size=min(batch_size, len(texts)))
         updates = []
-        for (nid, _text), vec in zip(rows, vecs):
-            updates.append({"nid": nid, "vec": vec})
+        for (nid, text), vec in zip(rows, vecs):
+            updates.append({"nid": nid, "vec": vec, "h": _text_hash(text)})
         if updates:
             sess.run(
                 f"UNWIND $u AS x "
                 f"MATCH (n:{label}) WHERE id(n) = x.nid "
-                f"SET n.{prop} = x.vec",
+                f"SET n.{prop} = x.vec, n.{HASH_PROP} = x.h",
                 u=updates,
             )
             start_id = rows[-1][0]
@@ -252,6 +309,32 @@ def _embed_pass(sess, label: str, model, prop: str, text_prop: str, batch_size: 
                 "  %s: %d/%d done (%.0f/s, ~%.0fs left)",
                 label, done, target, rate, (target - done) / rate if rate else 0.0,
             )
+    return done
+
+
+def _backfill_hash(sess, label: str, text_prop: str, prop: str, batch_size: int) -> int:
+    """Write embed_hash on already-embedded nodes without re-embedding.
+    Idempotent; prep so a subsequent --stale run won't re-embed unchanged nodes."""
+    done = 0
+    start = -1
+    while True:
+        rows = sess.run(
+            f"MATCH (n:{label}) WHERE n.{text_prop} IS NOT NULL AND n.{prop} IS NOT NULL "
+            f"AND id(n) > $start RETURN id(n) AS nid, n.{text_prop} AS text, n.{HASH_PROP} AS h "
+            f"ORDER BY id(n) ASC LIMIT $lim",
+            start=start, lim=batch_size,
+        ).data()
+        if not rows:
+            break
+        start = rows[-1]["nid"]
+        updates = [{"nid": r["nid"], "h": _text_hash(r["text"])}
+                   for r in rows if r["h"] != _text_hash(r["text"])]
+        if updates:
+            sess.run(
+                f"UNWIND $u AS x MATCH (n:{label}) WHERE id(n) = x.nid SET n.{HASH_PROP} = x.h",
+                u=updates,
+            )
+            done += len(updates)
     return done
 
 
@@ -272,16 +355,21 @@ def main(argv=None):
     ap.add_argument("--engine", choices=["torch", "onnx"], default=os.getenv("EMBED_ENGINE", "torch"),
                     help="Inference engine. onnx runs the same weights via onnxruntime CPU "
                          "(fast; ONNX_QUANTIZE=1 for ~3-5x). Keep ONE engine per prop.")
+    ap.add_argument("--stale", action="store_true",
+                    help="Re-embed nodes whose source text changed (needs embed_hash; run --backfill-hash first)")
+    ap.add_argument("--backfill-hash", action="store_true",
+                    help="Only write embed_hash on already-embedded nodes (no re-embed); prep for --stale")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     _torch.set_num_threads(args.torch_threads)
-    log.info("torch threads=%d  model=%s  prop=%s  batch=%d  engine=%s",
-             args.torch_threads, args.model, args.prop, args.batch_size, args.engine)
+    log.info("torch threads=%d  model=%s  prop=%s  batch=%d  engine=%s  stale=%s",
+             args.torch_threads, args.model, args.prop, args.batch_size, args.engine, args.stale)
     total_missing = 0
     for label in args.labels:
         missing = run(label, args.model, args.prop, args.batch_size, args.resume,
-                      verify_only=args.verify_only, catchup=args.catchup, engine=args.engine)
+                      verify_only=args.verify_only, catchup=args.catchup, engine=args.engine,
+                      stale=args.stale, backfill_hash=args.backfill_hash)
         total_missing += missing
     if args.verify_only:
         raise SystemExit(1 if total_missing else 0)
