@@ -181,6 +181,7 @@ def search_text(driver, query: str, target: str, top_k: int,
     WHERE '{label}' IN labels(node)
     RETURN
         node.id AS id,
+        elementId(node) AS eid,
         score,
         node.{text_prop} AS text,
         '{label}' AS label,
@@ -193,6 +194,8 @@ def search_text(driver, query: str, target: str, top_k: int,
     for r in rows:
         t = (r.get("text") or "").replace("\n", " ").strip()
         r["text_snip"] = (t[:text_chars - 1] + "…") if len(t) > text_chars else t
+        # Chunk/Frame nodes often have no `id` property; fall back to elementId.
+        r["nid"] = r.get("id") or r.get("eid")
     return rows
 
 
@@ -312,6 +315,7 @@ def main():
     parent.add_argument("--prop", default=EMBED_PROP, help="Vector property to search (e.g. emb_e5_large, emb_mini12).")
     parent.add_argument("--frame-label", default="Frame", help="Node label for frame embeddings.")
     parent.add_argument("--frame-embed-prop", default="embedding", help="Property holding frame vectors.")
+    parent.add_argument("--kg2-uri", default=None, help="Optional 2nd Neo4j KG to also query and merge by score.")
 
     p = argparse.ArgumentParser(parents=[parent], description="Semantic + frame/geo search over the Neo4j media graph.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -353,11 +357,20 @@ def main():
 
     if args.cmd == "search-text":
         rows = search_text(driver, args.q, args.target, args.topk, args.include_emb, args.text_chars)
+        # Optional second KG: query it too and merge by score.
+        if getattr(args, "kg2_uri", None):
+            d2 = GraphDatabase.driver(args.kg2_uri, auth=(NEO4J_USER, NEO4J_PASSWORD))
+            r2 = search_text(d2, args.q, args.target, args.topk, args.include_emb, args.text_chars)
+            for r in r2:
+                r["kg"] = "kg2"
+            for r in rows:
+                r["kg"] = "kg1"
+            rows = rows + r2
+            rows.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+            rows = rows[:args.topk]
         if not args.json and not args.csv:
-            cols = [("score", "score"), ("label", "label"), ("file/id", "id"), ("text", "text_snip"),
-                    ("source", "label")]
-            # de-dup column keys (label appears twice) -> use unique
-            cols = [("score", "score"), ("label", "label"), ("id", "id"), ("text", "text_snip")]
+            cols = [("score", "score"), ("label", "label"), ("kg", "kg"),
+                    ("id", "nid"), ("text", "text_snip")]
             print_table(rows, cols)
         maybe_dump(rows, args.json, args.csv)
 
