@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 import os
 import sys
+import re
 import json
 import argparse
 import logging
@@ -21,6 +22,15 @@ import urllib.request
 from neo4j import GraphDatabase
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def clean_llm(text: str) -> str:
+    """Reasoning models wrap output in <think>...</think>; keep the final answer."""
+    if not text:
+        return ""
+    return THINK_RE.sub("", text).strip()
 
 DEFAULT_TEXT_PROP = {
     "Chunk": "text", "Summary": "text", "Segment": "text", "Utterance": "text",
@@ -89,7 +99,7 @@ def main() -> int:
                 logging.info("[dry] community %s size=%s (%d samples)", cid, c["size"], len(texts))
                 continue
             try:
-                summary = llm_summary(texts, args.lm_url, args.model)
+                summary = clean_llm(llm_summary(texts, args.lm_url, args.model))
             except Exception as e:
                 logging.warning("community %s LLM failed: %s", cid, e)
                 continue
