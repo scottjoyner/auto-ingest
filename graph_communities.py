@@ -66,7 +66,7 @@ def main() -> int:
         while True:
             rows = s.run(
                 f"MATCH (n:{args.label}) WHERE n.{args.prop} IS NOT NULL AND id(n) > $last "
-                f"RETURN id(n) AS nid, n.{args.prop} AS vec "
+                f"RETURN elementId(n) AS nid, n.{args.prop} AS vec "
                 f"ORDER BY id(n) ASC LIMIT $lim",
                 last=last, lim=args.batch,
             ).data()
@@ -76,7 +76,7 @@ def main() -> int:
                 last = r["nid"]
                 res = s.run(
                     "CALL db.index.vector.queryNodes($i,$k,$v) YIELD node, score "
-                    "WHERE score >= $t RETURN id(node) AS cid, score",
+                    "WHERE score >= $t RETURN elementId(node) AS cid, score",
                     i=idx, k=args.topk, v=r["vec"], t=args.threshold,
                 ).data()
                 for c in res:
@@ -110,7 +110,7 @@ def main() -> int:
         for i in range(0, len(items), args.batch):
             chunk = [{"nid": n, "cid": c} for n, c in items[i:i + args.batch]]
             s.run(
-                f"UNWIND $u AS x MATCH (n:{args.label}) WHERE id(n)=x.nid "
+                f"UNWIND $u AS x MATCH (n:{args.label}) WHERE elementId(n)=x.nid "
                 f"SET n.community_id = x.cid",
                 u=chunk,
             )
