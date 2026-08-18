@@ -154,8 +154,13 @@ def count_needing(sess, label: str, text_prop: str, prop: str, stale: bool = Fal
     return need, total
 
 
-def _cursor_path(label: str, prop: str) -> str:
-    return f".reembed_{label}_{prop}.cursor"
+def _cursor_path(label: str, prop: str, uri: str = "") -> str:
+    # Namespace by URI so the same (label,prop) on DIFFERENT KGs (e.g. bodycam
+    # vs research) don't share a resume cursor — bodycam node ids are huge and
+    # would otherwise poison a smaller KG's start-id and embed nothing.
+    import hashlib
+    suf = "_" + hashlib.sha1(uri.encode()).hexdigest()[:10] if uri else ""
+    return f".reembed_{label}_{prop}{suf}.cursor"
 
 
 def page_rows(sess, label: str, prop: str, text_prop: str, start_id: int, limit: int, stale: bool = False):
@@ -258,7 +263,7 @@ def run(label: str, model_name: str, prop: str, batch_size: int, resume: bool,
             driver.close()
             return need_after
 
-        cursor_file = _cursor_path(label, prop)
+        cursor_file = _cursor_path(label, prop, cfg["uri"])
         start_id = 0
         if resume and os.path.exists(cursor_file):
             start_id = int(open(cursor_file).read().strip())
