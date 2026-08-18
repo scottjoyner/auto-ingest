@@ -284,7 +284,7 @@ def get_neo4j_config():
             cfg_pass = _resolve_env(matched.get('neo4j_password'), None)
 
     return {
-        'uri': os.environ.get('NEO4J_URI') or cfg_uri or 'bolt://100.64.43.123:7687',
+        'uri': os.environ.get('NEO4J_URI') or cfg_uri or 'bolt://127.0.0.1:7687',
         'user': os.environ.get('NEO4J_USER') or cfg_user or 'neo4j',
         'password': get_neo4j_password(cfg_pass),
     }
