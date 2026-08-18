@@ -19,13 +19,14 @@ export NEO4J_URI=bolt://127.0.0.1:17687
 # taxonomy-ish labels: one sweep (not whisper-produced)
 for L in Entity Speaker Keyword Concept Topic KgNode GlobalSpeaker Note; do
   echo "$(date) === $L (emb_e5_large, batch 256) ===" >>"$LOG"
-  python3 reembed.py "$L" --model intfloat/multilingual-e5-large --prop emb_e5_large --batch-size 256 --resume >>"$LOG" 2>&1
+  python3 reembed.py "$L" --model intfloat/multilingual-e5-large --prop emb_e5_large --batch-size 64 --resume >>"$LOG" 2>&1
 done
 # whisper/summarize-produced text: catchup (loop until no new nodes) so the
-# backlog cannot grow while whisper + the summarize job keep creating nodes
+# backlog cannot grow while whisper + the summarize job keep creating nodes.
+# NOTE: batch 64 (not 256) — xwing's 11.6GB GPU OOMs at 256 on large labels.
 for L in Summary Segment Utterance Transcription; do
-  echo "$(date) === $L (emb_e5_large, batch 256, catchup) ===" >>"$LOG"
-  python3 reembed.py "$L" --model intfloat/multilingual-e5-large --prop emb_e5_large --batch-size 256 --resume --catchup >>"$LOG" 2>&1
+  echo "$(date) === $L (emb_e5_large, batch 64, catchup) ===" >>"$LOG"
+  python3 reembed.py "$L" --model intfloat/multilingual-e5-large --prop emb_e5_large --batch-size 64 --resume --catchup >>"$LOG" 2>&1
 done
 kill $TUN 2>/dev/null
 echo "$(date) xwing bodycam ALL done" >>"$LOG"
