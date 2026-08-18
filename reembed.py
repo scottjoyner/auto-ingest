@@ -75,6 +75,7 @@ SCHEMA: Dict[str, str] = {
     "Note": "text",
     "Speaker": "label",
     "GlobalSpeaker": "display_label",
+    "DashcamFrame": "description",
 }
 
 
