@@ -95,6 +95,13 @@ def detect_backend() -> str:
         _BACKEND = "rocm"
         return _BACKEND
 
+    # 3.5) Working CUDA-API GPU without the probe binaries in PATH (e.g. rocminfo
+    # missing from PATH on a ROCm host): torch already proved a GPU is usable, so
+    # drive it through torch's CUDA API instead of falling back to CPU.
+    if torch is not None and torch.cuda.is_available():
+        _BACKEND = "rocm" if shutil.which("rocminfo") else "cuda"
+        return _BACKEND
+
     # 4) Fallback: ONNX / CPU
     _BACKEND = "onnx"
     return _BACKEND

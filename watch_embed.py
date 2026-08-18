@@ -50,7 +50,7 @@ def main() -> int:
             cmd = [
                 VENV_PY, str(REEMBED), lbl,
                 "--model", args.model, "--prop", args.prop,
-                "--batch-size", args.batch_size, "--resume",
+                "--batch-size", str(args.batch_size), "--catchup",
             ]
             if args.stale:
                 cmd.append("--stale")
