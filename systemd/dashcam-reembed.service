@@ -1,0 +1,15 @@
+[Unit]
+Description=DashcamFrame e5-large embedding loop (auto-resume)
+After=neo4j.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deathstar
+WorkingDirectory=/home/deathstar/git/auto-ingest
+ExecStart=/bin/bash -c 'while true; do python3 reembed.py DashcamFrame --model intfloat/multilingual-e5-large --prop emb_e5_large >> /tmp/reembed_dashcam.log 2>&1; sleep 60; done'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

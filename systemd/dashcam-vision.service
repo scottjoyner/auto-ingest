@@ -1,0 +1,16 @@
+[Unit]
+Description=Dashcam Vision Pipeline (orchestrates both dashcam archives)
+After=network-online.target remote-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deathstar
+WorkingDirectory=/home/deathstar/git/auto-ingest
+ExecStart=/home/deathstar/git/auto-ingest/run_dashcam_vision.sh
+Restart=always
+RestartSec=10
+Environment=NEO4J_PASSWORD=knowledge_graph_2026
+
+[Install]
+WantedBy=multi-user.target

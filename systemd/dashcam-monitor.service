@@ -1,0 +1,15 @@
+[Unit]
+Description=Dashcam Vision Pipeline health monitor
+After=network-online.target
+
+[Service]
+Type=simple
+User=deathstar
+WorkingDirectory=/home/deathstar/git/auto-ingest
+ExecStart=/usr/bin/python3 /home/deathstar/git/auto-ingest/dashcam_monitor.py
+Restart=always
+RestartSec=10
+Environment=NEO4J_PASSWORD=knowledge_graph_2026
+
+[Install]
+WantedBy=multi-user.target
