@@ -57,3 +57,6 @@ emb_cache.sqlite-wal
 
 # gpu speaker-linker runtime state
 linker_state_gpu.json
+
+# runtime progress state
+transcribe_progress.json
