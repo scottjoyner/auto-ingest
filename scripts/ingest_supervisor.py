@@ -118,7 +118,8 @@ def main():
                               "bash /opt/auto-ingest/run_day.sh "+dstr],
                              env=env,capture_output=True,text=True)
             return dstr,r.returncode
-        cmd=[x.replace('{DAY}',dstr) for x in PROVEN_CMD]
+        pw=os.environ.get("NEO4J_PASS","")
+        cmd=[x.replace('{DAY}',dstr).replace("'$NEO4J_PASS'",pw).replace("$NEO4J_PASS",pw) for x in PROVEN_CMD]
         r=subprocess.run(cmd,env=env,capture_output=True,text=True)
         if 'AuthenticationRateLimit' in (r.stdout+r.stderr):
             log(f"{dstr}: auth rate-limited, cooling down 16min")
