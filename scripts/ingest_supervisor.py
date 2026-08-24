@@ -3,7 +3,7 @@
 coverage, drives bulk_ingest_dashcam per month, verifies results, keeps a
 resumable ledger, alerts after repeated failure, and rebuilds the docker
 image when the repo advances. Designed for systemd timer every 6h."""
-import fcntl, os, sys, json, glob, time, subprocess
+import fcntl, os, sys, json, glob, time, subprocess, concurrent.futures
 from datetime import datetime, timezone
 
 HOME='/home/deathstar'
@@ -78,12 +78,6 @@ def main():
     except OSError:
         log("another supervisor holds the lock; exiting")
         return 0
-    _lf = open("/tmp/ingest_supervisor.lock", "w")
-    try:
-        fcntl.flock(_lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        print("another supervisor instance holds the lock; exiting")
-        return
     ledger=load_ledger()
     days=discover_days()
     log(f"discovered {len(days)} day-dirs with content")
@@ -113,21 +107,21 @@ def main():
         "--neo4j-uri bolt://127.0.0.1:7687 --neo4j-user neo4j "
         "--neo4j-pass '$NEO4J_PASS' --resume"
     ]
-    for day,day_list in sorted(pending.items()):
-        log(f"ingesting {len(day_list)} pending day(s) in {day}")
-        for dstr in day_list:
-            dk=dstr.replace('/','_')
-            cmd=[x.replace('{DAY}',dstr) for x in PROVEN_CMD]
-            def _run():
-                r=subprocess.run(cmd,env=env,capture_output=True,text=True)
-                blob=r.stdout+r.stderr
-                limited='AuthenticationRateLimit' in blob
-                return r.returncode, blob, limited
-            rc,blob,limited=_run()
-            if limited:
-                log(f"{dstr}: auth rate-limited, cooling down 16min")
-                time.sleep(960)
-                rc,blob,limited=_run()   # single warm retry
+    par=max(1,int(os.environ.get("INGEST_MAX_PARALLEL","3")))
+    log(f"ingesting {len(sum(pending.values(),[]))} pending day(s), parallelism={par}")
+    tasks=[(d,dstr) for day,day_list in sorted(pending.items()) for dstr in day_list]
+    def run_day(dstr):
+        cmd=[x.replace('{DAY}',dstr) for x in PROVEN_CMD]
+        r=subprocess.run(cmd,env=env,capture_output=True,text=True)
+        if 'AuthenticationRateLimit' in (r.stdout+r.stderr):
+            log(f"{dstr}: auth rate-limited, cooling down 16min")
+            time.sleep(960)
+            r=subprocess.run(cmd,env=env,capture_output=True,text=True)
+        return dstr,r.returncode
+    with concurrent.futures.ThreadPoolExecutor(max_workers=par) as ex:
+        futs={ex.submit(run_day,dstr): dstr for _,dstr in tasks}
+        for fut in concurrent.futures.as_completed(futs):
+            dstr,rc=fut.result(); dk=dstr.replace('/','_')
             st=ledger.setdefault(dstr,{'attempts':0})
             st['attempts']+=1; st['last_rc']=rc
             st['last_ts']=datetime.now(timezone.utc).isoformat()
@@ -141,7 +135,7 @@ def main():
                 st['status']='fail'
                 if st['attempts']>=MAX_ATTEMPTS:
                     alert(f"day {dstr} failed {st['attempts']}x (rc={rc}, nodes={nodes})")
-    save_ledger(ledger)
+            save_ledger(ledger)
     fails=[d for d,s in ledger.items() if s.get('status')=='fail']
     log(f"done. fail-streak days: {len(fails)}")
     return 0
