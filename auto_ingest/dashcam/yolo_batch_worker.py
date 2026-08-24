@@ -40,7 +40,7 @@ def main():
 
     clip = os.path.abspath(args.clip)
     stem = os.path.splitext(os.path.basename(clip))[0]
-    out_dir = args.out_dir or os.path.join(os.path.dirname(os.path.dirname(clip)), "yolo")
+    out_dir = args.out_dir or os.path.dirname(clip)   # legacy contract: CSV beside video
     os.makedirs(out_dir, exist_ok=True)
     csv_path = os.path.join(out_dir, f"{stem}_YOLOv8n.csv")
     if os.path.exists(csv_path):
