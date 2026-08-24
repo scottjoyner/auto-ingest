@@ -109,7 +109,7 @@ def main():
     ]
     par=max(1,int(os.environ.get("INGEST_MAX_PARALLEL","3")))
     log(f"ingesting {len(sum(pending.values(),[]))} pending day(s), parallelism={par}")
-    tasks=[(d,dstr) for day,day_list in sorted(pending.items()) for dstr in day_list]
+    tasks=[dstr for day,day_list in sorted(pending.items()) for dstr in day_list]
     REMOTE=os.environ.get("INGEST_REMOTE","").strip()
     def run_day(dstr):
         if REMOTE and hash(dstr)%2==1:
@@ -126,7 +126,7 @@ def main():
             r=subprocess.run(cmd,env=env,capture_output=True,text=True)
         return dstr,r.returncode
     with concurrent.futures.ThreadPoolExecutor(max_workers=par) as ex:
-        futs={ex.submit(run_day,dstr): dstr for _,dstr in tasks}
+        futs={ex.submit(run_day,dstr): dstr for dstr in tasks}
         for fut in concurrent.futures.as_completed(futs):
             dstr,rc=fut.result(); dk=dstr.replace('/','_')
             st=ledger.setdefault(dstr,{'attempts':0})
