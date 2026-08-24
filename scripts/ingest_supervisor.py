@@ -3,7 +3,7 @@
 coverage, drives bulk_ingest_dashcam per month, verifies results, keeps a
 resumable ledger, alerts after repeated failure, and rebuilds the docker
 image when the repo advances. Designed for systemd timer every 6h."""
-import os, sys, json, glob, time, subprocess
+import fcntl, os, sys, json, glob, time, subprocess
 from datetime import datetime, timezone
 
 HOME='/home/deathstar'
@@ -72,6 +72,18 @@ def image_fresh():
         alert(f"image freshness check error: {e}"); return False
 
 def main():
+    _lf = open("/tmp/ingest_supervisor.lock", "w")
+    try:
+        fcntl.flock(_lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log("another supervisor holds the lock; exiting")
+        return 0
+    _lf = open("/tmp/ingest_supervisor.lock", "w")
+    try:
+        fcntl.flock(_lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("another supervisor instance holds the lock; exiting")
+        return
     ledger=load_ledger()
     days=discover_days()
     log(f"discovered {len(days)} day-dirs with content")
@@ -106,7 +118,16 @@ def main():
         for dstr in day_list:
             dk=dstr.replace('/','_')
             cmd=[x.replace('{DAY}',dstr) for x in PROVEN_CMD]
-            rc=subprocess.run(cmd,env=env).returncode
+            def _run():
+                r=subprocess.run(cmd,env=env,capture_output=True,text=True)
+                blob=r.stdout+r.stderr
+                limited='AuthenticationRateLimit' in blob
+                return r.returncode, blob, limited
+            rc,blob,limited=_run()
+            if limited:
+                log(f"{dstr}: auth rate-limited, cooling down 16min")
+                time.sleep(960)
+                rc,blob,limited=_run()   # single warm retry
             st=ledger.setdefault(dstr,{'attempts':0})
             st['attempts']+=1; st['last_rc']=rc
             st['last_ts']=datetime.now(timezone.utc).isoformat()
