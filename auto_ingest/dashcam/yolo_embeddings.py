@@ -308,7 +308,7 @@ def parse_yolo_csv(csv_path: str) -> pd.DataFrame:
     # Confidence numeric
     conf = np.full(len(df), np.nan, dtype=float)
     if "confidence" in df.columns:
-        conf = df["confidence"].map(_percent_to_float01).to_numpy(dtype=float)
+        conf = df["confidence"].map(_percent_to_float01).to_numpy(dtype=float, copy=True)
     if np.isnan(conf).all() and "classification" in df.columns:
         conf2 = df["classification"].map(_percent_to_float01).to_numpy(dtype=float)
         mask = np.isnan(conf) & ~np.isnan(conf2)
