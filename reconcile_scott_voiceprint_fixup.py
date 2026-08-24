@@ -14,9 +14,11 @@ Dry-run by default; --apply to write.
 import argparse
 import logging
 from neo4j import GraphDatabase
+from auto_ingest_config import get_neo4j_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-URI = "bolt://localhost:7687"; USER = "neo4j"; PASS = "knowledge_graph_2026"
+_NEO4J = get_neo4j_config()
+URI = _NEO4J["uri"]; USER = _NEO4J["user"]; PASS = _NEO4J["password"]
 ASSISTX_DB = "assistx"
 CANONICAL_GROUP_KEY = "scott:identity"
 

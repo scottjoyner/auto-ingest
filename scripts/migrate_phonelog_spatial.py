@@ -3,7 +3,7 @@
 PhoneLog spatial point migration script.
 
 Backfills the `loc` POINT property on PhoneLog nodes that are missing it,
-using existing latitude/longitude or geometry.coordinates fields.
+using existing latitude/longitude or serialized geometry/coordinates fields.
 
 Usage:
     python scripts/migrate_phonelog_spatial.py [--dry-run] [--batch-size N]
@@ -57,22 +57,25 @@ def migrate_batch(driver, batch_size: int, dry_run: bool = False):
     Returns number of nodes migrated in this batch.
     """
     with driver.session(database=NEO4J_DB) as session:
-        # Find nodes missing loc but having lat/lon data
+        # Find nodes missing loc but having lat/lon or serialized coordinates.
+        # Current production PhoneLog records store geometry/coordinates as
+        # strings (not Cypher maps/lists), so geometry.coordinates[...] is not
+        # valid against the live schema.
         query = """
             MATCH (pl:PhoneLog)
             WHERE pl.loc IS NULL
-              AND (pl.latitude IS NOT NULL OR pl.geometry IS NOT NULL)
+              AND (pl.latitude IS NOT NULL OR pl.coordinates IS NOT NULL OR pl.geometry IS NOT NULL)
             WITH pl LIMIT $batch_size
             // Extract coordinates from available sources
             WITH pl,
-                coalesce(pl.latitude, 
-                    CASE WHEN pl.geometry IS NOT NULL AND pl.geometry.coordinates IS NOT NULL 
-                         THEN pl.geometry.coordinates[1] 
+                coalesce(pl.latitude,
+                    CASE WHEN pl.coordinates IS NOT NULL
+                         THEN toFloat(split(replace(replace(pl.coordinates, '[', ''), ']', ''), ',')[1])
                          ELSE NULL END
                 ) AS lat,
                 coalesce(pl.longitude,
-                    CASE WHEN pl.geometry IS NOT NULL AND pl.geometry.coordinates IS NOT NULL
-                         THEN pl.geometry.coordinates[0]
+                    CASE WHEN pl.coordinates IS NOT NULL
+                         THEN toFloat(split(replace(replace(pl.coordinates, '[', ''), ']', ''), ',')[0])
                          ELSE NULL END
                 ) AS lon
             WHERE lat IS NOT NULL AND lon IS NOT NULL
@@ -86,17 +89,17 @@ def migrate_batch(driver, batch_size: int, dry_run: bool = False):
             count_query = """
                 MATCH (pl:PhoneLog)
                 WHERE pl.loc IS NULL
-                  AND (pl.latitude IS NOT NULL OR pl.geometry IS NOT NULL)
+                  AND (pl.latitude IS NOT NULL OR pl.coordinates IS NOT NULL OR pl.geometry IS NOT NULL)
                 WITH pl LIMIT $batch_size
                 WITH pl,
-                    coalesce(pl.latitude, 
-                        CASE WHEN pl.geometry IS NOT NULL AND pl.geometry.coordinates IS NOT NULL 
-                             THEN pl.geometry.coordinates[1] 
+                    coalesce(pl.latitude,
+                        CASE WHEN pl.coordinates IS NOT NULL
+                             THEN toFloat(split(replace(replace(pl.coordinates, '[', ''), ']', ''), ',')[1])
                              ELSE NULL END
                     ) AS lat,
                     coalesce(pl.longitude,
-                        CASE WHEN pl.geometry IS NOT NULL AND pl.geometry.coordinates IS NOT NULL
-                             THEN pl.geometry.coordinates[0]
+                        CASE WHEN pl.coordinates IS NOT NULL
+                             THEN toFloat(split(replace(replace(pl.coordinates, '[', ''), ']', ''), ',')[0])
                              ELSE NULL END
                     ) AS lon
                 WHERE lat IS NOT NULL AND lon IS NOT NULL

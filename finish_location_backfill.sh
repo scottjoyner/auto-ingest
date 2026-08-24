@@ -5,7 +5,7 @@
 set -u
 CD="/media/scott/SSD_4TB/hermes-home/auto-ingest"
 LOG="$CD/logs/backfill_watcher.log"
-PW="knowledge_graph_2026"
+PW="${NEO4J_PASSWORD:?Set NEO4J_PASSWORD or source the runtime environment before running this watcher}"
 CY="docker exec neo4j cypher-shell -u neo4j -p $PW"
 ATTACHED() { $CY "MATCH (p:PhoneLog)-[:AT_PLACE]->() RETURN count(*) AS c" 2>/dev/null | awk 'NR==2{print $1}'; }
 RUNNING() { pgrep -f enrich_phonelog_place.py >/dev/null && echo yes || echo no; }

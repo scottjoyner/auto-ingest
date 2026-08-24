@@ -10,12 +10,14 @@ from pathlib import Path
 
 import numpy as np
 from neo4j import GraphDatabase
+from auto_ingest_config import get_neo4j_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-NEO4J_URI = "bolt://localhost:7687"
-NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "knowledge_graph_2026"
+_NEO4J = get_neo4j_config()
+NEO4J_URI = _NEO4J["uri"]
+NEO4J_USER = _NEO4J["user"]
+NEO4J_PASSWORD = _NEO4J["password"]
 NEO4J_DB = "neo4j"
 
 MAX_CLIPS = 200

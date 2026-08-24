@@ -347,12 +347,16 @@ def _kind_present(events: List[Dict[str, object]], kind: str) -> bool:
 
 
 def _mine_segment_events(driver, kind: str, limit: int, query: str) -> List[Dict[str, object]]:
-    # Resilient: run the query with a fresh driver per attempt so transient
-    # Neo4j memory/connection pressure doesn't kill the whole plan (S-G18).
-    from auto_ingest.shorts import db_retry
-    rows = db_retry.with_driver(
-        lambda drv: drv.session().run(query, limit=limit).data()
-    ) or []
+    try:
+        rows = driver.session().run(query, limit=limit).data()
+    except Exception as exc:
+        # Fall back to the fresh-driver retry path under transient DB pressure.
+        from auto_ingest.shorts import db_retry
+        log = __import__("logging").getLogger("shorts.planner")
+        log.warning("event query failed on supplied driver (%s); retrying with fresh driver", exc)
+        rows = db_retry.with_driver(
+            lambda drv: drv.session().run(query, limit=limit).data()
+        ) or []
     events: List[Dict[str, object]] = []
     for r in rows:
         clip_key = r.get("clip_key")
@@ -376,10 +380,8 @@ def _mine_segment_events(driver, kind: str, limit: int, query: str) -> List[Dict
 
 
 def _mine_speed_events(driver, per_kind: int, limit: int) -> List[Dict[str, object]]:
-    # Resilient variant of the same query (S-G18).
-    from auto_ingest.shorts import db_retry
-    rows = db_retry.with_driver(
-        lambda drv: drv.session().run(
+    try:
+        rows = driver.session().run(
             """
             MATCH (f:Frame)-[:BELONGS_TO]->(c:DashcamClip)
             WHERE c.view = 'F' AND f.mph >= $mph
@@ -389,7 +391,21 @@ def _mine_speed_events(driver, per_kind: int, limit: int) -> List[Dict[str, obje
             """,
             mph=SPEED_MPH_MIN, limit=limit,
         ).data()
-    ) or []
+    except Exception as exc:
+        from auto_ingest.shorts import db_retry
+        log = __import__("logging").getLogger("shorts.planner")
+        log.warning("speed query failed on supplied driver (%s); retrying with fresh driver", exc)
+        rows = db_retry.with_driver(
+            lambda drv: drv.session().run(
+                """
+                MATCH (f:Frame)-[:BELONGS_TO]->(c:DashcamClip)
+                WHERE c.view = 'F' AND f.mph >= $mph
+                RETURN c.key AS clip_key, f.mph AS mph, f.frame AS frame, c.fps AS fps
+                ORDER BY f.mph DESC
+                LIMIT $limit
+                """, mph=SPEED_MPH_MIN, limit=limit,
+            ).data()
+        ) or []
     events: List[Dict[str, object]] = []
     for r in rows:
         fps = r.get("fps") or 30.0
