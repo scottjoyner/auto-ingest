@@ -35,7 +35,10 @@ _NEO4J_CFG = get_neo4j_config()
 DASHCAM_ROOT = os.environ.get("DASHCAM_ROOT", get_fileserver_path("dashcam"))
 NEO4J_URI = os.environ.get("NEO4J_URI", _NEO4J_CFG["uri"])
 NEO4J_USER = os.environ.get("NEO4J_USER", _NEO4J_CFG["user"])
-NEO4J_PASS = os.environ.get("NEO4J_PASSWORD", _NEO4J_CFG["password"])
+NEO4J_PASS = os.environ.get("NEO4J_PASSWORD") or _NEO4J_CFG["password"]
+if not NEO4J_PASS and os.path.exists("/home/deathstar/recover_state/credentials.env"):
+    for _ln in open("/home/deathstar/recover_state/credentials.env"):
+        if _ln.startswith("export NEO4J_PASS="): NEO4J_PASS=_ln.split("=",1)[1].strip()
 
 # Years to process (can be overridden via env var)
 YEARS_TO_PROCESS = os.environ.get("YEARS_TO_PROCESS", "2023 2024 2025 2026").split()

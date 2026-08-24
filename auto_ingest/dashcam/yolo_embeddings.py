@@ -16,6 +16,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from neo4j import GraphDatabase
 import numpy as np
 import pandas as pd
 from moviepy.editor import VideoFileClip
