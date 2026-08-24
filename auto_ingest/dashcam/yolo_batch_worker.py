@@ -51,7 +51,10 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="yframes") as td:
         # decode natively (no scale) so boxes land in source pixel space
-        r = sh(f'ffmpeg -nostdin -loglevel error -i "{clip}" '
+        hw = os.environ.get("YOLO_HWACCEL", "").strip()
+        hwin = os.environ.get("YOLO_HWACCEL_DEV", "")
+        pre = f"-hwaccel {hw} " + (f"-hwaccel_device {hwin} " if hwin else "") if hw else ""
+        r = sh(f'ffmpeg -nostdin -loglevel error {pre}-i "{clip}" '
                f'-vf "fps={args.fps}" -frame_pts 1 -q:v 2 "{td}/%08d.jpg"')
         frames = sorted(os.listdir(td))
         if not frames:
