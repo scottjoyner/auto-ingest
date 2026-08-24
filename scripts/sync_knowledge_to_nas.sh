@@ -2,7 +2,9 @@
 set -euo pipefail
 
 VAULT_PATH="${KNOWLEDGE_VAULT_PATH:-/home/scott/knowledge}"
-MIRROR_PATH="${KNOWLEDGE_MIRROR_PATH:-/media/scott/NAS5/shared-knowledge}"
+# NAS5 recovering lost files (2026-08) - mirror to NAS4 until restored.
+# Revert to: /media/scott/NAS5/shared-knowledge
+MIRROR_PATH="${KNOWLEDGE_MIRROR_PATH:-/media/scott/NAS4/shared-knowledge-mirror}"
 
 mkdir -p "$MIRROR_PATH"
 
