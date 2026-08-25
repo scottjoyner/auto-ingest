@@ -1211,14 +1211,14 @@ def build_vectors_for_key(
     meta_by_sec: Dict[int, Dict[str, Optional[float]]] = {}
     if meta_df is not None and "frame" in meta_df.columns:
         sec_col = meta_df["frame"].apply(lambda fr: second_from_frame(fr, fps))
-        tmp = meta_df.copy(); tmp["__sec__"] = sec_col
-        g = tmp.dropna(subset=["__sec__"]).groupby("__sec__", as_index=False).agg(
+        tmp = meta_df.copy(); tmp["sec"] = sec_col
+        g = tmp.dropna(subset=["sec"]).groupby("sec", as_index=False).agg(
             lat=("lat","mean"),
             lon=("lon","mean"),
             mph=("mph","mean") if "mph" in tmp.columns else ("frame","count")
         )
         for r in g.itertuples(index=False):
-            meta_by_sec[int(getattr(r, "__sec__"))] = {
+            meta_by_sec[int(getattr(r, "sec"))] = {
                 "lat": getattr(r, "lat", None),
                 "lon": getattr(r, "lon", None),
                 "mph": getattr(r, "mph", None) if "mph" in g.columns else None
@@ -1373,6 +1373,8 @@ def read_clip_metadata_csv(file_dir: str, key: str) -> Optional[pd.DataFrame]:
         out = df[[fcol] + [x for x in [latc,lonc,mphc] if x]].copy()
         out.columns = ["frame","lat","lon"] + (["mph"] if mphc else [])
         out["frame"] = pd.to_numeric(out["frame"], errors="coerce").astype("Int64")
+        out["lat"] = pd.to_numeric(out["lat"], errors="coerce")
+        out["lon"] = pd.to_numeric(out["lon"], errors="coerce")
         if "mph" in out.columns:
             out["mph"] = pd.to_numeric(out["mph"], errors="coerce")
         return out
