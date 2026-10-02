@@ -190,6 +190,12 @@ routing, or schema changes.
 
 ## 9. Guard test
 
+`tests/test_housekeeping_paths.py` pins the *caller-level* changes: publish-queue
+and shorts output roots fail closed without `SHORTS_PUBLISH_QUEUE` / `SHORTS_OUT_ROOT`,
+`worker_content._require_roots()` and `dashcam_monitor.BASES` resolve from env,
+`batch_update_paths.py` is dry-run by default, and the USB/deprecated shell helpers
+contain no literal host paths.
+
 `tests/test_storage_contract.py` pins the resolver contract (env precedence,
 fail-closed, legacy NAS3/SSD_4TB directories cannot win, generic-host config, 
 determinism) **and** fails if a listed ACTIVE file reintroduces a legacy literal
