@@ -1,4 +1,8 @@
 #!/bin/bash
+# STATUS (2026-10-02 housekeeping): HOST-SPECIFIC LEGACY HELPER.
+# Not part of the canonical pipeline. Paths/venv/host below assume one machine
+# and are NOT machine-agnostic. Canonical entrypoint: `bin/auto-ingest`.
+# See docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md.
 # Fix S drive mount and prepare for knowledge vault migration
 # Location: /home/scott/git/auto-ingest/deploy/fix-s-drive-mount.sh
 

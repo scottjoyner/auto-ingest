@@ -1,4 +1,8 @@
 #!/bin/bash
+# STATUS (2026-10-02 housekeeping): HOST-SPECIFIC LEGACY HELPER.
+# Not part of the canonical pipeline. Paths/venv/host below assume one machine
+# and are NOT machine-agnostic. Canonical entrypoint: `bin/auto-ingest`.
+# See docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md.
 # run_dashcam_frames_x1.sh  (x1-370)
 #
 # QUEUED AFTER the embedding chain AND the whisper/diarize catchup.

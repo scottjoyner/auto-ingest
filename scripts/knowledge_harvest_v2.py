@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 """
+
+STATUS (2026-10-02 housekeeping): HOST-SPECIFIC LEGACY HELPER.
+Not part of the canonical pipeline; the paths/venv/host quoted below assume one
+machine. Canonical entrypoint: `bin/auto-ingest`. See
+docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md.
+
 Idle Agent Knowledge Harvesting System - Version 2
 Fixed Cypher query execution by writing Python code to temp files first.
 

@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Idle-harvest enrichment pipeline orchestrator (W-57).
 
+STATUS (2026-10-02 housekeeping): HOST-SPECIFIC LEGACY HELPER.
+Not part of the canonical pipeline; the paths/venv/host quoted below assume one
+machine. Canonical entrypoint: `bin/auto-ingest`. See
+docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md.
+
 Runs the Summary-enrichment steps in order. Every step is IDEMPOTENT
 (guards on `WHERE s.lat IS NULL`, `WHERE s.embedding_768 IS NULL`,
 `WHERE NOT (s)-[:AT_PLACE]->()`, etc.), so re-running only processes NEW

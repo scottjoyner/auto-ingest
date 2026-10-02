@@ -1,5 +1,10 @@
 """Smoke-test the full render loop with one real highway clip + a spoken-discussion script.
 
+STATUS (2026-10-02 housekeeping): HOST-SPECIFIC LEGACY HELPER.
+Not part of the canonical pipeline; the paths/venv/host quoted below assume one
+machine. Canonical entrypoint: `bin/auto-ingest`. See
+docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md.
+
 Self-contained: resolves a local clip path manually because get_fileserver_path
 does not remap /mnt/8TB_2025 -> /media/scott/SSD_4TB on this host.
 """

@@ -1,4 +1,8 @@
 #!/bin/bash
+# STATUS (2026-10-02 housekeeping): HOST-SPECIFIC LEGACY HELPER.
+# Not part of the canonical pipeline. Paths/venv/host below assume one machine
+# and are NOT machine-agnostic. Canonical entrypoint: `bin/auto-ingest`.
+# See docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md.
 # Set up daily knowledge sync cron jobs
 
 LOG_FILE="/home/scott/logs/knowledge_sync.log"

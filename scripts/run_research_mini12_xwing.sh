@@ -1,4 +1,8 @@
 #!/bin/bash
+# STATUS (2026-10-02 housekeeping): HOST-SPECIFIC LEGACY HELPER.
+# Not part of the canonical pipeline. Paths/venv/host below assume one machine
+# and are NOT machine-agnostic. Canonical entrypoint: `bin/auto-ingest`.
+# See docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md.
 set -u
 LOG=/tmp/xwing_research_mini12.log
 echo "$(date) xwing research Chunk emb_mini12 -> x1-370 research Neo4j (parallel, decoupled from whisper)" >>"$LOG"
