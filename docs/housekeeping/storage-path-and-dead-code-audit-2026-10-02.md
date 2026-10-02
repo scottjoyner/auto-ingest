@@ -25,14 +25,19 @@
    `.env.example` and `config.example.yaml` said **NAS4** (now aligned to NAS5 in this
    pass, with an inline note). `config.example.yaml` also still carried `/mnt/8TB_2025`
    and Scott-specific `/home/scott/*` vault paths — retained, they are example content.
-2. **Host path vs container path.** `deploy/path_profiles.env.example` sets
-   `DASHCAM_ROOT=/media/scott/NAS5/dashcam` (host path) while `docs/system_design.md`
-   documents `DASHCAM_ROOT=/nas/fileserver/dashcam` (container path). Compose injects
-   `DASHCAM_ROOT` into the container where only `/nas` exists. **Unresolved on purpose:**
-   changing it could redirect existing data writes. Flagged for operator decision.
-3. **Legacy alias mounts.** Compose still binds `NAS1_ROOT`/`NAS2_ROOT` to `/nas1` and
-   `/nas2`; `scripts/backfill_audio_day.sh` still consumes `/nas1`/`/nas2`. Not removed:
-   removing the mounts would break that script inside containers.
+2. **Host path vs container path — RESOLVED IN THE RECORD, values unchanged.**
+   `deploy/path_profiles.env.example` sets `DASHCAM_ROOT=/media/scott/NAS5/dashcam`
+   (host path) while `docs/system_design.md` documents `/nas/fileserver/dashcam`
+   (container path); compose injects the host path into a container where only the
+   bind mounts exist. The template now carries an explicit **HOST vs CONTAINER**
+   header naming every container-read variable and flagging the gap as a known
+   disagreement. **No value was changed** — that would redirect which directories
+   ingest scans/writes, which is an operator decision, not a housekeeping one.
+3. **Legacy alias mounts — consumer retired, mounts kept.** Compose still binds
+   `NAS1_ROOT`/`NAS2_ROOT` to `/nas1` and `/nas2` (marked `DEPRECATED compatibility
+   aliases` in the compose file; kept because *running* containers still bind them).
+   `scripts/backfill_audio_day.sh` no longer auto-discovers them — it now uses
+   `BACKFILL_BASE` if set, otherwise the canonical resolver.
 4. **Vault canonical path.** `config.yaml` sets `mirror_vault_path` *and*
    `canonical_vault_path` to `/media/scott/NAS5/shared-knowledge`, while
    `scripts/sync_knowledge_to_nas.sh` defaulted to a `NAS4/shared-knowledge-mirror`.
@@ -154,8 +159,9 @@ intentionally retained.
 | Class | Locations |
 |---|---|
 | EXAMPLE | `config.yaml`, `config.example.yaml`, `.env.example`, `deploy/path_profiles.env.example`, `embedding_endpoints.json` |
-| ACTIVE_DEFAULT (current contract, not legacy) | `docker-compose.yml` (`NAS_ROOT`→`/nas`, legacy `/nas1`,`/nas2` aliases), `deploy/sync_from_legacy_drop.sh` (`/nas/...` container contract), `deploy/create_job.sh` (`/nas/drop`), `scripts/backfill_audio_day.sh` (`/nas1`,`/nas2`) |
-| SPECIALIZED_CURRENT | `ingest_media.py` (SSD_4TB output roots — changing them could redirect media writes), `dashcam_copy.sh` / `bodycam_copy.sh` (NAS5 mount guards + `findmnt` auto-discovery), `run_ingest_all.sh` (comment), `scripts/_smoke_render_shorts.py` (dev-only host remap) |
+| ACTIVE_DEFAULT (current contract, not legacy) | `docker-compose.yml` (`NAS_ROOT`→`/nas`; `/nas1`,`/nas2` retained but labeled deprecated aliases), `deploy/sync_from_legacy_drop.sh` (`/nas/...` container contract), `deploy/create_job.sh` (`/nas/drop`) |
+| SPECIALIZED_CURRENT | `dashcam_copy.sh` / `bodycam_copy.sh` (NAS5 mount guards + `findmnt` auto-discovery — behavior-critical, not changed), `run_ingest_all.sh` (comment), `scripts/_smoke_render_shorts.py` (dev-only host remap, banner added) |
+| RESOLVED (this pass) | `ingest_media.py` output roots (`MEDIA_THUMB_ROOT`, `TIKTOK_OUT_ROOT`, `NEXTCLOUD_STAGE_ROOT`, `NEXTCLOUD_ROOT`) are env-only + fail closed, so they can no longer default onto a machine-specific SSD mount; `scripts/backfill_audio_day.sh` no longer auto-discovers `/nas1`,`/nas2` |
 | DEPRECATED_SCRIPT | `runall.sh`, `batch_update_paths.py`, `deploy/job_trigger_api.py` (loud deprecation header) + banner added to `deploy/fix-s-drive-mount.sh`, `scripts/run_backfill_x1.sh`, `scripts/run_bodycam_2nd_x1.sh`, `scripts/run_bodycam_all_xwing.sh`, `scripts/run_dashcam_frames_x1.sh`, `scripts/run_research_mini12_xwing.sh`, `scripts/run_watch_x1.sh`, `scripts/enrich_pipeline.py` (`/home/scott/git/hermes-agent/venv`), `scripts/knowledge_harvest_v2.py` (`/media/scott/S/neo4j`). Banners state *host-specific legacy helper* and point at `bin/auto-ingest`; they do **not** assert removal (external cron/`nohup` invocation cannot be proven from the repo) |
 | HISTORICAL_DOC | `docs/current-ingest-state-2026-06-10.md`, `docs/deathstar-cli-storage-migration.md`, `docs/DEEP_DIVE_2026-07-14.md`, `docs/KG_INGEST_DEPLOY.md`, `docs/recovery-plan-2026-06-10.md`, `docs/OFFLINE_SWARM_INTEGRATION_PLAN.md`, `docs/UNIFICATION.md`, `LLD.md`, `DASHCAM_VISION_PIPELINE.md` |
 | ARCHIVE | `archive/**`, `plans_narrated/**` (narrated plan data, untouched) |

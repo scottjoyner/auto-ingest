@@ -27,6 +27,11 @@ services:
     volumes:
       - ./:/app
       - ${NAS_ROOT}:/nas
+      # DEPRECATED compatibility aliases (2026-10-02 housekeeping): NAS1/NAS2
+      # era mount points, kept because running containers still bind them.
+      # No in-repo consumer auto-discovers them any more; scripts that need a
+      # non-/nas root must set it explicitly. See
+      # docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md
       - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
       - ${NAS2_ROOT:-/media/scott/NAS5}:/nas2
     networks:
@@ -63,6 +68,11 @@ services:
     volumes:
       - ./:/app
       - ${NAS_ROOT}:/nas
+      # DEPRECATED compatibility aliases (2026-10-02 housekeeping): NAS1/NAS2
+      # era mount points, kept because running containers still bind them.
+      # No in-repo consumer auto-discovers them any more; scripts that need a
+      # non-/nas root must set it explicitly. See
+      # docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md
       - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
       - ${NAS2_ROOT:-/media/scott/NAS5}:/nas2
     networks:
@@ -97,6 +107,11 @@ services:
     volumes:
       - ./:/app
       - ${NAS_ROOT}:/nas
+      # DEPRECATED compatibility aliases (2026-10-02 housekeeping): NAS1/NAS2
+      # era mount points, kept because running containers still bind them.
+      # No in-repo consumer auto-discovers them any more; scripts that need a
+      # non-/nas root must set it explicitly. See
+      # docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md
       - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
       - ${NAS2_ROOT:-/media/scott/NAS5}:/nas2
     networks:
@@ -138,6 +153,11 @@ services:
     volumes:
       - ./:/app
       - ${NAS_ROOT}:/nas
+      # DEPRECATED compatibility aliases (2026-10-02 housekeeping): NAS1/NAS2
+      # era mount points, kept because running containers still bind them.
+      # No in-repo consumer auto-discovers them any more; scripts that need a
+      # non-/nas root must set it explicitly. See
+      # docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md
       - ${NAS1_ROOT:-/media/scott/SSD_4TB}:/nas1
       - ${NAS2_ROOT:-/media/scott/NAS5}:/nas2
     networks:

@@ -52,11 +52,12 @@ REL="$YEAR/$MONTH/$DD"
 
 cd "$(dirname "$0")/.."
 
-# If running inside Compose, prefer the stable dual-NAS container mounts.
-# If running on the host, resolve the fileserver root from config (mount-aware),
-# falling back to the legacy NAS4 path for backward compatibility.
-if [[ -d /nas1 || -d /nas2 ]]; then
-  CANDIDATE_BASES=(/nas1 /nas2)
+# Root resolution: env override -> canonical resolver (config.yaml machine match).
+# The deprecated /nas1,/nas2 container aliases are only honored when explicitly
+# requested via BACKFILL_BASE (they are kept in docker-compose for compatibility
+# but must never be auto-discovered).
+if [[ -n "${BACKFILL_BASE:-}" ]]; then
+  CANDIDATE_BASES=("$BACKFILL_BASE")
 else
   CANDIDATE_BASES=(
     "$(python3 - <<'PY'
@@ -113,7 +114,7 @@ else
   PY="python3"
 fi
 
-if [[ ! -d /nas1 && ! -d /nas2 ]]; then
+if [[ -z "${BACKFILL_BASE:-}" ]]; then
   if ! "$PY" - <<'PY' >/dev/null 2>&1
 import torch, transformers, neo4j
 PY

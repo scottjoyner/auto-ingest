@@ -168,3 +168,63 @@ def test_env_example_matches_live_config_contract():
     assert "/media/scott/NAS5" in live
     assert "/media/scott/NAS4" not in example.replace("NAS4 while the", "")
     assert "NEO4J_PASSWORD_DEFAULT" in example
+
+# --------------------------------------------------------------------------- #
+# ingest_media.py: output roots are env-only and fail closed (no SSD default)
+# --------------------------------------------------------------------------- #
+def test_ingest_media_roots_fail_closed(monkeypatch):
+    for v in ("MEDIA_THUMB_ROOT", "TIKTOK_OUT_ROOT", "NEXTCLOUD_STAGE_ROOT"):
+        monkeypatch.delenv(v, raising=False)
+    import ingest_media
+
+    with pytest.raises(SystemExit):
+        ingest_media._require_root("MEDIA_THUMB_ROOT", ingest_media.THUMB_ROOT)
+    with pytest.raises(SystemExit):
+        ingest_media._require_root("TIKTOK_OUT_ROOT", ingest_media.SHORT_ROOT)
+    with pytest.raises(SystemExit):
+        ingest_media._require_root("NEXTCLOUD_STAGE_ROOT", ingest_media.STAGE_ROOT)
+
+
+def test_ingest_media_roots_from_env(monkeypatch, tmp_path):
+    import importlib
+
+    monkeypatch.setenv("MEDIA_THUMB_ROOT", str(tmp_path / "thumbs"))
+    monkeypatch.setenv("TIKTOK_OUT_ROOT", str(tmp_path / "shorts"))
+    monkeypatch.setenv("NEXTCLOUD_STAGE_ROOT", str(tmp_path / "stage"))
+    import ingest_media
+
+    importlib.reload(ingest_media)
+    assert ingest_media.THUMB_ROOT == str(tmp_path / "thumbs")
+    assert ingest_media._require_root("TIKTOK_OUT_ROOT", ingest_media.SHORT_ROOT) == str(tmp_path / "shorts")
+
+
+def test_ingest_media_has_no_host_defaults():
+    text = _src("ingest_media.py")
+    assert "/media/scott/SSD_4TB/nextcloud" not in text
+    assert "/media/scott/SSD_4TB/media_thumbs" not in text
+    assert "/media/scott/SSD_4TB/tiktok_shorts" not in text
+    assert "/media/scott/SSD_4TB/nextcloud_stage" not in text
+
+
+# --------------------------------------------------------------------------- #
+# compose alias mounts are deprecated, not auto-discovered by scripts
+# --------------------------------------------------------------------------- #
+def test_compose_alias_mounts_are_marked_deprecated():
+    text = _src("docker-compose.yml")
+    assert "DEPRECATED compatibility aliases" in text
+    assert "/nas1" in text and "/nas2" in text  # kept for running containers
+
+
+def test_backfill_audio_day_no_longer_autodiscovers_aliases():
+    text = _src("scripts/backfill_audio_day.sh")
+    assert "BACKFILL_BASE" in text
+    assert "-d /nas1" not in text
+
+
+# --------------------------------------------------------------------------- #
+# env template documents the host/container split (recorded disagreement)
+# --------------------------------------------------------------------------- #
+def test_path_profiles_documents_host_vs_container():
+    text = _src("deploy/path_profiles.env.example")
+    assert "HOST vs CONTAINER" in text
+    assert "KNOWN DISAGREEMENT" in text

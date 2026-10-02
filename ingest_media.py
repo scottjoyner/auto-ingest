@@ -20,7 +20,7 @@ gracefully when their models/libs are unavailable.
 
 Usage:
   # local mirror
-  python3 ingest_media.py --root /media/scott/SSD_4TB/photos --kind all \
+  python3 ingest_media.py --root "$PHOTOS_ROOT" --kind all \
       --state media_ingest.json --limit 20
 
   # live Nextcloud (WebDAV pull)
@@ -29,7 +29,7 @@ Usage:
 
   # also link MediaFile nodes to SummaryPlace/Trip/PhoneLog by GPS, and build
   # per-date + per-Trip/Place Ken Burns slideshows (near-dup images pruned)
-  python3 ingest_media.py --root /media/scott/SSD_4TB/photos --slideshow \
+  python3 ingest_media.py --root "$PHOTOS_ROOT" --slideshow \
       --link-limit 5000   # --no-link to skip; --no-embed to skip CLIP embedding
 """
 from __future__ import annotations
@@ -52,11 +52,23 @@ from typing import Dict, List, Optional, Tuple
 # --------------------------------------------------------------------------
 try:
     import auto_ingest_config as _cfg
-    NEXTCLOUD_ROOT = _cfg.get_nextcloud_root()
     _NC = _cfg.get_neo4j_config()
 except Exception:
-    NEXTCLOUD_ROOT = os.environ.get("NEXTCLOUD_ROOT", "/media/scott/SSD_4TB/nextcloud")
     _NC = {}
+
+
+def _resolve_nextcloud_root() -> str:
+    """env -> canonical resolver. Empty when unconfigured (no host default)."""
+    env = os.environ.get("NEXTCLOUD_ROOT")
+    if env:
+        return env
+    try:
+        return _cfg.get_nextcloud_root()
+    except Exception:
+        return ""
+
+
+NEXTCLOUD_ROOT = _resolve_nextcloud_root()
 
 NEO4J_URI = os.environ.get("NEO4J_URI") or _NC.get("uri") or "bolt://localhost:7687"
 NEO4J_USER = os.environ.get("NEO4J_USER") or _NC.get("user") or "neo4j"
@@ -67,9 +79,19 @@ except Exception:
     NEO4J_PASS = os.environ.get("NEO4J_PASSWORD") or _NC.get("password") or os.environ.get("NEO4J_PASSWORD_DEFAULT") or "knowledge_graph_2026"
 NEO4J_DB = os.environ.get("NEO4J_DB") or "neo4j"
 
-THUMB_ROOT = os.environ.get("MEDIA_THUMB_ROOT", "/media/scott/SSD_4TB/media_thumbs")
-SHORT_ROOT = os.environ.get("TIKTOK_OUT_ROOT", "/media/scott/SSD_4TB/tiktok_shorts")
-STAGE_ROOT = os.environ.get("NEXTCLOUD_STAGE_ROOT", "/media/scott/SSD_4TB/nextcloud_stage")
+# Output roots have NO machine-specific default: env-only, fail closed at use
+# time. Picking a legacy mount here would silently write media output to a
+# machine other than the one running this script.
+THUMB_ROOT = os.environ.get("MEDIA_THUMB_ROOT", "")
+SHORT_ROOT = os.environ.get("TIKTOK_OUT_ROOT", "")
+STAGE_ROOT = os.environ.get("NEXTCLOUD_STAGE_ROOT", "")
+
+
+def _require_root(env_var: str, value: str) -> str:
+    if not value:
+        raise SystemExit(
+            f"{env_var} is not set; refusing to default to a machine-specific path")
+    return value
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "openai/whisper-base")
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
@@ -266,7 +288,7 @@ def ensure_dir(p: Path) -> None:
 
 
 def thumb_path_for(sha: str) -> Path:
-    return Path(THUMB_ROOT) / (sha[:2]) / f"{sha}.jpg"
+    return Path(_require_root("MEDIA_THUMB_ROOT", THUMB_ROOT)) / (sha[:2]) / f"{sha}.jpg"
 
 
 def make_thumbnail(path: Path, kind: str, sha: str) -> Optional[str]:
@@ -415,7 +437,7 @@ except Exception:
 # Content generation
 # --------------------------------------------------------------------------
 def generate_movie_short(path: Path, segs: List[Dict], date: str, hook: str) -> Optional[str]:
-    out_dir = Path(SHORT_ROOT) / date
+    out_dir = Path(_require_root("TIKTOK_OUT_ROOT", SHORT_ROOT)) / date
     ensure_dir(out_dir)
     out = out_dir / f"{path.stem}_tok.mp4"
     if out.exists():
@@ -689,7 +711,7 @@ def process_file(drv, path: Path, source: str, kind: str, state: dict,
         if do_transcribe and meta.get("has_audio"):
             segs = transcribe_movie(path)
             if segs:
-                tr_path = Path(THUMB_ROOT).parent / "transcripts" / f"{sha}.json"
+                tr_path = Path(_require_root("MEDIA_THUMB_ROOT", THUMB_ROOT)).parent / "transcripts" / f"{sha}.json"
                 ensure_dir(tr_path.parent)
                 tr_path.write_text(json.dumps(segs))
                 processed["transcript"] = str(tr_path)
@@ -772,7 +794,7 @@ def main() -> int:
             print("ERROR: --nextcloud-user and --nextcloud-pass required with --nextcloud-url",
                   file=sys.stderr)
             return 2
-        stage = Path(STAGE_ROOT)
+        stage = Path(_require_root("NEXTCLOUD_STAGE_ROOT", STAGE_ROOT))
         _log(f"Pulling from Nextcloud {args.nextcloud_url} -> {stage}")
         files = webdav_pull(args.nextcloud_url, args.nextcloud_user,
                             args.nextcloud_pass, stage, VIDEO_EXTS | IMAGE_EXTS,
@@ -934,7 +956,7 @@ def build_slideshows(drv, source: str, music: Optional[Path]) -> None:
         deduped = dedup_by_embedding([Path(p) for p in paths])
         if len(deduped) < 2:
             continue
-        out = Path(SHORT_ROOT) / grp / f"slideshow_{_safe(grp)}.mp4"
+        out = Path(_require_root("TIKTOK_OUT_ROOT", SHORT_ROOT)) / grp / f"slideshow_{_safe(grp)}.mp4"
         if out.exists():
             continue
         ok = build_slideshow(deduped, out, music)
