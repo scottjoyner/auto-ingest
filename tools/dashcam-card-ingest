@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""Additive, read-only-source dashcam SD custody ingest.
+
+No source writes, no --delete, no classification/transcoding, no downstream triggers.
+The destination is intentionally a staging namespace, not the canonical dashcam archive.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+STAGING = Path(os.environ.get("DASHCAM_SD_STAGING", "/nas/recovery/dashcam-sd-ingest"))
+LEDGER = STAGING / "physical-card-ledger.jsonl"
+CHUNK = 8 * 1024 * 1024
+
+
+def utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def run(cmd: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
+
+
+def fail(msg: str, code: int = 2) -> None:
+    print(json.dumps({"status": "FAIL", "reason": msg}, indent=2), file=sys.stderr)
+    raise SystemExit(code)
+
+
+def block_info(dev: str) -> dict:
+    d = str(Path(dev).resolve())
+    if not d.startswith("/dev/"):
+        fail(f"not a block-device path: {dev}")
+    p = run(["lsblk", "-J", "-o", "NAME,PATH,TYPE,TRAN,RM,SIZE,FSTYPE,LABEL,UUID,MODEL,SERIAL,MOUNTPOINTS,RO", d])
+    if p.returncode:
+        fail(f"lsblk failed for {d}: {p.stderr.strip()}")
+    try:
+        data = json.loads(p.stdout)
+    except json.JSONDecodeError as e:
+        fail(f"invalid lsblk JSON: {e}")
+    root = (data.get("blockdevices") or [None])[0]
+    if not root:
+        fail(f"device not found: {d}")
+    return root
+
+
+def udev_props(dev: str) -> dict:
+    p = run(["udevadm", "info", "--query=property", "--name", dev])
+    out = {}
+    for line in p.stdout.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            out[k] = v
+    return out
+
+
+def find_mount(dev: str) -> dict | None:
+    p = run(["findmnt", "-J", "-S", dev])
+    if p.returncode:
+        return None
+    try:
+        fs = (json.loads(p.stdout).get("filesystems") or [None])[0]
+    except json.JSONDecodeError:
+        return None
+    return fs
+
+
+def resolve_partition(dev: str) -> tuple[str, dict]:
+    info = block_info(dev)
+    if info.get("type") == "part":
+        return info["path"], info
+    children = [x for x in info.get("children", []) if x.get("type") == "part"]
+    if len(children) != 1:
+        fail(f"device must have exactly one filesystem partition; found {len(children)}")
+    return children[0]["path"], children[0]
+
+
+def identity(dev: str, part: str, pinfo: dict) -> dict:
+    u = udev_props(part)
+    return {
+        "hostname": platform.node(),
+        "device_path_requested": dev,
+        "partition_path": part,
+        "transport": pinfo.get("tran") or u.get("ID_BUS"),
+        "removable": pinfo.get("rm"),
+        "device_size": pinfo.get("size"),
+        "partition_size": pinfo.get("size"),
+        "filesystem": pinfo.get("fstype") or u.get("ID_FS_TYPE"),
+        "filesystem_uuid": pinfo.get("uuid") or u.get("ID_FS_UUID"),
+        "volume_label": pinfo.get("label") or u.get("ID_FS_LABEL"),
+        "vendor": u.get("ID_VENDOR_FROM_DATABASE") or u.get("ID_VENDOR"),
+        "model": u.get("ID_MODEL_FROM_DATABASE") or u.get("ID_MODEL"),
+        "device_serial": u.get("ID_SERIAL_SHORT") or u.get("ID_SERIAL"),
+        "wwn": u.get("ID_WWN"),
+        "id_path": u.get("ID_PATH"),
+        "source_mount": find_mount(part),
+    }
+
+
+def cmd_inspect(dev: str) -> int:
+    info = block_info(dev)
+    if info.get("type") != "part":
+        children = [x for x in info.get("children", []) if x.get("type") == "part"]
+        result = {"status": "ATTENTION_REQUIRED" if len(children) != 1 else "PASS", "device": info, "partitions": children}
+        if len(children) == 1:
+            result["identity"] = identity(dev, children[0]["path"], children[0])
+    else:
+        result = {"status": "PASS", "device": info, "identity": identity(dev, info["path"], info)}
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result["status"] == "PASS" else 3
+
+
+def ensure_ro_mount(part: str, supplied: str | None) -> tuple[Path, dict]:
+    m = find_mount(part)
+    if m:
+        opts = set((m.get("options") or "").split(","))
+        if "ro" not in opts:
+            fail(f"source is mounted read-write; refusing to remount automatically: {part} -> {m.get('target')}")
+        return Path(m["target"]), m
+    if supplied:
+        sm = run(["findmnt", "-J", "-T", supplied])
+        if sm.returncode:
+            fail(f"supplied mountpoint is not mounted: {supplied}")
+        try:
+            f = (json.loads(sm.stdout).get("filesystems") or [None])[0]
+        except json.JSONDecodeError:
+            fail("invalid findmnt output for supplied mountpoint")
+        if f.get("source") != part or "ro" not in set((f.get("options") or "").split(",")):
+            fail(f"supplied mountpoint is not the requested partition mounted read-only: {supplied}")
+        return Path(supplied), f
+    # udisks is allowed only with an explicit ro option; verify after mounting.
+    p = run(["udisksctl", "mount", "--block-device", part, "--options", "ro"])
+    if p.returncode:
+        fail(f"read-only udisks mount failed: {p.stderr.strip() or p.stdout.strip()}")
+    m = find_mount(part)
+    if not m or "ro" not in set((m.get("options") or "").split(",")):
+        fail("udisks mount did not produce a verifiable read-only mount")
+    return Path(m["target"]), m
+
+
+def sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb", buffering=0) as f:
+        while True:
+            b = f.read(CHUNK)
+            if not b:
+                return h.hexdigest()
+            h.update(b)
+
+
+def inventory(source: Path, out: Path) -> tuple[list[dict], int, int, int]:
+    entries: list[dict] = []
+    files = dirs = 0
+    total = 0
+    for root, dirnames, filenames in os.walk(source, topdown=True, followlinks=False):
+        dirnames.sort(); filenames.sort()
+        rp = Path(root)
+        for name in dirnames:
+            p = rp / name
+            rel = p.relative_to(source).as_posix()
+            st = p.lstat()
+            entries.append({"path": rel, "kind": "directory", "size": 0, "mtime_ns": st.st_mtime_ns, "mode": st.st_mode})
+            dirs += 1
+        for name in filenames:
+            p = rp / name
+            rel = p.relative_to(source).as_posix()
+            st = p.lstat()
+            if p.is_symlink():
+                entries.append({"path": rel, "kind": "symlink", "target": os.readlink(p), "size": 0, "mtime_ns": st.st_mtime_ns, "mode": st.st_mode})
+            elif p.is_file():
+                entries.append({"path": rel, "kind": "file", "size": st.st_size, "mtime_ns": st.st_mtime_ns, "mode": st.st_mode})
+                files += 1; total += st.st_size
+            else:
+                entries.append({"path": rel, "kind": "unsupported", "size": st.st_size, "mtime_ns": st.st_mtime_ns, "mode": st.st_mode})
+    out.write_text("".join(json.dumps(e, sort_keys=True) + "\n" for e in entries))
+    return entries, files, dirs, total
+
+
+def append_ledger(row: dict) -> None:
+    STAGING.mkdir(parents=True, exist_ok=True)
+    with LEDGER.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, sort_keys=True) + "\n")
+        f.flush(); os.fsync(f.fileno())
+
+
+def cmd_ingest(dev: str, supplied_mount: str | None, label: str | None) -> int:
+    part, pinfo = resolve_partition(dev)
+    source, mount = ensure_ro_mount(part, supplied_mount)
+    ident = identity(dev, part, pinfo)
+    ident["source_mount"] = mount
+    if not mount.get("source", "").endswith(part):
+        fail(f"mount source mismatch: expected {part}, got {mount.get('source')}")
+    uuid_or_serial = ident.get("filesystem_uuid") or ident.get("device_serial") or "unknown"
+    short = hashlib.sha256(f"{part}|{uuid_or_serial}|{platform.node()}".encode()).hexdigest()[:10]
+    ingest_id = f"SDCARD-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{short}"
+    root = STAGING / ingest_id
+    if root.exists():
+        fail(f"destination namespace already exists; refusing collision: {root}")
+    source_out = root / "source"
+    evidence = root / "evidence"
+    evidence.mkdir(parents=True, exist_ok=False)
+    source_out.mkdir()
+    started = utc()
+    ingest = {"ingest_id": ingest_id, "status": "IN_PROGRESS", "started_utc": started, "physical_label": label, "identity": ident, "destination": str(root), "source_deletion": 0}
+    (evidence / "ingest.json").write_text(json.dumps(ingest, indent=2, sort_keys=True) + "\n")
+    entries, source_files, source_dirs, source_bytes = inventory(source, evidence / "source-inventory.jsonl")
+    hashes_path = evidence / "hashes.sha256"
+    files_path = evidence / "files.jsonl"
+    copy_log = evidence / "copy.log"
+    verified = missing = mismatch = unreadable = unsupported = 0
+    with hashes_path.open("w", encoding="utf-8") as hf, files_path.open("w", encoding="utf-8") as ff, copy_log.open("w", encoding="utf-8") as log:
+        for e in entries:
+            rel = e["path"]; sp = source / rel; dp = source_out / rel
+            rec = dict(e); rec["status"] = "NOT_APPLICABLE"
+            try:
+                if e["kind"] == "directory":
+                    dp.mkdir(parents=True, exist_ok=True)
+                elif e["kind"] == "symlink":
+                    dp.parent.mkdir(parents=True, exist_ok=True)
+                    if dp.exists() or dp.is_symlink():
+                        raise RuntimeError("destination collision")
+                    os.symlink(e["target"], dp); rec["status"] = "COPIED_SYMLINK"
+                elif e["kind"] == "file":
+                    dp.parent.mkdir(parents=True, exist_ok=True)
+                    if dp.exists() or dp.is_symlink():
+                        raise RuntimeError("destination collision")
+                    before = sp.stat()
+                    src_hash = sha256(sp)
+                    with sp.open("rb", buffering=0) as sf, (dp.with_name(dp.name + ".part")).open("wb", buffering=0) as df:
+                        while True:
+                            b = sf.read(CHUNK)
+                            if not b: break
+                            df.write(b)
+                        df.flush(); os.fsync(df.fileno())
+                    os.replace(dp.with_name(dp.name + ".part"), dp)
+                    try: shutil.copystat(sp, dp, follow_symlinks=False)
+                    except OSError: pass
+                    after = sp.stat()
+                    dst_hash = sha256(dp)
+                    rec.update({"source_sha256": src_hash, "destination_sha256": dst_hash})
+                    hf.write(f"{src_hash}  {rel}\n")
+                    if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+                        rec["status"] = "SOURCE_CHANGED"
+                        mismatch += 1
+                    elif before.st_size != dp.stat().st_size or src_hash != dst_hash:
+                        rec["status"] = "MISMATCH"
+                        mismatch += 1
+                    else:
+                        rec["status"] = "VERIFIED"; verified += 1
+                else:
+                    rec["status"] = "UNSUPPORTED"; unsupported += 1
+            except (OSError, RuntimeError) as ex:
+                rec["status"] = "ERROR"; rec["error"] = str(ex); unreadable += 1
+            ff.write(json.dumps(rec, sort_keys=True) + "\n")
+            log.write(f"{utc()}\t{rec['status']}\t{rel}\n")
+        hf.flush(); ff.flush(); log.flush()
+        os.fsync(hf.fileno()); os.fsync(ff.fileno()); os.fsync(log.fileno())
+    manifest_sha = sha256(hashes_path)
+    dest_files = sum(1 for e in entries if e.get("kind") == "file" and e.get("status") == "VERIFIED")
+    dest_bytes = sum(e.get("size", 0) for e in entries if e.get("kind") == "file" and e.get("status") == "VERIFIED")
+    status = "PASS" if (verified == source_files and source_files == dest_files and source_bytes == dest_bytes and mismatch == 0 and unreadable == 0 and unsupported == 0) else "ATTENTION_REQUIRED"
+    verification = {"ingest_id": ingest_id, "status": status, "copy_complete": status == "PASS", "hash_verified": status == "PASS", "source_file_count": source_files, "destination_verified_file_count": dest_files, "source_bytes": source_bytes, "destination_verified_bytes": dest_bytes, "hashes_verified": verified, "hash_mismatches": mismatch, "unreadable_files": unreadable, "unsupported_entries": unsupported, "missing": missing, "source_deletion": 0, "manifest_sha256": manifest_sha, "completed_utc": utc()}
+    (evidence / "verification.json").write_text(json.dumps(verification, indent=2, sort_keys=True) + "\n")
+    ingest.update({"status": status, "completed_utc": verification["completed_utc"], "source_file_count": source_files, "source_directory_count": source_dirs, "source_bytes": source_bytes, "manifest_sha256": manifest_sha})
+    (evidence / "ingest.json").write_text(json.dumps(ingest, indent=2, sort_keys=True) + "\n")
+    append_ledger({"ingest_id": ingest_id, "physical_label": label, "device_identity": ident, "capacity": ident.get("partition_size"), "first_observed": started, "ingest_start": started, "ingest_completed": verification["completed_utc"], "nas_location": str(root), "file_count": source_files, "bytes": source_bytes, "manifest_sha256": manifest_sha, "verification_status": status, "problem_count": mismatch + unreadable + unsupported, "canonicalization_status": "PENDING", "safe_to_retire": False, "notes": "Raw additive custody staging; no downstream processing."})
+    print(json.dumps({"status": status, "ingest_id": ingest_id, "destination": str(root), "evidence": str(evidence), "verification": verification}, indent=2, sort_keys=True))
+    return 0 if status == "PASS" else 4
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="command", required=True)
+    i = sub.add_parser("inspect"); i.add_argument("device")
+    g = sub.add_parser("ingest"); g.add_argument("device"); g.add_argument("--mountpoint"); g.add_argument("--label")
+    args = ap.parse_args()
+    if args.command == "inspect": return cmd_inspect(args.device)
+    return cmd_ingest(args.device, args.mountpoint, args.label)
+
+if __name__ == "__main__":
+    raise SystemExit(main())
