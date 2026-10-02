@@ -24,10 +24,15 @@ from typing import List, Optional
 
 log = logging.getLogger("shorts.publish")
 
-QUEUE_PATH = Path(os.environ.get(
-    "SHORTS_PUBLISH_QUEUE",
-    "/media/scott/NAS5/fileserver/dashcam_timelapse/_mix_run/publish_queue.jsonl",
-))
+QUEUE_PATH = Path(os.environ["SHORTS_PUBLISH_QUEUE"]) if os.environ.get("SHORTS_PUBLISH_QUEUE") else None
+
+def _require_queue_path():
+    env_override = os.environ.get("SHORTS_PUBLISH_QUEUE")
+    if env_override:
+        return Path(env_override)
+    if QUEUE_PATH is None:
+        raise RuntimeError("SHORTS_PUBLISH_QUEUE is not set; no default publish-queue path is assumed")
+    return QUEUE_PATH
 
 
 def _neo4j_creds():
@@ -71,25 +76,28 @@ def list_unpublished(limit: int = 50) -> List[Publishable]:
 
 def queue_for_publish(short: Publishable, platform: str = "youtube_shorts") -> Path:
     """Append a short to the publish queue (JSONL). Idempotent per (key,platform)."""
-    QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    queue = _require_queue_path()
+    queue.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "key": short.key, "topic": short.topic, "title": short.title,
         "out_path": short.out_path, "platform": platform,
         "queued_at": datetime.now(timezone.utc).isoformat(),
     }
     # Skip if already queued (posted-dedup at queue level).
-    if QUEUE_PATH.exists():
-        for line in QUEUE_PATH.read_text().splitlines():
+    queue = _require_queue_path()
+    if queue.exists():
+        for line in queue.read_text().splitlines():
             try:
-                if json.loads(line).get("key") == short.key and                    json.loads(line).get("platform") == platform:
+                if json.loads(line).get("key") == short.key and \
+                        json.loads(line).get("platform") == platform:
                     log.info("Already queued: %s/%s", short.key, platform)
-                    return QUEUE_PATH
+                    return queue
             except Exception:
                 continue
-    with QUEUE_PATH.open("a") as fh:
+    with queue.open("a") as fh:
         fh.write(json.dumps(rec) + "\n")
     log.info("Queued %s -> %s (%s)", short.key, platform, short.out_path)
-    return QUEUE_PATH
+    return queue
 
 
 def mark_published(key: str, platform: str,
@@ -158,6 +166,7 @@ def queue_all_on_disk(out_root: Path, platforms: List[str], limit: int = 0) -> i
 
 
 def _queue_file_lines() -> int:
-    if not QUEUE_PATH.exists():
+    queue = _require_queue_path()
+    if not queue.exists():
         return 0
-    return sum(1 for _ in QUEUE_PATH.read_text().splitlines() if _.strip())
+    return sum(1 for _ in queue.read_text().splitlines() if _.strip())

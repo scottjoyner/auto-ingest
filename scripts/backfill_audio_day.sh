@@ -64,7 +64,6 @@ from auto_ingest_config import get_fileserver_root
 print(get_fileserver_root())
 PY
 )"
-    /media/scott/NAS4/fileserver
   )
 fi
 

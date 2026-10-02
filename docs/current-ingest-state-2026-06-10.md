@@ -1,5 +1,12 @@
 # Auto-ingest / Neo4j current state — 2026-06-10 11:01 EDT
 
+## 0) Status (2026-10-02 housekeeping): HISTORICAL SNAPSHOT — NOT CURRENT STATE
+The mount inventory below (NAS1/NAS2 claims) describes 2026-06-10 only and must not be
+used to pick storage paths today. See `docs/deployment_runbook.md` for the current
+contract and `docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md` for the
+classified inventory.
+
+
 This document is a guardrail for future agents. Do not assume the auto-ingest stack is correctly scanning all NAS media just because containers are up.
 
 ## Executive summary

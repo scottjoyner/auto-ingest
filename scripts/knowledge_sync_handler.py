@@ -14,7 +14,9 @@ from datetime import datetime
 from pathlib import Path
 
 MASTER_PATH = os.environ.get("KNOWLEDGE_VAULT_PATH", "/home/scott/knowledge")
-MIRROR_PATH = os.environ.get("KNOWLEDGE_MIRROR_PATH", "/media/scott/NAS2/fileserver/shared-knowledge")
+MIRROR_PATH = os.environ.get("KNOWLEDGE_MIRROR_PATH", "")
+if not MIRROR_PATH:
+    raise SystemExit("KNOWLEDGE_MIRROR_PATH is not set; see config.yaml knowledge_map.mirror_vault_path")
 AUTO_INGEST_PATH = "/home/scott/git/auto-ingest"
 LOG_FILE = "/home/scott/logs/knowledge_sync.log"
 

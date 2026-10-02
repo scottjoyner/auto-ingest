@@ -1,4 +1,8 @@
 from auto_ingest_config import get_fileserver_path
+
+IMAGES_ROOT = os.environ.get("YOLO_IMAGES_ROOT", "")
+if not IMAGES_ROOT:
+    raise SystemExit("YOLO_IMAGES_ROOT is not set; refusing to default to a legacy mount")
 import pandas as pd
 import numpy as np
 import ast, re
@@ -23,7 +27,7 @@ def save_image(key, xyxy):
 
     # Build the file path
     dir_path = f"{source_dir}/{year}/{month}/{day}/{timestamp}.MP4"
-    save_dir = f"/media/scott/NAS/324ab5fd-8cb6-4a27-bd56-e648a5fcdb7a/images/{timestamp}"
+    save_dir = os.path.join(IMAGES_ROOT, timestamp)
     # Output
     print("dir =", dir_path)
     print("frame =", frame)
@@ -52,7 +56,7 @@ def list_files(directory):
             file_keys.add(filename.rsplit('.MP4', 1)[0])
     file_keys_copy = file_keys.copy()
     for filename in file_keys_copy:
-        save_dir = f"/media/scott/NAS/324ab5fd-8cb6-4a27-bd56-e648a5fcdb7a/images/{filename}"
+        save_dir = os.path.join(IMAGES_ROOT, filename)
         if os.path.exists(save_dir):
             file_keys.remove(filename)
     return sorted(list(file_keys))

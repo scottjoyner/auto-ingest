@@ -1,7 +1,12 @@
 #!/bin/bash
+# DEPRECATED (2026-10-02 housekeeping) — flat single-host orchestrator.
+# Canonical entrypoint: `bin/auto-ingest run-all` (machine-agnostic; paths come
+# from config.yaml + env). This script is kept only as a compatibility shim for
+# operators still typing `./runall.sh`; do NOT add new orchestration here.
+# See docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md.
 set -euo pipefail
 
-cd ~/git/auto-ingest || { echo "❌ Failed to cd into ~/git/auto-ingest"; exit 1; }
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Load host-specific roots and service endpoints from .env. These resolve via the
 # mount-aware helpers in auto_ingest_config (get_dashcam_root/get_audio_root/

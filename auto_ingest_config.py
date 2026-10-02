@@ -125,14 +125,14 @@ def get_storage_layout():
         'hot_root': os.environ.get('HOT_STORAGE_ROOT')
         or (matched_machine or {}).get('hot_ssd_root')
         or knowledge_map.get('hot_layer_path')
-        or '/media/scott/SSD_4TB/audio',
+        or '',
         'cold_root': os.environ.get('COLD_STORAGE_ROOT')
         or (matched_machine or {}).get('nas_mirror_root')
         or knowledge_map.get('mirror_vault_path')
-        or '/media/scott/NAS5',
+        or '',
         'fileserver_root': os.environ.get('FILESERVER_ROOT')
         or (matched_machine or {}).get('fileserver_root')
-        or '/media/scott/SSD_4TB/fileserver',
+        or '',
     }
 
 
@@ -181,8 +181,13 @@ def _require_mounted(path):
 
 
 def get_hot_root():
-    """Get the SSD hot layer root path."""
-    return get_storage_layout()['hot_root']
+    """Get the SSD hot layer root path. Fails closed when unconfigured."""
+    root = get_storage_layout()['hot_root']
+    if not root:
+        raise RuntimeError(
+            "Hot storage root is not configured (set HOT_STORAGE_ROOT or "
+            "machine_paths.<host>.hot_ssd_root in config.yaml)")
+    return root
 
 
 def get_cold_root():
@@ -191,7 +196,12 @@ def get_cold_root():
     Fail closed: NAS5 is the only accepted NAS mount on deathstar. Do not fall
     back to legacy NAS3 because it may cause new data to be loaded there.
     """
-    return _require_mounted(_first_existing_path(get_storage_layout()['cold_root'], '/media/scott/NAS5'))
+    cold = get_storage_layout()['cold_root']
+    if not cold:
+        raise RuntimeError(
+            "Cold storage root is not configured (set COLD_STORAGE_ROOT or "
+            "machine_paths.<host>.nas_mirror_root in config.yaml)")
+    return _require_mounted(cold)
 
 
 def get_fileserver_root():
@@ -203,15 +213,24 @@ def get_fileserver_root():
     3. Fallback to x1-370/default storage layout
     """
     root = get_storage_layout()['fileserver_root']
-    return _first_existing_path(root, '/mnt/8TB_2025/fileserver', '/media/scott/SSD_4TB/fileserver')
+    if not root:
+        raise RuntimeError(
+            "Fileserver root is not configured (set FILESERVER_ROOT or "
+            "machine_paths.<host>.fileserver_root in config.yaml)")
+    return root
 
 
 def get_audio_root():
     """Get the canonical destination/root for organized audio."""
     env = os.environ.get('AUDIO_ROOT')
     layout = get_storage_layout()
-    hot_audio = _subpath_or_root(layout.get('hot_root'), 'audio')
-    return _first_existing_path(env, hot_audio, '/mnt/8TB_2025/fileserver/audio', '/media/scott/SSD_4TB/audio', '/media/scott/NAS5/audio')
+    if env:
+        return env
+    if layout.get('hot_root'):
+        return _subpath_or_root(layout['hot_root'], 'audio')
+    raise RuntimeError(
+        "Audio root is not configured (set AUDIO_ROOT or "
+        "machine_paths.<host>.hot_ssd_root in config.yaml)")
 
 
 def get_dashcam_root():
@@ -224,12 +243,7 @@ def get_dashcam_root():
     env = os.environ.get('DASHCAM_ROOT')
     if env:
         return env
-    fileserver_root = Path(get_fileserver_root())
-    local_cache = fileserver_root / 'dashcam'
-    if fileserver_root.exists():
-        return str(local_cache)
-    cold = get_cold_root()
-    return _first_existing_path(_subpath_or_root(cold, 'dashcam'), '/media/scott/NAS5/dashcam')
+    return str(Path(get_fileserver_root()) / 'dashcam')
 
 
 def get_bodycam_root():
@@ -242,12 +256,7 @@ def get_bodycam_root():
     env = os.environ.get('BODYCAM_ROOT')
     if env:
         return env
-    fileserver_root = Path(get_fileserver_root())
-    local_cache = fileserver_root / 'bodycam'
-    if fileserver_root.exists():
-        return str(local_cache)
-    cold = get_cold_root()
-    return _first_existing_path(_subpath_or_root(cold, 'bodycam'), '/media/scott/NAS5/bodycam')
+    return str(Path(get_fileserver_root()) / 'bodycam')
 
 
 def get_neo4j_config():
@@ -329,8 +338,11 @@ def get_nextcloud_root():
     """
     cfg = _load_config()
     root = (os.environ.get("NEXTCLOUD_ROOT")
-           or cfg.get("nextcloud_root")
-           or "/media/scott/SSD_4TB/nextcloud")
+           or cfg.get("nextcloud_root"))
+    if not root:
+        raise RuntimeError(
+            "Nextcloud root is not configured (set NEXTCLOUD_ROOT or "
+            "'nextcloud_root' in config.yaml)")
     return root
 
 
@@ -365,8 +377,16 @@ def build_artifact_ref(path: str, storage_root: str = "local-ssd",
     rel = p
     container = None
     # Relative to known roots if under them.
-    for root in (get_fileserver_root(), get_storage_layout()["hot_root"],
-                 get_storage_layout()["cold_root"]):
+    roots = []
+    try:
+        roots.append(get_fileserver_root())
+    except RuntimeError:
+        pass
+    for root in (get_storage_layout().get("hot_root"),
+                 get_storage_layout().get("cold_root")):
+        if root:
+            roots.append(root)
+    for root in roots:
         rp = os.path.relpath(p, root)
         if not rp.startswith(".."):
             rel = rp

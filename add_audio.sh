@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Directory containing the MP4 files
-dir="/media/scott/NAS/"
+dir="${DASHCAM_ROOT:?DASHCAM_ROOT must be set}"
 
 # Navigate to the directory
 cd "$dir"

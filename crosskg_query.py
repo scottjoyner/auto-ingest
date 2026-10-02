@@ -43,7 +43,7 @@ def main() -> int:
     ap.add_argument("--kg-a-uri", default=os.getenv("NEO4J_URI", ""))
     ap.add_argument("--kg-b-uri", default="")
     ap.add_argument("--user", default=os.getenv("NEO4J_USER", "neo4j"))
-    ap.add_argument("--password", default=os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026"))
+    ap.add_argument("--password", default=os.getenv("NEO4J_PASSWORD", os.getenv("NEO4J_PASSWORD_DEFAULT", "knowledge_graph_2026")))
     ap.add_argument("--resolve", action="store_true", help="connect to both KGs and print node text")
     args = ap.parse_args()
 

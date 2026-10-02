@@ -35,10 +35,15 @@ from typing import List, Optional, Union
 
 log = logging.getLogger("shorts.uploader")
 
-QUEUE_PATH = Path(os.environ.get(
-    "SHORTS_PUBLISH_QUEUE",
-    "/media/scott/NAS5/fileserver/dashcam_timelapse/_mix_run/publish_queue.jsonl",
-))
+QUEUE_PATH = Path(os.environ["SHORTS_PUBLISH_QUEUE"]) if os.environ.get("SHORTS_PUBLISH_QUEUE") else None
+
+def _require_queue_path():
+    env_override = os.environ.get("SHORTS_PUBLISH_QUEUE")
+    if env_override:
+        return Path(env_override)
+    if QUEUE_PATH is None:
+        raise RuntimeError("SHORTS_PUBLISH_QUEUE is not set; no default publish-queue path is assumed")
+    return QUEUE_PATH
 
 
 @dataclass
@@ -55,10 +60,11 @@ class QueueItem:
 
 
 def load_queue() -> List[QueueItem]:
-    if not QUEUE_PATH.exists():
+    queue = _require_queue_path()
+    if not queue.exists():
         return []
     items: List[QueueItem] = []
-    for line in QUEUE_PATH.read_text().splitlines():
+    for line in queue.read_text().splitlines():
         line = line.strip()
         if not line:
             continue

@@ -3,7 +3,7 @@
 # Installs the Signal->KG bridge as a user cron job.
 # The script itself lives on the shared SSD_4TB mount, so it's already deployed.
 set -e
-REPO=/media/scott/SSD_4TB/hermes-home/auto-ingest
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOGDIR=$REPO/logs
 mkdir -p "$LOGDIR"
 

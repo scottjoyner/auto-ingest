@@ -65,8 +65,6 @@ def corpus_centroid(corpus_dir=None):
             os.getenv("AUDIO_BASE"),
             get_audio_root(),
             os.path.join(get_fileserver_root(), "audio"),
-            "/media/scott/SSD_4TB/audio",
-            "/media/scott/NAS4/fileserver/audio",
         ] if p
     ]), None)
     corpus_dir = corpus_dir or base

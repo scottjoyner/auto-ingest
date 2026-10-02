@@ -25,8 +25,23 @@ from typing import List, Set
 
 from auto_ingest_config import get_fileserver_path
 
-COMPRESSED_ROOT = os.environ.get("COMPRESSED_ROOT") or get_fileserver_path("dashcam/compressed")
-OUT_ROOT = os.environ.get("TIKTOK_OUT_ROOT", "/media/scott/SSD_4TB/tiktok_shorts")
+COMPRESSED_ROOT = os.environ.get("COMPRESSED_ROOT")
+OUT_ROOT = os.environ.get("TIKTOK_OUT_ROOT")
+
+
+def _require_roots():
+    """Resolve worker roots lazily so the module stays importable in CI."""
+    compressed = COMPRESSED_ROOT
+    if not compressed:
+        try:
+            compressed = get_fileserver_path("dashcam/compressed")
+        except RuntimeError:
+            compressed = None
+    if not compressed:
+        raise RuntimeError("COMPRESSED_ROOT (or FILESERVER_ROOT/config.yaml) is required")
+    if not OUT_ROOT:
+        raise RuntimeError("TIKTOK_OUT_ROOT is not set; refusing to pick a default output root")
+    return compressed, OUT_ROOT
 MUSIC = os.environ.get("CONTENT_MUSIC", "")  # optional background track
 
 
@@ -58,6 +73,11 @@ def main() -> int:
     ap.add_argument("--music", default=MUSIC or None)
     ap.add_argument("--hook", default=None, help="Hook text (or auto from date)")
     args = ap.parse_args()
+
+    if not args.compressed_root or not args.out_root:
+        compressed, out = _require_roots()
+        args.compressed_root = args.compressed_root or compressed
+        args.out_root = args.out_root or out
 
     state: dict = {}
     if Path(args.state).exists():

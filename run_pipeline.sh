@@ -18,7 +18,7 @@ export NEO4J_PASSWORD="${NEO4J_PASSWORD:-$(python3 -c 'import auto_ingest_config
 export NEO4J_DB="${NEO4J_DB:-neo4j}"
 
 FILESERVER_ROOT="${FILESERVER_ROOT:-$(python3 -c 'import auto_ingest_config as c; print(c.get_fileserver_root())')}"
-OUT_ROOT="${OUT_ROOT:-/media/scott/SSD_4TB/tiktok_shorts}"
+OUT_ROOT="${OUT_ROOT:?OUT_ROOT must be set (no machine-specific default)}"
 CLIP="${1:-}"
 HOOK="${2:-}"
 MUSIC="${MUSIC:-}"

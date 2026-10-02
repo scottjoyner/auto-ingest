@@ -74,11 +74,11 @@ Key variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| NAS_ROOT | /media/scott/NAS1 | NAS mount point (mounted as /nas in containers) |
+| NAS_ROOT | (no default — set in `.env`) | Host NAS path bound to `/nas` in containers |
 | DROP_ROOT | /nas/drop | Job queue directory |
 | NEO4J_URI | bolt://localhost:7687 | Neo4j Bolt URI |
 | NEO4J_USER | neo4j | Neo4j username |
-| NEO4J_PASSWORD | knowledge_graph_2026 | Neo4j password |
+| NEO4J_PASSWORD | (via NEO4J_PASSWORD_DEFAULT) | Neo4j password |
 | SCAN_ROOTS | (comma-separated) | Directories to scan for transcripts |
 | DASHCAM_ROOT | /nas/fileserver/dashcam | Dashcam root |
 | AUDIO_ROOT | /nas/S/audio | Audio root |

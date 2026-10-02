@@ -26,8 +26,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from auto_ingest.shorts import backdrop, curator, planner, render  # noqa: E402
 from auto_ingest.shorts.models import Plan  # noqa: E402
 
-NAMESPACE = "/media/scott/NAS5/fileserver/dashcam_timelapse/_mix_run/narrated"
-PLANS_DIR = Path("/media/scott/SSD_4TB/hermes-home/auto-ingest/plans_narrated")
+NAMESPACE = os.environ.get("NARRATED_NAMESPACE")
+if not NAMESPACE:
+    raise SystemExit("NARRATED_NAMESPACE is not set; point it at the _mix_run/narrated directory")
+PLANS_DIR = Path(os.environ.get("PLANS_DIR", str(Path(__file__).resolve().parent.parent / "plans_narrated")))
 TTS_ENV = {"COQUI_TOS_AGREED": "1"}
 
 

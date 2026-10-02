@@ -35,7 +35,7 @@ def main():
     ap.add_argument("--json", action="store_true", help="emit JSON")
     ap.add_argument("--neo4j-uri", default="bolt://localhost:7687")
     ap.add_argument("--neo4j-user", default="neo4j")
-    ap.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026"))
+    ap.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", os.getenv("NEO4J_PASSWORD_DEFAULT", "knowledge_graph_2026")))
     ap.add_argument("--embed-model", default=EMB_MODEL)
     args = ap.parse_args()
 

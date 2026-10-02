@@ -13,7 +13,8 @@ LOG=f'{STATE_DIR}/ingest_supervisor.log'
 ALERTS=f'{STATE_DIR}/ingest_alerts.log'
 CREDS=f'{STATE_DIR}/credentials.env'
 REPO=f'{HOME}/git/auto-ingest'
-ROOT=os.environ.get('DASHCAM_ROOT','/mnt/8TB_2025/fileserver/dashcam')
+from auto_ingest_config import get_dashcam_root  # noqa: E402
+ROOT=os.environ.get('DASHCAM_ROOT') or get_dashcam_root()
 MAX_ATTEMPTS=3
 MIN_AGE_S=1800          # skip day-dirs modified too recently (import in flight)
 
@@ -97,7 +98,7 @@ def main():
     PROVEN_CMD=[
         'nice','-n','10',
         'docker','run','--rm','--network','host',
-        '-v','/mnt/8TB_2025/fileserver/dashcam:/dashcam',
+        '-v',f'{ROOT}:/dashcam',
         '-e','PYTHONPATH=/app',
         '-e','NEO4J_PASS',
         'auto-ingest:latest',

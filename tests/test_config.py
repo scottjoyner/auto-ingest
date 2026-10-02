@@ -158,6 +158,7 @@ def test_nextcloud_root_and_webdav(config_in_tmp, monkeypatch):
     import auto_ingest_config as cfg
 
     _clear_override_env(monkeypatch)
+    monkeypatch.setenv("NEXTCLOUD_ROOT", "/media/scott/SSD_4TB/nextcloud")
     assert cfg.get_nextcloud_root() == "/media/scott/SSD_4TB/nextcloud"
 
     monkeypatch.setenv("NEXTCLOUD_URL", "https://nc.example/remote.php")
@@ -290,7 +291,8 @@ def test_shim_preferred_reexports_root(live_config_in_tmp, monkeypatch):
     assert _config.get_hot_root() == str(hot)
     nc = _config.get_neo4j_config()
     assert nc["uri"] == "bolt://1.2.3.4:7687"
-    assert _config.get_nextcloud_root() == "/media/scott/SSD_4TB/nextcloud"
+    monkeypatch.setenv("NEXTCLOUD_ROOT", "/tmp/nc_root")
+    assert _config.get_nextcloud_root() == "/tmp/nc_root"
 
 
 # --------------------------------------------------------------------------- #
@@ -375,10 +377,13 @@ def test_shim_fallback_defaults(monkeypatch):
         import auto_ingest._config as shim
 
         importlib.reload(shim)
-        assert shim.get_fileserver_root() == "/media/scott/SSD_4TB/fileserver"
-        assert shim.get_storage_layout()["hot_root"] == "/media/scott/SSD_4TB/audio"
+        import pytest as _pytest
+        with _pytest.raises(RuntimeError):
+            shim.get_fileserver_root()
+        assert shim.get_storage_layout()["hot_root"] == ""
         assert shim.get_neo4j_config()["uri"] == "bolt://localhost:7687"
-        assert shim.get_nextcloud_root() == "/media/scott/SSD_4TB/nextcloud"
+        with _pytest.raises(RuntimeError):
+            shim.get_nextcloud_root()
     finally:
         sys.modules.pop("auto_ingest_config", None)
         monkeypatch.undo()

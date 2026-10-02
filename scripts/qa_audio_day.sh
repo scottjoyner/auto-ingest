@@ -21,7 +21,7 @@ PY
 )}"
 
 echo "==== Filesystem coverage for $DAY ===="
-for base in "$FILES_BASE" /media/scott/NAS4/fileserver; do
+for base in "$FILES_BASE"; do
   for sub in "audio/$REL" "audio/transcriptions/$REL"; do
     p="$base/$sub"
     if [[ -d "$p" ]]; then

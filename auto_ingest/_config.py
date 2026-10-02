@@ -25,7 +25,10 @@ except Exception:  # pragma: no cover - CI / out-of-repo import fallback
     import os
 
     def get_fileserver_root() -> str:
-        return os.environ.get("FILESERVER_ROOT", "/media/scott/SSD_4TB/fileserver")
+        root = os.environ.get("FILESERVER_ROOT")
+        if not root:
+            raise RuntimeError("FILESERVER_ROOT is not set")
+        return root
 
     def get_fileserver_path(*parts: str) -> str:
         import os as _os
@@ -34,13 +37,16 @@ except Exception:  # pragma: no cover - CI / out-of-repo import fallback
 
     def get_storage_layout() -> dict:
         return {
-            "hot_root": os.environ.get("HOT_STORAGE_ROOT", "/media/scott/SSD_4TB/audio"),
-            "cold_root": os.environ.get("COLD_STORAGE_ROOT", "/media/scott/SSD_4TB/fileserver"),
-            "fileserver_root": get_fileserver_root(),
+            "hot_root": os.environ.get("HOT_STORAGE_ROOT", ""),
+            "cold_root": os.environ.get("COLD_STORAGE_ROOT", ""),
+            "fileserver_root": os.environ.get("FILESERVER_ROOT", ""),
         }
 
     def get_hot_root() -> str:
-        return get_storage_layout()["hot_root"]
+        root = get_storage_layout()["hot_root"]
+        if not root:
+            raise RuntimeError("HOT_STORAGE_ROOT is not set")
+        return root
 
     def get_neo4j_config() -> dict:
         return {
@@ -50,7 +56,10 @@ except Exception:  # pragma: no cover - CI / out-of-repo import fallback
         }
 
     def get_nextcloud_root() -> str:
-        return os.environ.get("NEXTCLOUD_ROOT", "/media/scott/SSD_4TB/nextcloud")
+        root = os.environ.get("NEXTCLOUD_ROOT")
+        if not root:
+            raise RuntimeError("NEXTCLOUD_ROOT is not set")
+        return root
 
     def get_nextcloud_webdav():
         return (None, None, None)

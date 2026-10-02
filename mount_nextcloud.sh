@@ -15,7 +15,7 @@
 #   https://cloud.example.com/remote.php/dav/files/ME/Photos
 set -euo pipefail
 
-MOUNT="${NEXTCLOUD_MOUNT:-/media/scott/SSD_4TB/nextcloud}"
+MOUNT="${NEXTCLOUD_MOUNT:-$(python3 -c 'import auto_ingest_config as c; print(c.get_nextcloud_root())')}"
 URL="${NEXTCLOUD_URL:-${1:-}}"
 USER="${NEXTCLOUD_USER:-${2:-}}"
 PASS="${NEXTCLOUD_PASS:-${3:-}}"

@@ -25,7 +25,10 @@ from dashcam_frame_vision import (
 )
 from neo4j import GraphDatabase
 
-SALVAGE_DIR = "/mnt/8TB_2025/fileserver/dashcam/_salvage"
+def _salvage_dir():
+    from auto_ingest_config import get_dashcam_root
+    return os.path.join(get_dashcam_root(), "_salvage")
+SALVAGE_DIR = _salvage_dir()
 
 
 def find_mp4(base, key):
@@ -59,10 +62,11 @@ def salvage(in_path, out_path, reencode=False):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base", default="/mnt/8TB_2025/fileserver/dashcam")
+    from auto_ingest_config import get_dashcam_root
+    ap.add_argument("--base", default=get_dashcam_root())
     ap.add_argument("--neo4j-uri", default="bolt://localhost:7687")
     ap.add_argument("--neo4j-user", default="neo4j")
-    ap.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026"))
+    ap.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", os.getenv("NEO4J_PASSWORD_DEFAULT", "knowledge_graph_2026")))
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--all-failed", action="store_true", help="also retry timeout_or_hang clips")
     ap.add_argument("--vision-url", default="http://100.85.64.117:1234/v1/chat/completions")
@@ -81,7 +85,7 @@ def main():
                       "and lighting, vehicles, pedestrians/cyclists, signage, and notable events. "
                       "2-4 sentences.")
 
-    BASES = [args.base, "/mnt/8TBHDD/fileserver/dashcam"]
+    BASES = [args.base]
     with driver.session() as sess:
         if args.all_failed:
             rows = sess.run("MATCH (c:DashcamClip {failed:true}) RETURN c.key AS key, c.path AS path").data()

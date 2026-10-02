@@ -157,7 +157,7 @@ cmd_health() {
 
     # Check NAS mount
     echo "--- NAS Mount ---"
-    local root="${NAS_ROOT:-/media/scott/NAS3}"
+    local root="${NAS_ROOT:?NAS_ROOT must be set (see deploy/path_profiles.env.example)}"
     if mountpoint -q "$root" 2>/dev/null || [[ -d "$root" ]]; then
         echo "NAS root ($root): MOUNTED"
         df -h "$root" 2>/dev/null | tail -1

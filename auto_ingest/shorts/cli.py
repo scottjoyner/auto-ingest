@@ -295,8 +295,8 @@ def build_parser() -> argparse.ArgumentParser:
     ppv.add_argument("--disk", action="store_true",
                      help="Stage from rendered MP4s on disk instead of Neo4j (DB-independent)")
     ppv.add_argument("--out-root",
-                     default="/media/scott/NAS5/fileserver/dashcam_timelapse/_mix_run/narrated",
-                     help="Root dir scanned by --disk")
+                     default=os.environ.get("SHORTS_OUT_ROOT"),
+                     help="Root dir scanned by --disk (or set SHORTS_OUT_ROOT)")
     ppv.add_argument("--limit", type=int, default=0)
     ppv.add_argument("--plans-dir", type=Path, default=DEFAULT_PLANS_DIR,
                      help="Plan JSON dir used to enrich queue items (hook/thumbnail)")
@@ -457,6 +457,8 @@ def _cmd_ab_choose(args) -> int:
 def _cmd_publish(args) -> int:
     if args.action == "queue":
         if args.disk:
+            if args.out_root is None:
+                raise SystemExit("--out-root (or SHORTS_OUT_ROOT) is required when --disk is used")
             n = publish.queue_all_on_disk(args.out_root, args.platforms, limit=args.limit)
             print(f"Staged {n} (short,platform) entries from disk under {args.out_root}")
         else:

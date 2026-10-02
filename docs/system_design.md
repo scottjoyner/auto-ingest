@@ -144,7 +144,8 @@ SCAN_ROOTS="/nas/fileserver/dashcam" DASHCAM_ROOT="/nas/fileserver/dashcam" /usr
 
 ### Prerequisites
 - Docker + Docker Compose
-- NAS mounted at `/media/scott/NAS1` (or configured via `.env`)
+- Canonical NAS reachable on the host; set `NAS_ROOT` in `.env` (see
+  `deploy/path_profiles.env.example`). Containers always see it at `/nas`.
 - Neo4j running on host (ports 7474, 7687 exposed)
 
 ### Quick Start
@@ -181,11 +182,11 @@ curl -X POST http://localhost:8766/api/enqueue \
 ### Key Configuration (in .env or compose)
 | Variable | Default | Description |
 |----------|---------|-------------|
-| NAS_ROOT | /media/scott/NAS1 | NAS mount point |
+| NAS_ROOT | (no default — set in `.env`) | Host NAS path bound to `/nas` in containers |
 | DROP_ROOT | /nas/drop | Job queue directory |
 | NEO4J_URI | bolt://localhost:7687 | Neo4j connection |
 | NEO4J_USER | neo4j | Neo4j username |
-| NEO4J_PASSWORD | knowledge_graph_2026 | Neo4j password |
+| NEO4J_PASSWORD | (via NEO4J_PASSWORD_DEFAULT) | Neo4j password; see `auto_ingest_config.get_neo4j_password()` |
 | SCAN_ROOTS | (comma-separated) | Directories to scan |
 | DASHCAM_ROOT | /nas/fileserver/dashcam | Dashcam root |
 | AUDIO_ROOT | /nas/S/audio | Audio root |

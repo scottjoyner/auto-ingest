@@ -16,6 +16,7 @@ import os
 import re
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 from scipy.io import wavfile
@@ -23,9 +24,9 @@ from scipy.signal import resample
 
 WHISPER_MODEL = "base"
 WHISPER_DOWNLOAD_ROOT = "/tmp/whisper_models"
-AUDIO_ROOT = "/media/scott/SSD_4TB/audio"
-CORRECTION_FILE = "/media/scott/USB DISK/DATETIME_CORRECTION.json"
-PROGRESS_FILE = "/media/scott/data/git/auto-ingest/transcribe_progress.json"
+AUDIO_ROOT = os.environ.get("AUDIO_ROOT") or str(Path(__file__).resolve().parent / ".usb_audio")
+CORRECTION_FILE = os.environ.get("USB_CORRECTION_FILE", "DATETIME_CORRECTION.json")
+PROGRESS_FILE = os.environ.get("USB_PROGRESS_FILE", str(Path(__file__).resolve().parent / "transcribe_progress.json"))
 
 
 def get_usb_wav_files():

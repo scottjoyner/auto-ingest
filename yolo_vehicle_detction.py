@@ -133,7 +133,9 @@ def list_directories(base_path):
                     current += 1
 
 
-image_save_location = "/media/scott/NAS/324ab5fd-8cb6-4a27-bd56-e648a5fcdb7a/images/"
+image_save_location = os.environ.get("YOLO_IMAGES_ROOT", "")
+if not image_save_location:
+    raise SystemExit("YOLO_IMAGES_ROOT is not set; refusing to default to a legacy mount")
 # base_directory = get_fileserver_path("dashcam")  # Adjust this path to your base directory
 # list_directories(base_directory)
 base_directory = get_fileserver_path("dashcam")

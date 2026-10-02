@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Bulk Ingest Script for Dashcam Data
-# Processes all dashcam data from NAS2 into Neo4j
+# Processes all dashcam data into Neo4j (DASHCAM_ROOT required)
 
 LOG_DIR="${LOG_DIR:-./logs}"
 mkdir -p "$LOG_DIR"
@@ -13,7 +13,7 @@ echo "=== Bulk Dashcam Ingest Starting @ $(date) ===" | tee -a "$LOG_FILE"
 echo "Logging to: $LOG_FILE" | tee -a "$LOG_FILE"
 
 # Configuration
-DASHCAM_ROOT="${DASHCAM_ROOT:-/media/scott/NAS2/fileserver/dashcam}"
+DASHCAM_ROOT="${DASHCAM_ROOT:?DASHCAM_ROOT must be set}"
 NEO4J_URI="${NEO4J_URI:-bolt://host.docker.internal:7687}"
 NEO4J_USER="${NEO4J_USER:-neo4j}"
 NEO4J_PASS="${NEO4J_PASS:-${NEO4J_PASSWORD:-${NEO4J_PASSWORD_DEFAULT:-knowledge_graph_2026}}}"
@@ -46,7 +46,7 @@ process_day() {
     echo "[RUN] Processing ${year}/${month}/${day} (${clip_count} clips)" | tee -a "$LOG_FILE"
     
     # Run the ingest script for this day
-    docker compose run --rm --no-deps -v /media/scott/NAS2/fileserver/dashcam:/dashcam ingest-service \
+    docker compose run --rm --no-deps -v "${DASHCAM_ROOT}:/dashcam" ingest-service \
         bash -lc "python /app/auto_ingest/dashcam/yolo_embeddings.py \\
             --bases /dashcam/${year}/${month}/${day} \\
             --neo4j-uri ${NEO4J_URI} \\

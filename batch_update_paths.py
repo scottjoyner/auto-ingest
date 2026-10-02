@@ -1,12 +1,25 @@
 #!/usr/bin/env python3
 """
-Batch update auto-ingest scripts to use config.yaml instead of hardcoded paths.
+DEPRECATED (2026-10-02 housekeeping) — one-shot 2024-era migration codemod.
+
+This script rewrites every .py/.sh file in the repo checkout in place. It has no
+in-repo callers and the work it performed is done. It is retained for history only.
+
+DANGER: it is a repo-wide destructive rewrite (it also injects shell heredocs that
+reference an undefined variable), so it now runs DRY-RUN by default and refuses to
+touch anything unless --apply is passed explicitly.
+
+Canonical guidance: docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md
+Path authority: auto_ingest_config.py (config.yaml + env).
 """
+import argparse
 import os
 import re
+import sys
 from pathlib import Path
 
-REPO = Path('/home/scott/git/auto-ingest')
+REPO = Path(__file__).resolve().parent
+WRITE_APPLIED = False
 
 # Define the replacements for Python files
 PYTHON_PATH_PATTERNS = [
@@ -56,8 +69,10 @@ def update_python_file(filepath):
             content = 'from auto_ingest_config import get_fileserver_path\n' + content
     
     if content != original:
-        with open(filepath, 'w') as f:
-            f.write(content)
+        if WRITE_APPLIED:
+            with open(filepath, 'w') as f:
+                f.write(content)
+        print(f"{'Updated' if WRITE_APPLIED else 'Would update'}: {filepath}")
         return True
     return False
 
@@ -112,26 +127,34 @@ if config_path.exists():
         content = re.sub(pattern, 'FILESERVER_ROOT/', content)
     
     if content != original:
-        with open(filepath, 'w') as f:
-            f.write(content)
+        if WRITE_APPLIED:
+            with open(filepath, 'w') as f:
+                f.write(content)
+        print(f"{'Updated' if WRITE_APPLIED else 'Would update'}: {filepath}")
         return True
     return False
 
 
 if __name__ == '__main__':
+    import sys as _sys
+    globals()['WRITE_APPLIED'] = '--apply' in _sys.argv
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--apply", action="store_true",
+                    help="actually rewrite files (default: dry-run, no writes)")
+    args = ap.parse_args()
+    apply = globals()['WRITE_APPLIED']
     config_yaml = str(REPO / 'config.yaml')
-    
+
     updated_py = 0
     updated_sh = 0
-    
-    for f in REPO.iterdir():
+
+    for f in sorted(REPO.iterdir()):
         if f.suffix == '.py' and f.is_file():
             if update_python_file(f):
-                print(f"Updated: {f.name}")
                 updated_py += 1
         elif f.suffix == '.sh' and f.is_file():
             if update_shell_file(f):
-                print(f"Updated: {f.name}")
                 updated_sh += 1
-    
-    print(f"\nTotal: {updated_py} Python files, {updated_sh} shell scripts updated")
+
+    print(f"\nTotal: {updated_py} Python files, {updated_sh} shell scripts "
+          f"{'updated' if apply else 'would be updated (dry-run)'}")

@@ -24,7 +24,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--uri", default=os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687"))
     ap.add_argument("--user", default=os.getenv("NEO4J_USER", "neo4j"))
-    ap.add_argument("--password", default=os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026"))
+    ap.add_argument("--password", default=os.getenv("NEO4J_PASSWORD", os.getenv("NEO4J_PASSWORD_DEFAULT", "knowledge_graph_2026")))
     ap.add_argument("--label", default="Chunk")
     ap.add_argument("--prop-x", default="emb_e5_large")
     ap.add_argument("--prop-y", default="emb_mini12")

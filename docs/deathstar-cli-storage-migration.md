@@ -2,6 +2,14 @@
 
 Updated: 2026-06-25
 
+> **Status (2026-10-02 housekeeping): HISTORICAL / SUPERSEDED.** This note describes the
+> 2026-06-25 CLI + storage migration (NAS3 era). Its "canonical storage layout" and
+> `runall.sh` steps are historical and are NOT current deployment guidance. Current
+> entrypoint is `bin/auto-ingest`; current path contract is `auto_ingest_config.py` +
+> `deploy/path_profiles.env.example`. See `docs/deployment_runbook.md` and
+> `docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md`.
+
+
 ## Goal
 
 Use `auto-ingest` as the canonical repo for dashcam/audio/transcript processing and treat `video-automation` as a deprecated migration source. The same command names should work on every fleet machine, with paths resolved by `auto_ingest_config.py` and environment overrides.

@@ -318,13 +318,14 @@ def run_orchestrate(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    default_base = get_fileserver_path("dashcam") if get_fileserver_path else "/mnt/8TB_2025/fileserver/dashcam"
-    ap.add_argument("--base", default=default_base)
+    default_base = get_fileserver_path("dashcam") if get_fileserver_path else None
+    ap.add_argument("--base", default=default_base, required=default_base is None)
     ap.add_argument("--vision-url", default="http://100.85.64.117:1234/v1/chat/completions")
     ap.add_argument("--vision-model", default="qwen3.5-0.8b-mlx")
     ap.add_argument("--neo4j-uri", default="bolt://localhost:7687")
     ap.add_argument("--neo4j-user", default="neo4j")
-    ap.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026"))
+    from auto_ingest_config import get_neo4j_password
+    ap.add_argument("--neo4j-password", default=get_neo4j_password())
     ap.add_argument("--prompt", default=DEFAULT_PROMPT)
     ap.add_argument("--sys-prompt", default="You are a precise dashcam scene analyst.")
     ap.add_argument("--max-minutes", type=int, default=None, help="cap minutes per clip (None=all)")

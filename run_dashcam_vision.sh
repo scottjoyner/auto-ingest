@@ -5,13 +5,13 @@
 # - Re-runs continuously so newly-added clips get picked up.
 # Intended to be run by a systemd service (Restart=always) for auto-resume on boot.
 set -u
-BASES="/mnt/8TB_2025/fileserver/dashcam /mnt/8TBHDD/fileserver/dashcam"
+BASES="${DASHCAM_BASES:-/mnt/8TB_2025/fileserver/dashcam}"
 VISION_HOST="100.85.64.117:1234"
 SCRIPT="/home/deathstar/git/auto-ingest/dashcam_frame_vision.py"
 WORKERS="${DASHCAM_WORKERS:-2}"
 MAX_MIN="${DASHCAM_MAX_MIN:-5}"
 NEO4J_URI="${DASHCAM_NEO4J_URI:-bolt://localhost:7687}"
-NEO4J_PWD="${NEO4J_PASSWORD:-knowledge_graph_2026}"
+NEO4J_PWD="${NEO4J_PASSWORD:-${NEO4J_PASSWORD_DEFAULT:-knowledge_graph_2026}}"
 
 macbook_up() { curl -s --max-time 5 "http://${VISION_HOST}/v1/models" >/dev/null 2>&1; }
 neo4j_up()   { curl -s --max-time 5 "http://localhost:7474" >/dev/null 2>&1; }

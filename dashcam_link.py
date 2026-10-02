@@ -26,7 +26,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--neo4j-uri", default="bolt://localhost:7687")
     ap.add_argument("--neo4j-user", default="neo4j")
-    ap.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026"))
+    ap.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", os.getenv("NEO4J_PASSWORD_DEFAULT", "knowledge_graph_2026")))
     ap.add_argument("--only-unlinked", action="store_true", help="skip clips already ON_DAY")
     args = ap.parse_args()
 

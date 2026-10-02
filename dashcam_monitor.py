@@ -12,8 +12,8 @@ import time
 from neo4j import GraphDatabase
 
 NEO4J_URI = "bolt://localhost:7687"
-NEO4J_PWD = os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026")
-BASES = ["/mnt/8TB_2025/fileserver/dashcam", "/mnt/8TBHDD/fileserver/dashcam"]
+NEO4J_PWD = os.getenv("NEO4J_PASSWORD", os.getenv("NEO4J_PASSWORD_DEFAULT", "knowledge_graph_2026"))
+BASES = [p for p in os.environ.get("DASHCAM_BASES", "/mnt/8TB_2025/fileserver/dashcam").split() if p]
 HEALTH = "dashcam_vision"
 
 _driver = GraphDatabase.driver(NEO4J_URI, auth=("neo4j", NEO4J_PWD))

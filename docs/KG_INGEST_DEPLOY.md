@@ -1,5 +1,12 @@
 # KG Ingestion Stack — Deployment Notes
 
+## 0) Status (2026-10-02 housekeeping): HISTORICAL DEPLOY NOTE
+The scripts live in this repo under `scripts/`; the physical paths quoted below
+(`/media/scott/SSD_4TB/hermes-home/...`) are a checkout location of a past era, not a
+dependency contract. Run them from a repo checkout (`./scripts/<name>.py`) and resolve
+paths via `auto_ingest_config.py` / env.
+
+
 Built 2026-07-16 (xwing session). All three scripts live in the SHARED path
 (auto-ingest is symlinked into x1-370 via SSD_4TB), so they're already deployed
 on both machines.
