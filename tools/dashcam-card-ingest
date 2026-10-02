@@ -193,6 +193,13 @@ def append_ledger(row: dict) -> None:
         f.flush(); os.fsync(f.fileno())
 
 
+def verified_destination_totals(inventory_entries: list[dict], copied_records: list[dict]) -> tuple[int, int]:
+    """Return verified file count/bytes from status-bearing copy records."""
+    del inventory_entries  # retained in the API to make the two populations explicit
+    verified = [record for record in copied_records if record.get("status") == "VERIFIED"]
+    return len(verified), sum(int(record.get("size", 0) or 0) for record in verified)
+
+
 def cmd_ingest(dev: str, supplied_mount: str | None, label: str | None) -> int:
     part, pinfo = resolve_partition(dev)
     source, mount = ensure_ro_mount(part, supplied_mount)
@@ -218,6 +225,7 @@ def cmd_ingest(dev: str, supplied_mount: str | None, label: str | None) -> int:
     files_path = evidence / "files.jsonl"
     copy_log = evidence / "copy.log"
     verified = missing = mismatch = unreadable = unsupported = 0
+    copied_records: list[dict] = []
     with hashes_path.open("w", encoding="utf-8") as hf, files_path.open("w", encoding="utf-8") as ff, copy_log.open("w", encoding="utf-8") as log:
         for e in entries:
             rel = e["path"]; sp = source / rel; dp = source_out / rel
@@ -261,13 +269,13 @@ def cmd_ingest(dev: str, supplied_mount: str | None, label: str | None) -> int:
                     rec["status"] = "UNSUPPORTED"; unsupported += 1
             except (OSError, RuntimeError) as ex:
                 rec["status"] = "ERROR"; rec["error"] = str(ex); unreadable += 1
+            copied_records.append(rec)
             ff.write(json.dumps(rec, sort_keys=True) + "\n")
             log.write(f"{utc()}\t{rec['status']}\t{rel}\n")
         hf.flush(); ff.flush(); log.flush()
         os.fsync(hf.fileno()); os.fsync(ff.fileno()); os.fsync(log.fileno())
     manifest_sha = sha256(hashes_path)
-    dest_files = sum(1 for e in entries if e.get("kind") == "file" and e.get("status") == "VERIFIED")
-    dest_bytes = sum(e.get("size", 0) for e in entries if e.get("kind") == "file" and e.get("status") == "VERIFIED")
+    dest_files, dest_bytes = verified_destination_totals(entries, copied_records)
     status = "PASS" if (verified == source_files and source_files == dest_files and source_bytes == dest_bytes and mismatch == 0 and unreadable == 0 and unsupported == 0) else "ATTENTION_REQUIRED"
     verification = {"ingest_id": ingest_id, "status": status, "copy_complete": status == "PASS", "hash_verified": status == "PASS", "source_file_count": source_files, "destination_verified_file_count": dest_files, "source_bytes": source_bytes, "destination_verified_bytes": dest_bytes, "hashes_verified": verified, "hash_mismatches": mismatch, "unreadable_files": unreadable, "unsupported_entries": unsupported, "missing": missing, "source_deletion": 0, "manifest_sha256": manifest_sha, "completed_utc": utc()}
     (evidence / "verification.json").write_text(json.dumps(verification, indent=2, sort_keys=True) + "\n")
