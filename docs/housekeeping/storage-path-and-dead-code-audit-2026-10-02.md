@@ -33,6 +33,15 @@
    header naming every container-read variable and flagging the gap as a known
    disagreement. **No value was changed** — that would redirect which directories
    ingest scans/writes, which is an operator decision, not a housekeeping one.
+
+   *Encoded as an executable check:* `tests/test_container_path_contract.py` asserts
+   (a) container-visible vars are `/nas`-prefixed and (b) the documented
+   `/nas/fileserver/<family>` layout matches the `NAS_ROOT` value. Both are
+   `xfail(strict=False)` — they document the invariant, will report `XPASS` the
+   moment the decision is landed, and can then have their markers removed.
+   **To resolve:** pick the layout matching the real NAS5 mount (this cannot be
+   determined from the repository), update `deploy/path_profiles.env.example` and
+   the live `.env`, then drop the xfail markers.
 3. **Legacy alias mounts — consumer retired, mounts kept.** Compose still binds
    `NAS1_ROOT`/`NAS2_ROOT` to `/nas1` and `/nas2` (marked `DEPRECATED compatibility
    aliases` in the compose file; kept because *running* containers still bind them).
@@ -201,6 +210,9 @@ and shorts output roots fail closed without `SHORTS_PUBLISH_QUEUE` / `SHORTS_OUT
 `worker_content._require_roots()` and `dashcam_monitor.BASES` resolve from env,
 `batch_update_paths.py` is dry-run by default, and the USB/deprecated shell helpers
 contain no literal host paths.
+
+`tests/test_container_path_contract.py` encodes the outstanding host-vs-container
+decision as an executable (currently xfailing) contract.
 
 `tests/test_storage_contract.py` pins the resolver contract (env precedence,
 fail-closed, legacy NAS3/SSD_4TB directories cannot win, generic-host config, 
