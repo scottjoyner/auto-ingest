@@ -65,6 +65,13 @@ ACTIVE_FILES = [
     "auto_ingest/shorts/cli.py",
     "auto_ingest/shorts/publish.py",
     "auto_ingest/shorts/uploader.py",
+    "add_audio.sh",
+    "parse_vehicel_detections.py",
+    "save_detected_files.py",
+    "yolo_vehicle_detction.py",
+    "scripts/ingest_supervisor.py",
+    "runall.sh",
+    "bulk_ingest_dashcam.sh",
 ]
 
 

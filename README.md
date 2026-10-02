@@ -139,7 +139,18 @@ Core Neo4j node types:
 | `ingest_transcriptsv5_3.py` | Python ingest script |
 | `bin/auto-ingest` | Machine-agnostic CLI (primary entrypoint); `run-all` chains copy→diarize→ingest→reconcile→classify→link→yolo. All config from `config.yaml` + env. |
 | `run_all_optimized.sh` | Deprecated shim over `bin/auto-ingest run-all` |
+| `runall.sh` | Deprecated shim (flat single-host orchestrator); use `bin/auto-ingest run-all` |
 | `auto_ingest/backend.py` | Auto-detects CUDA/ROCm/MLX/ONNX compute; routes torch/faiss/YOLO device selection |
+
+### Path authority
+
+`config.yaml` + environment variables, resolved by `auto_ingest_config.py`.
+Resolution order is **explicit env → canonical resolver → fail closed**; there is
+no fallback to another machine's mount, so a legacy NAS/SSD directory that merely
+exists on disk can never silently win. Inside containers the canonical NAS is
+always `/nas` (host path supplied via `NAS_ROOT` in `.env`).
+See [docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md](docs/housekeeping/storage-path-and-dead-code-audit-2026-10-02.md)
+for the classified legacy-path inventory and the deprecated/canonical entrypoint map.
 
 ## Management
 
