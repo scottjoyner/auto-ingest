@@ -331,6 +331,24 @@ def test_fatal_error_is_blocked():
     assert "fatal_errors:1" in d.contradictions
 
 
+def test_a_fatal_error_is_not_reported_as_a_contradiction():
+    """The reason must point at the error summary, not at inconsistent evidence."""
+    ev = evidence(inv=inventory(10, 100, complete=True, verified=True),
+                  hsh=hashing(10, verified_bytes=100, complete=True),
+                  err=errors(fatal=2))
+    d = derive(ev)
+    assert d.reasons == ("campaign_has_fatal_errors",)
+
+
+def test_a_genuine_contradiction_keeps_its_own_reason():
+    ev = evidence(inv=inventory(10, 100, complete=True, verified=True),
+                  hsh=hashing(10, verified_bytes=100, complete=True),
+                  cpy=copying(planned_files=10, planned_bytes=100, completed_files=11,
+                              started=True))
+    d = derive(ev)
+    assert d.reasons == ("evidence_contradicts_itself",)
+
+
 def test_find_contradictions_is_empty_for_a_coherent_campaign():
     camp, ev = fully_copied_campaign()
     assert find_contradictions(camp, ev) == ()

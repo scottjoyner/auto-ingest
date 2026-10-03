@@ -131,9 +131,15 @@ def derive_state(
 
     contradictions = find_contradictions(campaign, evidence)
     if contradictions:
+        # A fatal error is not a contradiction, and saying so would send an
+        # operator hunting for inconsistent evidence instead of reading the
+        # error summary.
+        fatal = [c for c in contradictions if c.startswith("fatal_errors:")]
+        reason = ("campaign_has_fatal_errors" if fatal
+                  else "evidence_contradicts_itself")
         return Derivation(
             CampaignState.BLOCKED,
-            reasons=("evidence_contradicts_itself",),
+            reasons=(reason,),
             blockers=contradictions,
             contradictions=contradictions,
         )

@@ -122,7 +122,8 @@ Precedence (first match wins) lives in `auto_ingest/custody/machine.py`:
 
 | # | condition | state |
 | --- | --- | --- |
-| 0 | arithmetic contradiction, fatal error, destination identity conflict | `BLOCKED` |
+| 0 | arithmetic contradiction, destination identity conflict | `BLOCKED` |
+| 0b | fatal campaign errors | `BLOCKED` (`campaign_has_fatal_errors`) |
 | 1 | nothing observed at all | `DISCOVERED` |
 | 2 | inventory incomplete, work underway | `HASHING` |
 | 3 | inventory incomplete, nothing underway | `DISCOVERED` |
@@ -454,6 +455,20 @@ state.
 creation instant), which is why `--created-at` exists and why its output is a
 write. `status`, `plan` and `verify` stay clock-free and random-free — pinned by
 `tests/test_custody_legacy_watchers.py::test_writing_commands_are_the_only_ones_taking_a_clock`.
+
+`custody status` and `custody reconcile` are the commands an operator or Hermes
+polls. Both are pure functions of files on disk, so they work from any working
+directory and never need the card mounted:
+
+```bash
+auto-ingest custody status --bundle ...
+auto-ingest custody --help            # REMAINDER forwarding swallows --help; handled for you
+```
+
+The only writes in the package (`import --apply`, `new --apply`) go through one
+atomic writer whose temp file name is unique per process and per call, so an
+operator and Hermes applying evidence at the same moment cannot silently lose
+one update. A failed write leaves no temp file behind.
 
 `custody new` fails closed three ways: a label alone is not identity (`UNTITLED`
 proves nothing, so the campaign is not created); it never overwrites an existing

@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from itertools import count
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -46,6 +47,9 @@ from .planner import ResumePlan, plan_resume
 from .policy import CustodyPolicy
 from .release import ReleaseDecision, evaluate_release
 from .states import NEXT_SAFE_ACTION, STATE_PHASE, CampaignState
+
+#: Per-process counter making concurrent atomic writes collide-safe.
+_WRITE_SEQ = count(1)
 
 STATUS_SCHEMA = "auto_ingest.custody.status.v1"
 
@@ -430,11 +434,31 @@ def import_evidence(
 
 
 def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, sort_keys=True, indent=2, default=str)
-        handle.write("\n")
-    os.replace(tmp, path)
+    """Write JSON atomically, with a temp name unique to this process and call.
+
+    A fixed ``.tmp`` suffix would collide when an operator and Hermes both run
+    ``import --apply`` at once: both would write the same temp file and then both
+    replace the target, silently losing one update. ``os.replace`` is atomic per
+    call, so the file is never half-written - but the lost update would still go
+    unnoticed. A per-process, per-call name makes the race impossible rather than
+    merely unlikely.
+
+    A failed write leaves no temp file behind.
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{next(_WRITE_SEQ)}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, indent=2, default=str)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 class CampaignCreationError(RuntimeError):
