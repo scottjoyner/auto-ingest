@@ -5,6 +5,7 @@
     auto-ingest custody verify  --bundle PATH [--json] [--execute]
     auto-ingest custody import  --bundle PATH --evidence FILE [--apply]
     auto-ingest custody new     --bundle PATH --card-id ID --uuid/--device/--label ... [--apply]
+    auto-ingest custody reconcile --bundle PATH [--json]
 
 Every command is read-only by default. The only writes in this package are
 ``import --apply`` and ``new --apply``, both explicit. ``--execute`` is accepted
@@ -44,6 +45,7 @@ from .store import (
     load_policy,
     load_status,
     new_campaign,
+    reconcile_preview,
 )
 
 EXIT_OK = 0
@@ -108,6 +110,16 @@ def build_parser() -> argparse.ArgumentParser:
     pn.add_argument("--apply", action="store_true", help="write campaign.json")
     pn.add_argument("--json", action="store_true", help="emit JSON instead of text")
     pn.add_argument("--policy-file", default=None, help="JSON file overriding custody.policy")
+
+    prc = sub.add_parser("reconcile",
+                         help="Diff the source and destination ledgers (read-only).")
+    prc.add_argument("--bundle", required=True, help="campaign bundle directory")
+    prc.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    prc.add_argument("--max-samples", type=int, default=None,
+                     help="cap on per-category key samples (default: policy value)")
+    prc.add_argument("--policy-file", default=None, help="JSON file overriding custody.policy")
+    prc.add_argument("--require-release", action="store_true",
+                     help=f"exit {EXIT_GATE_CLOSED} unless the release gate is open")
     return parser
 
 
@@ -270,12 +282,69 @@ def cmd_new(args) -> int:
     return EXIT_OK
 
 
+def cmd_reconcile(args) -> int:
+    """Diff the two ledgers and show what the answer would mean. Never applies."""
+    policy = _policy_from_file(getattr(args, "policy_file", None))
+    if policy is None:
+        policy = load_policy(load_custody_config())
+    result, status = reconcile_preview(
+        args.bundle, policy, max_samples=args.max_samples
+    )
+    payload = {
+        "campaign_id": status.campaign_id,
+        "reconciliation": result.to_dict(),
+        "usable": result.usable,
+        "proposal": result.proposal(),
+        "applied": False,
+        "current_state": status.derivation.state.value,
+        "state_if_imported": status.derivation.state.value,
+        "source_release_allowed_if_imported": status.source_release_allowed,
+        "next_safe_action_if_imported": status.next_safe_action,
+        "requires_operator_authorization": True,
+    }
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, indent=2, default=str))
+    else:
+        lines = [
+            f"campaign_id                {payload['campaign_id']}",
+            f"ledgers_readable           {str(result.usable).lower()}",
+            f"source_objects             {result.source_objects}",
+            f"destination_objects        {result.destination_objects}",
+            f"verified                   {result.verified}",
+            f"source_only                {result.source_only}",
+            f"destination_only           {result.destination_only}",
+            f"mismatched                 {result.mismatched}",
+            f"unverifiable               {result.unverifiable}",
+            f"state_now                  {status.derivation.state.value}",
+            f"state_if_imported          {payload['state_if_imported']}",
+            f"source_release_allowed_if_imported  "
+            f"{str(status.source_release_allowed).lower()}",
+            "applied                    false  (import the proposal with --apply)",
+        ]
+        if not result.usable:
+            lines.insert(1, "NOTE: a ledger is missing; no proposal is offered "
+                            "because zeroed counts must not overwrite real evidence")
+        for name, samples in (
+            ("source_only", result.source_only_samples),
+            ("destination_only", result.destination_only_samples),
+            ("mismatched", result.mismatched_samples),
+            ("unverifiable", result.unverifiable_samples),
+        ):
+            if samples:
+                lines.append(f"  {name:<21} {', '.join(samples)}")
+        sys.stdout.write("\n".join(lines) + "\n")
+    if args.require_release and not status.source_release_allowed:
+        return EXIT_GATE_CLOSED
+    return EXIT_OK
+
+
 _HANDLERS = {
     "status": cmd_status,
     "plan": cmd_plan,
     "verify": cmd_verify,
     "import": cmd_import,
     "new": cmd_new,
+    "reconcile": cmd_reconcile,
 }
 
 

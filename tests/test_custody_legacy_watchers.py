@@ -59,7 +59,8 @@ BANNED_IMPORTS = {
 }
 
 PURE_MODULES = ("states.py", "policy.py", "campaign.py", "destination.py",
-                "evidence.py", "machine.py", "release.py", "planner.py", "report.py")
+                "evidence.py", "machine.py", "release.py", "planner.py", "report.py",
+                "ledger.py")
 
 
 def _module_paths():
@@ -102,17 +103,30 @@ def test_custody_package_imports_nothing_that_could_autonomously_run():
 
 @pytest.mark.parametrize("name", PURE_MODULES)
 def test_pure_modules_touch_no_mutating_syscall(name):
+    """`ledger.py` joins them: it is a pure reader, so it must never write."""
     path = CUSTODY_DIR / name
     tree = ast.parse(_source(path))
+    # `replace` is excluded: in these modules it is always dataclasses.replace.
     banned_calls = {"remove", "unlink", "rmtree", "copyfile", "copy2", "copytree",
                     "move", "system", "popen", "check_call", "check_output",
-                    "mkdir", "makedirs", "rmdir", "rename", "write_text",
-                    "write_bytes", "truncate", "chmod", "chown", "utime"}
+                    "mkdir", "makedirs", "rmdir", "rename",
+                    "write_text", "write_bytes", "truncate", "chmod", "chown", "utime"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
             called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
             assert called not in banned_calls, f"{name} calls {called}()"
+    text = _source(path)
+    for banned in ("os.replace(", "os.rename(", "os.remove(", "shutil.", "subprocess."):
+        assert banned not in text, f"{name} references {banned}"
+
+
+def test_ledger_module_only_ever_opens_for_reading():
+    text = _source(CUSTODY_DIR / "ledger.py")
+    write_modes = ['"w"', '"a"', '"x"', '"+"', "'w'", "'a'", "'x'", "'+'"]
+    for mode in write_modes:
+        assert f", {mode}" not in text, f"ledger.py opens in {mode} mode"
+    assert "Path.open" not in text and ".write_text" not in text
 
 
 # ---------------------------------------------------------------------------

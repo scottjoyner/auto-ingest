@@ -52,7 +52,8 @@ sys.dont_write_bytecode = True
 # cache, the custody code under test is not.
 sys.path.insert(0, %(repo)r)
 os.chdir(%(repo)r)
-from auto_ingest.custody.store import load_status
+from auto_ingest.custody.ledger import reconcile_bundle, summarize_bundle_ledgers
+from auto_ingest.custody.store import load_status, reconcile_preview
 
 events = []
 WRITE_MODES = ("w", "a", "x", "+")
@@ -72,10 +73,19 @@ sys.addaudithook(hook)
 bundle = %(bundle)r
 first = load_status(bundle)
 second = load_status(bundle)
+rec = [reconcile_bundle(bundle).to_dict(), reconcile_bundle(bundle).to_dict()]
+led = [summarize_bundle_ledgers(bundle), summarize_bundle_ledgers(bundle)]
+preview = reconcile_preview(bundle)
 plans = [first.plan.to_dict(), second.plan.to_dict()]
 statuses = [first.to_dict(), second.to_dict()]
-print(json.dumps({"events": events,
-                  "identical": statuses[0] == statuses[1] and plans[0] == plans[1]}))
+print(json.dumps({
+    "events": events,
+    "identical": statuses[0] == statuses[1]
+                 and plans[0] == plans[1]
+                 and rec[0] == rec[1]
+                 and led[0] == led[1]
+                 and preview[1].to_dict()["state"] == second.to_dict()["state"],
+}))
 """
 
 
@@ -97,6 +107,25 @@ def test_status_and_plan_emit_no_mutating_syscall(tmp_path):
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["CUSTODY_DESTINATION_ROOT"] = str(tmp_path)  # must not be created or written
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, env=env, cwd=str(REPO_ROOT), timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result["events"] == [], result["events"]
+    assert result["identical"] is True
+
+
+def test_reconcile_emit_no_mutating_syscall(tmp_path):
+    """The set-difference computation is a pure read of the two ledgers."""
+    script = AUDIT_SCRIPT % {
+        "repo": str(REPO_ROOT),
+        "bundle": str(CARD_01_BUNDLE),
+        "mutating": list(MUTATING_AUDIT_EVENTS),
+    }
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     proc = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True, text=True, env=env, cwd=str(REPO_ROOT), timeout=120,

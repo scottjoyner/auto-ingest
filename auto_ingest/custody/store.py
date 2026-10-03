@@ -39,8 +39,14 @@ from .destination import (
     load_policy,
     resolve_destination,
 )
-from .evidence import CampaignEvidence
-from .ledger import LedgerSummary, ledger_disagreements, summarize_bundle_ledgers
+from .evidence import DECLARED_STATE_KEYS, CampaignEvidence
+from .ledger import (
+    LedgerSummary,
+    ReconciliationResult,
+    ledger_disagreements,
+    reconcile_bundle,
+    summarize_bundle_ledgers,
+)
 from .machine import Derivation, derive_state
 from .planner import ResumePlan, plan_resume
 from .policy import CustodyPolicy
@@ -52,6 +58,22 @@ PLAN_SCHEMA = "auto_ingest.custody.plan.v1"
 
 CAMPAIGN_FILE = "campaign.json"
 EVIDENCE_FILE = "evidence.json"
+
+#: Evidence blocks an imported document may supply. Anything else in the
+#: document (including a declared state) is ignored. Import merges these onto
+#: the existing evidence block-by-block: a document that only reports
+#: reconciliation must not erase the hash evidence already recorded.
+EVIDENCE_BLOCKS = (
+    "inventory",
+    "hash",
+    "hashing",
+    "copy",
+    "destination",
+    "reconciliation",
+    "worker",
+    "errors",
+)
+EVIDENCE_SCALARS = ("campaign_id", "observed_at")
 
 
 class BundleError(RuntimeError):
@@ -267,6 +289,64 @@ def load_status(
                         ledgers=ledgers)
 
 
+def merge_evidence_documents(
+    existing: Mapping[str, Any],
+    incoming: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Overlay ``incoming`` onto ``existing``, field by field.
+
+    An evidence document describes *some* observations. Treating it as a whole
+    replacement would let a narrow document silently erase evidence already on
+    record - the precise failure this package exists to prevent. Even a
+    block-level replacement is too coarse: a reconciliation diff speaks about
+    ``verified_files`` and the verification flags, and says nothing about
+    ``observed_identity`` or ``failures``; replacing the block would drop those
+    recorded facts.
+
+    So the rule is per field: what the incoming document states wins (including a
+    declared ``0``), and what it does not mention is preserved. Unknown keys -
+    including a declared ``state`` - are dropped.
+    """
+    incoming = incoming or {}
+    merged: Dict[str, Any] = {}
+    for key in EVIDENCE_BLOCKS:
+        old, new = existing.get(key), incoming.get(key)
+        if isinstance(old, Mapping) and isinstance(new, Mapping):
+            merged[key] = {**old, **new}
+        elif new is not None:
+            merged[key] = new
+        elif old is not None:
+            merged[key] = old
+    if "hash" in incoming and "hashing" not in incoming:
+        merged.pop("hashing", None)
+    for key in EVIDENCE_SCALARS:
+        value = incoming.get(key)
+        if value is not None:
+            merged[key] = value
+        elif existing.get(key) is not None:
+            merged[key] = existing[key]
+    return merged
+
+
+def _preserved_fields(existing: Mapping[str, Any],
+                      incoming: Mapping[str, Any]) -> list:
+    """Recorded ``block.field`` pairs the incoming document did not mention."""
+    incoming = incoming or {}
+    out = []
+    for key in EVIDENCE_BLOCKS:
+        old = existing.get(key)
+        new = incoming.get(key)
+        if not isinstance(old, Mapping):
+            continue
+        for field, value in old.items():
+            if isinstance(new, Mapping) and field in new:
+                continue
+            if value in (None, 0, 0.0, "", [], (), False):
+                continue
+            out.append(f"{key}.{field}")
+    return sorted(out)
+
+
 def import_evidence(
     bundle: str | Path,
     raw: Mapping[str, Any],
@@ -276,21 +356,36 @@ def import_evidence(
 ) -> Dict[str, Any]:
     """Validate (and optionally write) an evidence document for a campaign.
 
-    Read-only unless ``apply=True``. Validation parses the evidence, reports what
-    state it would derive, and lists any declared-state keys that were ignored -
-    a caller cannot smuggle a verdict in through this path.
+    Read-only unless ``apply=True``. Validation merges the document onto the
+    evidence already on record, reports what state the merged evidence derives,
+    and lists any declared-state keys that were ignored - a caller cannot smuggle
+    a verdict in through this path.
     """
     policy = policy or CustodyPolicy()
     root = Path(bundle)
     campaign = load_campaign(root)
-    evidence = CampaignEvidence.from_dict(raw, policy)
+    existing_raw: Dict[str, Any] = {}
+    if (root / EVIDENCE_FILE).is_file():
+        loaded = json.loads((root / EVIDENCE_FILE).read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            existing_raw = loaded
+    merged_raw = merge_evidence_documents(existing_raw, raw or {})
+    evidence = CampaignEvidence.from_dict(merged_raw, policy)
     status = build_status(campaign, evidence, policy)
-    declared = list(evidence.ignored_declared_fields)
+    # Report the ignored declared-state keys from the *incoming* document: the
+    # merge already dropped them, so reading them back off the merged evidence
+    # would silently lose the fact that someone tried to declare a verdict.
+    declared = sorted(
+        set(evidence.ignored_declared_fields)
+        | {k for k in (raw or {}) if k in DECLARED_STATE_KEYS}
+    )
     result: Dict[str, Any] = {
         "applied": False,
         "campaign_id": campaign.campaign_id,
         "declared_state_keys_ignored": declared,
         "derived_state": status.derivation.state.value,
+        "merged_with_existing": bool(existing_raw),
+        "preserved_fields": _preserved_fields(existing_raw, raw or {}),
         "source_release_allowed": status.source_release_allowed,
         "would_write": str(root / EVIDENCE_FILE),
     }
@@ -424,6 +519,38 @@ def select_campaign(
     return resolve_campaign(observed, campaigns, mount_point=mount_point)
 
 
+def reconcile_preview(
+    bundle: str | Path,
+    policy: CustodyPolicy | None = None,
+    *,
+    max_samples: Optional[int] = None,
+) -> Tuple[ReconciliationResult, CampaignStatus]:
+    """Reconcile a bundle's ledgers and show what the result *would* mean.
+
+    Read-only in the strict sense: the ledgers are read, the set difference is
+    computed in memory, and the status is built from the **hypothetical**
+    evidence without touching ``evidence.json``. Applying the proposal is a
+    separate, explicit ``custody import --apply``.
+    """
+    root = Path(bundle)
+    if policy is None:
+        policy = load_policy(load_custody_config())
+    samples = max_samples if max_samples is not None else policy.max_summary_entries
+    result = reconcile_bundle(root, max_samples=samples)
+    campaign = load_campaign(root)
+    current = load_evidence(root, policy)
+    proposal = result.proposal()
+    # Preview and import MUST agree, so both go through the same merge: an
+    # unusable proposal (absent ledger) leaves the current evidence alone rather
+    # than proposing zeroed counts over real ones, and a usable one is layered
+    # with exactly the semantics `custody import --apply` will use.
+    merged_raw = merge_evidence_documents(current.to_dict(), proposal or {})
+    merged = CampaignEvidence.from_dict(merged_raw, policy)
+    status = build_status(campaign, merged, policy,
+                          ledgers=summarize_bundle_ledgers(root, max_error_samples=samples))
+    return result, status
+
+
 __all__ = [
     "BundleError",
     "CAMPAIGN_FILE",
@@ -439,7 +566,10 @@ __all__ = [
     "load_evidence",
     "load_policy",
     "load_policy_and_destination",
+    "EVIDENCE_BLOCKS",
     "load_status",
+    "merge_evidence_documents",
     "new_campaign",
+    "reconcile_preview",
     "select_campaign",
 ]

@@ -191,6 +191,54 @@ Boundedness: every free-form list (`roots`, `exemptions`, `error_summary`,
 `summaries`) is capped at `policy.max_summary_entries` (default 20). The ledger
 reader returns counts plus a capped error sample — never the record list.
 
+### Import merges; it never replaces
+
+`custody import` overlays the incoming document **field by field**. What the
+document states wins — including a declared `0` — and what it does not mention is
+preserved. A narrow document (say, a reconciliation diff that knows nothing
+about hashes) therefore cannot erase the hash evidence already on record. The
+response lists what was preserved in `preserved_fields`.
+
+This is not a nicety. A whole-document or whole-block replacement would let a
+partial report silently zero out `verified_files`, `failures` or
+`observed_identity` — precisely the class of mistake §0 exists to catalog.
+
+### Reconciliation is computed, not shelled
+
+`reconciliation.source_only / destination_only / mismatched` are the set
+difference between what the *source* claims it hashed and what the *destination*
+claims it verified. `custody reconcile` computes it from the two JSONL ledgers
+instead of leaving it to `comm`/`jq`:
+
+```
+custody reconcile --bundle PATH [--json] [--max-samples N] [--require-release]
+```
+
+Per source key: present in both with equal digests → `verified`; present in both
+with different digests → `mismatched`; source only → `source_only`; a record
+with no digest on either side → `unverifiable`. Destination keys with no source
+counterpart → `destination_only`.
+
+Three fail-closed properties:
+
+* **An absent ledger proposes nothing.** Otherwise the diff would be all zeros
+  and importing it would overwrite real counts with zeros. `proposal()` returns
+  `None`, `to_evidence()` raises, and the CLI prints
+  *"a ledger is missing; no proposal is offered because zeroed counts must not
+  overwrite real evidence"*. An *empty but present* ledger is still usable — that
+  is a real, if alarming, fact rather than an absence.
+* **A record without a digest is never custody.** It is counted as
+  `unverifiable` and folded into `source_only` in the proposal, because it lacks
+  *proven* custody.
+* **Reconciliation cannot prove destination identity.** The ledger says objects
+  matched; it cannot say which filesystem they were matched on. That stays a
+  separately recorded fact, so a perfect diff with no recorded identity yields
+  `VERIFIED`, not `SAFE_TO_RELEASE`.
+
+The command is read-only and prints `state_if_imported` — what the campaign would
+derive once the proposal is applied. Preview and import share one merge
+implementation, so the preview cannot drift from what `--apply` actually does.
+
 ---
 
 ## 5. Canonical destination abstraction
@@ -305,6 +353,7 @@ auto-ingest custody new     --bundle /path/to/campaign --card-id CARD-02 \
 auto-ingest custody status  --bundle /path/to/campaign          # human
 auto-ingest custody status  --bundle /path/to/campaign --json   # machine
 auto-ingest custody plan    --bundle /path/to/campaign --json
+auto-ingest custody reconcile --bundle /path/to/campaign         # diff the two ledgers
 auto-ingest custody verify  --bundle /path/to/campaign          # describes; --execute is refused
 auto-ingest custody import  --bundle /path/to/campaign --evidence ev.json   # validate only
 auto-ingest custody import  --bundle /path/to/campaign --evidence ev.json --apply
@@ -352,13 +401,16 @@ observe physical source        # lsblk / blkid, read-only; mount read-only
   → custody status             # what state is this card in?
   → custody plan               # what would the next safe operation be?
   → operator-authorized execution
+  → custody reconcile          # diff the ledgers: what is actually in custody?
+  → custody import --apply     # record the reconciliation (or just observe it)
   → custody verify             # describe/confirm the verification set
   → custody status             # has custody been proven?
 ```
 
 Each step is a separate, individually authorized command. `new` records who the
-card is, `import` records what has been observed about it, `status`/`plan` read,
-and only an explicitly authorized executor moves bytes.
+card is, `import` records what has been observed about it, `reconcile` computes
+the set difference from the ledgers, `status`/`plan` read, and only an explicitly
+authorized executor moves bytes.
 
 Hermes can then answer every question in the table in §1 without reconstructing
 anything from logs.
@@ -427,6 +479,11 @@ authorizes execution explicitly.
 | a card's identity is unprovable without a UUID/device/serial | `test_custody_new_campaign.py::test_label_only_is_refused` |
 | evidence is never overwritten | `test_custody_new_campaign.py::test_existing_campaign_is_never_overwritten` |
 | JSON serialisation is deterministic | `test_custody_idempotency.py::test_status_json_keys_are_sorted` |
+| import merges, never replaces | `test_custody_reconcile.py::test_import_merges_a_narrow_document_instead_of_replacing`, `test_import_preserves_recorded_subfields_the_document_does_not_mention`, `test_an_explicit_zero_in_the_document_wins` |
+| an absent ledger proposes nothing | `test_custody_reconcile.py::test_missing_ledgers_are_unusable_and_propose_nothing` |
+| a digest-less record is never custody | `test_custody_reconcile.py::test_a_record_without_a_digest_never_counts_as_custody` |
+| reconciliation cannot prove destination identity | `test_custody_reconcile.py::test_reconciliation_alone_cannot_prove_destination_identity` |
+| preview == what import would do | `test_custody_reconcile.py::test_preview_agrees_with_import` |
 | the only writes are the two authorized commands | `test_custody_legacy_watchers.py::test_the_only_writes_are_the_two_explicitly_authorized_commands` |
 | read commands take no clock/randomness | `test_custody_legacy_watchers.py::test_writing_commands_are_the_only_ones_taking_a_clock` |
 | custody does not depend on legacy watchers | `test_custody_legacy_watchers.py` |

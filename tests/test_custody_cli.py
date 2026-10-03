@@ -40,7 +40,9 @@ def run(argv, capsys):
 def test_parser_exposes_the_documented_subcommands():
     parser = build_parser()
     sub = [a for a in parser._subparsers._group_actions if hasattr(a, "choices")][0]
-    assert set(sub.choices) == {"status", "plan", "verify", "import", "new"}
+    assert set(sub.choices) == {
+        "status", "plan", "verify", "import", "new", "reconcile",
+    }
 
 
 def test_status_defaults_are_read_only():
