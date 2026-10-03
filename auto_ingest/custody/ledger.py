@@ -106,6 +106,39 @@ class LedgerSummary:
         }
 
 
+def read_records(path: str | Path, *, limit: Optional[int] = None) -> List[LedgerRecord]:
+    """Read up to ``limit`` ledger records. Read-only; missing file -> ``[]``.
+
+    This is the row-level entry point, for a caller that genuinely needs
+    per-object detail - :mod:`auto_ingest.custody.verify` does, to compare each
+    source digest against its destination counterpart. Aggregation-only callers
+    should prefer :func:`summarize_ledger` or :func:`reconcile_ledgers`, which
+    never materialise the record list.
+
+    Unparseable lines are skipped rather than raising: a producer may have been
+    killed mid-append, and the caller is deciding what that means.
+    """
+    p = Path(path)
+    if not p.is_file():
+        return []
+    out: List[LedgerRecord] = []
+    with p.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            out.append(LedgerRecord.from_dict(row))
+            if limit is not None and len(out) >= limit:
+                break
+    return out
+
+
 def summarize_ledger(
     path: str | Path,
     *,
@@ -562,6 +595,7 @@ __all__ = [
     "SOURCE_VERIFIED_STATUSES",
     "ledger_dir",
     "ledger_disagreements",
+    "read_records",
     "reconcile_bundle",
     "reconcile_ledgers",
     "summarize_bundle_ledgers",

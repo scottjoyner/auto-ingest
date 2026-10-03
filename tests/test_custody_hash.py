@@ -248,7 +248,13 @@ def test_only_a_complete_pass_claims_completion(tmp_path):
 
 
 def test_a_real_pass_moves_the_state_machine(tmp_path, capsys):
-    """DISCOVERED -> HASHING: the number is measured, not asserted."""
+    """DISCOVERED -> HASH_COMPLETE: the number is measured, not asserted.
+
+    The pass also records the inventory it walked, so the bundle is not left
+    self-contradictory (`hash.verified_files = 4` beside
+    `inventory.discovered_files = 0`), which the machine correctly refuses as
+    BLOCKED.
+    """
     make_card(tmp_path / "card")
     bundle = write_bundle(tmp_path / "b", campaign(), evidence())
     assert load_status(bundle).state.value == "DISCOVERED"
@@ -261,8 +267,9 @@ def test_a_real_pass_moves_the_state_machine(tmp_path, capsys):
     assert payload["applied"] is True
 
     status = load_status(bundle)
-    assert status.state.value == "HASHING"
+    assert status.state.value == "HASH_COMPLETE"
     assert status.evidence.hashing.verified_files == 4
+    assert status.evidence.inventory.discovered_files == 4
     assert status.source_release_allowed is False
 
 

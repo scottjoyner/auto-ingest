@@ -219,6 +219,7 @@ auto-ingest custody observe-mount --bundle PATH [--json] [--apply]
 auto-ingest custody capacity      --bundle PATH [--json]
 auto-ingest custody preflight     --bundle PATH [--json] [--job-dir PATH]
 auto-ingest custody hash       --bundle PATH --root DIR [--limit N] [--apply]
+auto-ingest custody verify     --bundle PATH [--destination DIR] [--recheck] [--apply]
 ```
 
 | command | reads | answers |
@@ -285,6 +286,79 @@ Four properties, each of which the fail-closed reader demands:
 Read-only on the source is enforced two ways: a scoped audit-hook test that fails
 on any write outside the campaign bundle, and an AST check that the module
 references no `os.remove`/`shutil`/`subprocess`.
+
+### Phase B2: `custody verify` - proving custody
+
+`custody hash` says what the source contains. `custody verify` produces the other
+half: what is actually present and correct **at the destination**. It is the only
+thing that can prove custody, and therefore the only thing that can ever open the
+release gate.
+
+```bash
+auto-ingest custody verify --bundle PATH [--destination DIR] [--recheck] [--apply]
+```
+
+For each key in the hash ledger it reads the expected digest from the ledger,
+computes the actual digest from the destination file, and compares:
+
+| condition | status | counts as custody |
+| --- | --- | --- |
+| digests match | `verified_at_destination` | **yes** |
+| destination absent | `missing` | no |
+| digests differ | `mismatch` | no |
+| destination unreadable | `failed` | no |
+
+It reads the destination and writes the campaign's own ledger. It **copies and
+deletes nothing** — a verification pass that moved bytes would produce a result
+that looks authoritative while proving nothing. `--execute` stays refused because
+*copying* is the separately authorized part.
+
+This is the answer to `--ignore-existing`. A destination file that exists but is
+truncated, corrupt, or the wrong bytes is a `mismatch`, and it is counted against
+release forever:
+
+```
+verified=2  mismatched=1  missing=1   # 4 objects, 2 proven, 2 not
+```
+
+#### Two cumulative-vs-delta defects the tests caught
+
+Both producers originally reported **this pass's work**, so a resume wrote `0`
+over a real count and regressed the campaign:
+
+```
+first pass : verified_files = 4
+resume     : verified_files = 0     # -> regressed out of custody
+```
+
+Evidence fields describe the *ledger*, not the *run*. Both now report
+`verified + skipped_existing`, so a re-run is idempotent instead of destructive.
+This is the same class of bug as `import` replacing rather than merging — worth
+noting because the shape recurs whenever "what happened" and "what is true" are
+conflated.
+
+`custody hash` also now records the **inventory it walked**. Omitting it left the
+bundle self-contradictory — `hash.verified_files = 4` beside
+`inventory.discovered_files = 0` — which the state machine correctly refused as
+`BLOCKED`, so a campaign could never leave `HASHING` while its own producer knew
+the count.
+
+#### Where the pipeline stops today
+
+`hash` → copy → `verify` produces this, which is the honest end state:
+
+```
+after hash          : state=HASH_COMPLETE  inventory=4  hash.verified=4
+partial verify      : state=HASH_COMPLETE  release=false
+all verified        : state=HASH_COMPLETE  release=false
+                    blockers: copy_incomplete, copy_ledger_incomplete
+```
+
+The destination is proven byte-for-byte and release is **still refused** — because
+a diff cannot attest that a *copy* happened. `copy.result_complete` and
+`copy.ledger_complete` come from the executor, which is Phase D and separately
+authorized. The pipeline now runs from measurement to a correct refusal; the only
+remaining step is the one that writes bytes.
 
 ### Import merges; it never replaces
 
@@ -718,6 +792,10 @@ authorizes execution explicitly.
 | a crashed producer voids its own diff | `test_custody_hash.py::test_a_simulated_crash_voids_the_whole_diff` |
 | two runs are byte-identical | `test_custody_hash.py::test_two_runs_over_an_unchanged_source_are_byte_identical` |
 | a partial pass never claims completion | `test_custody_hash.py::test_a_partial_pass_does_not_claim_completion` |
+| a resume reports the ledger total, not the pass delta | `test_custody_hash.py::test_a_resume_reports_the_ledger_total_not_the_pass_delta`, `test_custody_verify.py::test_a_verification_resume_reports_the_ledger_total` |
+| presence is never custody | `test_custody_verify.py::test_a_present_but_corrupt_object_is_a_mismatch` |
+| a truncated copy is a mismatch | `test_custody_verify.py::test_a_truncated_object_is_a_mismatch` |
+| verification alone cannot release | `test_custody_verify.py::test_the_whole_pipeline_from_measurement_to_correct_refusal` |
 | a digest-less record is never custody | `test_custody_reconcile.py::test_a_record_without_a_digest_never_counts_as_custody` |
 | reconciliation cannot prove destination identity | `test_custody_reconcile.py::test_reconciliation_alone_cannot_prove_destination_identity` |
 | machine and gate agree on the required scope | `test_custody_state_machine.py::test_machine_and_gate_agree_on_the_required_count` |

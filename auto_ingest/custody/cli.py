@@ -61,6 +61,8 @@ from .store import (
     new_campaign,
     reconcile_preview,
 )
+from .verify import to_evidence as verify_evidence
+from .verify import verify_destination
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -105,9 +107,19 @@ def build_parser() -> argparse.ArgumentParser:
     common(sub.add_parser("status", help="Show derived custody state (read-only)."))
     common(sub.add_parser("plan", help="Show the next safe operation (read-only)."))
     pv = common(sub.add_parser("verify",
-                               help="Describe the destination verification set (read-only)."))
+                               help="Describe or run destination verification (read-only)."),
+                observed=False)
     pv.add_argument("--execute", action="store_true",
                     help="refused: verification execution is separately authorized")
+    pv.add_argument("--destination", default=None,
+                    help="destination root to verify against (default: campaign's)")
+    pv.add_argument("--recheck", action="store_true",
+                    help="re-verify objects already proven at the destination")
+    pv.add_argument("--algorithm", default=DEFAULT_ALGORITHM)
+    pv.add_argument("--limit", type=int, default=None,
+                    help="stop after N objects (a bounded probe)")
+    pv.add_argument("--apply", action="store_true",
+                    help="record the verification result as campaign evidence")
     # No --require-release on import: it is a mid-campaign write, so "is this
     # releasable yet?" has no coherent meaning there. Accepting a flag and
     # ignoring it is worse than not having it.
@@ -195,7 +207,10 @@ def _policy_from_file(path: Optional[str]) -> Optional[CustodyPolicy]:
 
 
 def _observed(args) -> Optional[CardIdentity]:
-    if not (args.observed_device or args.observed_uuid or args.observed_label):
+    # Subcommands that do not take --observed-* simply have nothing to compare.
+    if not (getattr(args, "observed_device", None)
+            or getattr(args, "observed_uuid", None)
+            or getattr(args, "observed_label", None)):
         return None
     return CardIdentity(
         device=args.observed_device,
@@ -235,10 +250,19 @@ def cmd_plan(args) -> int:
 
 
 def cmd_verify(args) -> int:
-    """Describe the verification work. Never performs it."""
+    """Describe the verification work, or perform the read-only verification pass.
+
+    Verification reads the destination and writes the campaign's own ledger, so it
+    copies and deletes nothing: a verification that moved bytes would produce a
+    result that looks authoritative but proves nothing. `--execute` remains
+    refused because *copying* is separately authorized.
+    """
     if args.execute:
         print(EXECUTE_REFUSED, file=sys.stderr)
         return EXIT_GATE_CLOSED
+    policy = _policy_from_file(getattr(args, "policy_file", None))
+    if policy is None:
+        policy = load_policy(load_custody_config())
     status = _status(args)
     ev = status.evidence
     remaining = max(ev.copy.completed.files - ev.destination.verified_files, 0)
@@ -255,28 +279,72 @@ def cmd_verify(args) -> int:
         "source_mutation_allowed": False,
         "source_deletion_allowed": False,
     }
+    destination = args.destination
+    if destination is None:
+        destination = status.campaign.destination.host_path
+    result = None
+    if destination:
+        result = verify_destination(
+            args.bundle, destination, algorithm=args.algorithm,
+            limit=args.limit, recheck=args.recheck,
+        )
+        payload["verification"] = result.to_dict()
+        payload["objects_to_verify"] = result.checked
+        payload["objects_already_verified"] = result.skipped_existing + result.verified
+        payload["executed"] = False   # verification ran; nothing was copied
+        payload["destination_root"] = destination
+    if args.apply and payload.get("verification"):
+        applied = import_evidence(args.bundle, verify_evidence(result), policy, apply=True)
+        payload["applied"] = bool(applied.get("applied"))
+        payload["evidence_result"] = applied
+        status = load_status(args.bundle, policy)
+        payload["state_after"] = status.derivation.state.value
+        payload["source_release_allowed_after"] = status.source_release_allowed
     if args.json:
         print(json.dumps(payload, sort_keys=True, indent=2, default=str))
     else:
-        sys.stdout.write(
-            "\n".join(
-                [
-                    f"campaign_id            {payload['campaign_id']}",
-                    f"state                  {payload['state']}",
-                    f"objects_to_verify      {payload['objects_to_verify']}",
-                    f"already_verified       {payload['objects_already_verified']}",
-                    f"present_unverified     "
-                    f"{payload['unverified_objects_present_at_destination']}",
-                    "executed               false",
-                    "NOTE                   this command describes work only; "
-                    "execution is separately authorized",
+        lines = [
+            f"campaign_id            {payload['campaign_id']}",
+            f"state                  {payload['state']}",
+            f"objects_to_verify      {payload['objects_to_verify']}",
+            f"objects_already_verified {payload['objects_already_verified']}",
+            f"present_unverified     "
+            f"{payload['unverified_objects_present_at_destination']}",
+            "copied                 false",
+            "NOTE                   verification reads only; copying is separately "
+            "authorized",
+        ]
+        verification = payload.get("verification")
+        if verification:
+            lines = [
+                f"campaign_id            {payload['campaign_id']}",
+                f"destination_root       {payload['destination_root']}",
+                f"verified               {verification['verified']}",
+                f"verified_bytes         {verification['verified_bytes']}",
+                f"missing                {verification['missing']}",
+                f"mismatched             {verification['mismatched']}",
+                f"failed                 {verification['failed']}",
+                f"ledger                 {verification['ledger_path']}",
+                "copied                 false   (verification reads only)",
+            ]
+            if payload.get("applied"):
+                lines += [
+                    f"state_after            {payload['state_after']}",
+                    f"source_release_allowed {str(payload['source_release_allowed_after']).lower()}",
                 ]
-            )
-            + "\n"
-        )
+        sys.stdout.write("\n".join(lines) + "\n")
+    if verification_failures(result):
+        return EXIT_GATE_CLOSED
     if args.require_release and not status.source_release_allowed:
         return EXIT_GATE_CLOSED
     return EXIT_OK
+
+
+def verification_failures(result) -> int:
+    """Objects at the destination that are wrong, absent, or unreadable."""
+    if result is None:
+        return 0
+    return result.missing + result.mismatched + result.failed
 
 
 def cmd_import(args) -> int:
@@ -554,7 +622,8 @@ def cmd_hash(args) -> int:
     payload["discovered"] = len(keys)
     payload["applied"] = False
     if args.apply:
-        fragment = to_evidence(result, algorithm=args.algorithm)
+        fragment = to_evidence(result, algorithm=args.algorithm,
+                                discovered=len(keys))
         write_status = import_evidence(args.bundle, fragment, policy, apply=True)
         payload["applied"] = bool(write_status.get("applied"))
         payload["evidence_result"] = write_status

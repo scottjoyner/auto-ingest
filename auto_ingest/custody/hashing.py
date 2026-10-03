@@ -53,6 +53,9 @@ class HashProgress:
     ledger_path: str
     hashed: int = 0
     bytes_read: int = 0
+    #: Bytes the ledger already accounted for before this pass; tracked so
+    #: verified_bytes can stay cumulative across a resume like verified_files.
+    bytes_skipped: int = 0
     skipped_existing: int = 0
     failed: int = 0
     errors: Tuple[str, ...] = ()
@@ -64,6 +67,7 @@ class HashProgress:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "bytes_read": self.bytes_read,
+            "bytes_skipped": self.bytes_skipped,
             "complete": self.complete,
             "error_samples": list(self.errors),
             "failed": self.failed,
@@ -217,6 +221,7 @@ def hash_source(
     done = already_hashed(ledger)
     pending = [(k, p) for k, p in sorted(keys.items()) if k not in done]
     skipped = len(keys) - len(pending)
+    skipped_bytes = sum(done.values())
 
     hashed = 0
     failed = 0
@@ -255,7 +260,8 @@ def hash_source(
             if progress is not None:
                 progress(HashProgress(
                     ledger_path=str(ledger), hashed=hashed, bytes_read=bytes_read,
-                    skipped_existing=skipped, failed=failed, errors=tuple(errors),
+                    bytes_skipped=skipped_bytes, skipped_existing=skipped,
+                    failed=failed, errors=tuple(errors),
                     repaired_partial_line=repaired, limit=limit,
                 ))
 
@@ -263,6 +269,7 @@ def hash_source(
         ledger_path=str(ledger),
         hashed=hashed,
         bytes_read=bytes_read,
+        bytes_skipped=skipped_bytes,
         skipped_existing=skipped,
         failed=failed,
         errors=tuple(errors),
@@ -277,18 +284,29 @@ def hash_source(
 
 
 def to_evidence(result: HashProgress, *, algorithm: str = DEFAULT_ALGORITHM,
-                last_checkpoint: Optional[str] = None) -> Dict[str, Any]:
-    """The evidence fragment a completed hash pass contributes.
+                last_checkpoint: Optional[str] = None,
+                discovered: Optional[int] = None) -> Dict[str, Any]:
+    """The evidence fragments a hash pass contributes.
 
     Only a *complete* pass sets ``complete``. A partial or failing pass records
     its real counts, so the state machine reports HASHING rather than claiming
     the card is hashed.
+
+    It also records the **inventory it just walked**. That is a measured fact,
+    not an assertion, and omitting it left the bundle self-contradictory -
+    ``hash.verified_files = 4`` beside ``inventory.discovered_files = 0`` - which
+    the state machine quite correctly refused to accept as BLOCKED. A campaign
+    could never leave HASHING while its own producer knew the count.
     """
-    return {
+    fragment: Dict[str, Any] = {
         "hash": {
             "algorithm": algorithm,
-            "verified_files": result.hashed,
-            "verified_bytes": result.bytes_read,
+            # CUMULATIVE, not this pass's delta. On a resume the ledger already
+            # proves `skipped_existing` objects; reporting only `hashed` would
+            # write 0 over a real count and regress the campaign from HASH
+            # COMPLETE back to HASHING on every re-run.
+            "verified_files": result.hashed + result.skipped_existing,
+            "verified_bytes": result.bytes_read + result.bytes_skipped,
             "complete": result.complete,
             "started": True,
             "failed": result.failed,
@@ -296,6 +314,17 @@ def to_evidence(result: HashProgress, *, algorithm: str = DEFAULT_ALGORITHM,
             "last_checkpoint": last_checkpoint,
         }
     }
+    if discovered is not None:
+        known = result.hashed + result.skipped_existing
+        fragment["inventory"] = {
+            "discovered_files": known,
+            # Only claim a complete inventory when the pass actually covered
+            # everything it walked; a --limit probe leaves it open.
+            "complete": result.complete and known == discovered,
+            "verified": result.complete and known == discovered,
+            "started": True,
+        }
+    return fragment
 
 
 __all__ = [
