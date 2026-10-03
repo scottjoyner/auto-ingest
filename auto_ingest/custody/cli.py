@@ -4,17 +4,23 @@
     auto-ingest custody plan    --bundle PATH [--json]
     auto-ingest custody verify  --bundle PATH [--json] [--execute]
     auto-ingest custody import  --bundle PATH --evidence FILE [--apply]
+    auto-ingest custody new     --bundle PATH --card-id ID --uuid/--device/--label ... [--apply]
 
-Every command is read-only by default. ``--execute`` is accepted only by
-``verify`` and refuses, because destination verification is performed by an
-operator-authorized executor outside this package; the command here only
-*describes* the verification set. ``import`` validates by default and writes
-only with ``--apply``.
+Every command is read-only by default. The only writes in this package are
+``import --apply`` and ``new --apply``, both explicit. ``--execute`` is accepted
+only by ``verify`` and refuses, because destination verification is performed by
+an operator-authorized executor outside this package; the command here only
+*describes* the verification set.
+
+``status``, ``plan`` and ``verify`` never take a clock reading: their output is a
+pure function of the bundle. ``new`` does take one (a campaign needs a creation
+instant), which is why ``--created-at`` exists and why its output is a write.
 
 Exit codes:
     0  command completed
     2  usage / unreadable bundle
-    3  gate closed (``--require-release`` only) or ``--execute`` refused
+    3  gate closed (``--require-release`` only), ``--execute`` refused, or a
+       refusal (campaign exists, identity unprovable)
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -30,11 +37,13 @@ from .policy import CustodyPolicy
 from .report import plan_json, plan_text, status_json, status_text
 from .store import (
     BundleError,
+    CampaignCreationError,
     CampaignStatus,
     import_evidence,
     load_custody_config,
     load_policy,
     load_status,
+    new_campaign,
 )
 
 EXIT_OK = 0
@@ -82,6 +91,23 @@ def build_parser() -> argparse.ArgumentParser:
     pi = common(sub.add_parser("import", help="Validate (default) or apply an evidence document."))
     pi.add_argument("--evidence", required=True, help="path to an evidence JSON document")
     pi.add_argument("--apply", action="store_true", help="write the evidence into the bundle")
+
+    pn = sub.add_parser("new", help="Create a campaign record for observed card hardware.")
+    pn.add_argument("--bundle", required=True, help="campaign bundle directory to create")
+    pn.add_argument("--card-id", required=True, help="operator label, e.g. CARD-02")
+    pn.add_argument("--device", default=None, help="block device, e.g. /dev/sdb1")
+    pn.add_argument("--uuid", default=None,
+                    help="filesystem UUID / volume id - the authoritative card identity")
+    pn.add_argument("--serial", default=None, help="card serial, when the device exposes one")
+    pn.add_argument("--label", default=None, help="volume label (recorded, never identity)")
+    pn.add_argument("--mount", default=None, help="observed mount point")
+    pn.add_argument("--read-only", action="store_true",
+                    help="record the source as a read-only mount (custody expects this)")
+    pn.add_argument("--created-at", default=None,
+                    help="ISO-8601 creation instant (default: now, UTC)")
+    pn.add_argument("--apply", action="store_true", help="write campaign.json")
+    pn.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    pn.add_argument("--policy-file", default=None, help="JSON file overriding custody.policy")
     return parser
 
 
@@ -206,11 +232,50 @@ def cmd_import(args) -> int:
     return EXIT_OK if not result.get("error") else EXIT_USAGE
 
 
+def cmd_new(args) -> int:
+    """Create a campaign record for observed card hardware. Explicitly authorized."""
+    observed = CardIdentity(
+        device=args.device,
+        filesystem_uuid=args.uuid,
+        serial=args.serial,
+        label=args.label,
+    )
+    created_at = args.created_at or datetime.now(timezone.utc).replace(
+        microsecond=0
+    ).isoformat().replace("+00:00", "Z")
+    result = new_campaign(
+        args.bundle,
+        card_id=args.card_id,
+        observed=observed,
+        mount_point=args.mount,
+        read_only=bool(args.read_only),
+        created_at=created_at,
+        config=load_custody_config(),
+        apply=bool(args.apply),
+    )
+    if args.json:
+        print(json.dumps(result, sort_keys=True, indent=2, default=str))
+    else:
+        sys.stdout.write(
+            f"mode                       {result['mode']}\n"
+            f"campaign_id                {result['campaign_id']}\n"
+            f"card_id                    {result['card_id']}\n"
+            f"card_key                   {result['card_key']}\n"
+            f"source_read_only           {str(result['source_read_only']).lower()}\n"
+            f"destination_resolved       "
+            f"{str(result['destination_resolved']).lower()}\n"
+            f"state                      {result['state']}\n"
+            f"would_write                {result['would_write']}\n"
+        )
+    return EXIT_OK
+
+
 _HANDLERS = {
     "status": cmd_status,
     "plan": cmd_plan,
     "verify": cmd_verify,
     "import": cmd_import,
+    "new": cmd_new,
 }
 
 
@@ -220,6 +285,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     handler = _HANDLERS[args.custody_cmd]
     try:
         return handler(args)
+    except CampaignCreationError as exc:
+        print(f"custody: refusing to create campaign: {exc}", file=sys.stderr)
+        return EXIT_GATE_CLOSED
     except BundleError as exc:
         print(f"custody: {exc}", file=sys.stderr)
         return EXIT_USAGE

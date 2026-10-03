@@ -140,6 +140,32 @@ def test_no_udev_or_watcher_triggers_are_added_by_this_slice():
         assert path.suffix not in forbidden_suffixes, path
 
 
+def test_the_only_writes_are_the_two_explicitly_authorized_commands():
+    """`store.py` is the only module that writes, and only behind an `apply` flag."""
+    writers = {
+        path.name for path in _module_paths()
+        if "os.replace(" in _source(path) or '"w", encoding' in _source(path)
+    }
+    assert writers == {"store.py"}
+
+    source = _source(CUSTODY_DIR / "store.py")
+    # every write goes through the single atomic helper
+    assert source.count("def _write_json_atomic") == 1
+    assert source.count("_write_json_atomic(") == 3  # def + import-free: 2 call sites
+    for fn in ("new_campaign", "import_evidence"):
+        assert f"def {fn}(" in source
+    # and both are gated
+    assert "apply: bool = False" in source
+
+
+def test_writing_commands_are_the_only_ones_taking_a_clock():
+    """`status`/`plan`/`verify` must stay clock-free or they stop being idempotent."""
+    for name in ("machine.py", "planner.py", "release.py", "report.py", "evidence.py"):
+        text = _source(CUSTODY_DIR / name)
+        for banned in ("datetime.now", "time.time", "utcnow", "uuid4", "random"):
+            assert banned not in text, f"{name} reads the clock/randomness ({banned})"
+
+
 # ---------------------------------------------------------------------------
 # the disposition is documented, not just asserted
 # ---------------------------------------------------------------------------

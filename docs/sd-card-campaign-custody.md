@@ -12,6 +12,77 @@ contract, a read-only planner and a fail-closed release gate.
 
 ---
 
+## 0. What already decided "am I done?" (inventory, spec §1)
+
+Before this slice the repository contained **22 independent definitions of
+"complete"** — and not one of them asserted that bytes are present and verified
+at a destination. Two of them could not even detect a truncated destination
+file, because they define "done" as *the destination path exists* or *the
+pipeline exited 0*.
+
+| # | mechanism (file:line) | completion evidence | proves destination custody? | resumable from |
+| --- | --- | --- | --- | --- |
+| 1 | `auto_ingest/ingest_claim.py:190-191` | `stage == 'graph_written'` → `status='done'` | no — one graph write | `j.stages` map (reset by `:176-183`) |
+| 2 | `auto_ingest/ingest_claim.py:101` | `status='queued'` (string absent from every `STATUS_*`) | no | — |
+| 3 | `auto_ingest/ingest_claim.py:210-216` | `reap()` → `status='pending'` | no | TTL on `claimed_at` |
+| 4 | `auto_ingest/ingest_write.py:74-92`, `:113-146` | artifact file **exists** ("for resume/claim logic", `:115`) | no — not even row-set completeness | file existence |
+| 5 | `auto_ingest/ingest_import.py:145-151` | rows submitted | no | MERGE idempotency `:78-86` |
+| 6 | `auto_ingest/outbox.py:118-120` + `:64-66` | `verify()` True → **DELETE** the row | no — `:Transcription{id}` exists (`:174-177`) | the SQLite row |
+| 7 | `auto_ingest/fleet_batch.py:78`, `:130-131` | `"status": "READY"`; always `return 0` | no | nothing |
+| 8 | `auto_ingest/ingest/transcripts.py:1402-1413` | graph-count + embedding-ratio heuristics | no | graph, per key |
+| 9 | `auto_ingest/dashcam/yolo_embeddings.py:1426-1440` | DB row counts + duration from the DB | no | graph, per clip |
+| 10 | `deploy/worker_ingest.sh:36-48` | `mv "$claim" "$DONE_DIR/x.done"` | no — the shell rc | the `mv` itself |
+| 11 | `ingest_media.py:722-726` | `state["done"][sha]["ok"] = True` | no — and set even when sub-steps failed | `media_ingest.json`, written once at `:837` |
+| 12 | `bulk_ingest_dashcam.py:125-129`, `:228-231` | container `returncode == 0`; `[SKIP]` also counts as success | no | none (delegates) |
+| 13 | `bulk_ingest_dashcam.sh:57-63` | `local exit_code=$?` **after `tee`** → `[DONE]` | no — `tee`'s status | none |
+| 14 | `run_ingest_all.sh:20-25`, `:139-141` | `flock` + `FORCE=1` override | no — delegates to #8 | graph (via child) |
+| 15 | `run_ingest_daily.sh:24-40` | `SKIP loadavg` / `SKIP lock` / `rc=$?` — skip and success share exit 0 | no | nothing |
+| 16 | `scripts/ingest_supervisor.py:140-143` | `status='ok'` iff `rc==0`; the recorded `nodes` count **never gates anything** | no | `ingest_ledger.json`, per day |
+| 17 | `scripts/sync_knowledge_to_nas.sh:24-27` | `rsync -ni` diff empty → silent `exit 0`; `\|\| true` swallows probe failure | no — mtime+size diff | rsync's own comparison |
+| 18 | `scripts/sync_cache_to_nas5.sh:21-23`, `:38` | `--ignore-existing` ⇒ destination path exists | **never** — a truncated destination file is silently accepted | destination path existence |
+| 19 | `docs/current-ingest-state-2026-06-10.md:54`, `:158-186` | `processed=18 skipped=122 total=311`; FS-vs-DB key arithmetic | no | n/a (snapshot) |
+| 20 | `docs/recovery-plan-2026-06-10.md:114-150` | node counts, "counts do not move in the expected direction" | no | MERGE-by-stable-ID |
+| 21 | `docs/deathstar-cli-storage-migration.md:11-14` | "canonical storage layout" = NAS3 | asserts a destination, verifies none | n/a |
+| 22 | `docs/OFFLINE_SWARM_INTEGRATION_PLAN.md:43-51`, `:159` | task lifecycle `complete/fail`; "artifact-exists based" skip | no | outbox replay |
+
+Highest-value findings:
+
+1. **`scripts/ingest_supervisor.py:136-143` computes a verification and then
+   ignores it.** `nodes=neo4j_day_count(dk)` is written into the ledger and never
+   gates anything, so `status='ok'` means only "rc was 0" — and the query itself
+   (`:57`, `WHERE c.key STARTS WITH $p`) is a prefix count with no expected
+   total, so 12-of-12 clips and 12-of-400 clips look identical.
+2. **Two per-key completion oracles with different meanings.**
+   `ingest_claim.py:190-191` makes `done` mean `graph_written` (six status
+   strings, one of which — `"queued"` at `:101` — is not in any `STATUS_*`
+   constant), while `ingest_write.py:115` makes it mean "the artifact file
+   exists". Neither has anything to do with whether any byte exists anywhere.
+3. **`bulk_ingest_dashcam.sh:57` captures `$?` after a pipeline ending in `tee`,
+   and `set -e` (`:2`) makes the failure branch unreachable** — so `[DONE]`
+   (`:63`) is printed off `tee`'s status, `failed_days` (`:70`, `:92`) is dead
+   code, and `exit 0` (`:105`) is unreachable on failure.
+4. **`sync_cache_to_nas5.sh:21` defines "done" as "a path exists at the
+   destination"** (`--ignore-existing`), so a truncated or bit-rotted copy is
+   permanently accepted and never repaired; its `findmnt` check (`:11-14`)
+   validates a mountpoint string, not a storage identity.
+5. **`ingest_media.py:722-726` writes `"ok": True` unconditionally** and `:837`
+   persists the state file only after the whole loop finishes — so a file whose
+   transcription failed is recorded as done, and a crash loses the entire run's
+   progress despite the module advertising itself resumable (`:18`).
+
+### What this package deliberately does not touch
+
+| machinery | why |
+| --- | --- |
+| `ingest_claim.py`, `deploy/worker_ingest.sh`, `scripts/claim_job.py` | **different domain.** Coordination state about *workers* (`owner`/`claimed_at`/`stages`), not evidence about bytes. Custody reads around it. Replacing it is unnecessary: nothing calls `create_job`, and `worker_ingest.sh:24` already makes the filesystem move authoritative and treats the graph claim as best-effort. |
+| `ingest_import.py`, `outbox.py`, `fleet_batch.py`, `ingest/__init__.py` | **different domain.** Graph-write and fleet-scheduling state (rows, nodes, Tasks). Custody has no correct answer for "did this 250k-row artifact import?" and must never infer a copy/verify verdict from `drained`/`kept`/`READY`. |
+| `transcripts.py:should_reingest`, `yolo_embeddings.py` | **different domain.** Graph-coverage oracles over an already-durable corpus. Rewriting them would change transcription ingest behaviour; they remain the correct answer to "does this key need re-ingesting". |
+| `bulk_ingest_dashcam.{py,sh}`, `ingest_supervisor.py`, `sync_*.sh` | **left on disk, outside the state machine.** They own *corpus-to-graph* ingest of already-durable trees. Recorded MANUAL_ONLY in §12 with disposition "do not reactivate". |
+| `dashcam_copy.sh`, `bodycam_copy.sh`, `audio_copy.sh` | **gated, not wrapped.** These are the real byte-copy scripts. Custody describes and gates them; `custody verify --execute` refuses (§9). |
+| `NAS3`/`NAS4`/`NAS5`/`SSD_4TB`/`/mnt/8TB_2025` literals | custody stores a *logical* destination and resolves the host path at runtime (§5), so it can coexist with five disagreeing canonical-root definitions elsewhere without joining the argument. |
+
+---
+
 ## 1. The questions this answers
 
 | question | answered by |
@@ -228,6 +299,9 @@ All read-only by default. `--require-release` exits 3 when the gate is closed,
 which makes the commands usable as a CI/Hermes gate.
 
 ```bash
+auto-ingest custody new     --bundle /path/to/campaign --card-id CARD-02 \
+  --uuid "$(blkid -s UUID -o value /dev/sdb1)" --device /dev/sdb1 \
+  --label UNTITLED --mount /media/scott/UNTITLED --read-only --apply
 auto-ingest custody status  --bundle /path/to/campaign          # human
 auto-ingest custody status  --bundle /path/to/campaign --json   # machine
 auto-ingest custody plan    --bundle /path/to/campaign --json
@@ -248,11 +322,24 @@ this campaign's card used to be.
 
 ### plan vs execute
 
-`status`, `plan`, `verify` and `import` (without `--apply`) never execute
-anything. `verify` deliberately has no execution path: `custody verify --execute`
-returns exit 3 and a refusal message, because destination verification is an
-operator-authorized step performed by an executor outside this package. There is
-no implicit execution as a side effect of reading state.
+`new`, `status`, `plan`, `verify` and `import` (without `--apply`) never execute
+anything against media. The **only** two writes in the package are
+`import --apply` and `new --apply`, both explicit and both inside the campaign
+bundle directory. `verify` deliberately has no execution path:
+`custody verify --execute` returns exit 3 and a refusal message, because
+destination verification is an operator-authorized step performed by an executor
+outside this package. There is no implicit execution as a side effect of reading
+state.
+
+`custody new` is the only command that reads a clock (a campaign needs a
+creation instant), which is why `--created-at` exists and why its output is a
+write. `status`, `plan` and `verify` stay clock-free and random-free — pinned by
+`tests/test_custody_legacy_watchers.py::test_writing_commands_are_the_only_ones_taking_a_clock`.
+
+`custody new` fails closed three ways: a label alone is not identity (`UNTITLED`
+proves nothing, so the campaign is not created); it never overwrites an existing
+`campaign.json`; and an unresolved destination is recorded as unresolved rather
+than guessed — which blocks release, not onboarding.
 
 ---
 
@@ -260,6 +347,7 @@ no implicit execution as a side effect of reading state.
 
 ```
 observe physical source        # lsblk / blkid, read-only; mount read-only
+  → custody new --apply        # mint campaign identity from observed hardware
   → update/import evidence     # auto-ingest custody import ... --apply
   → custody status             # what state is this card in?
   → custody plan               # what would the next safe operation be?
@@ -267,6 +355,10 @@ observe physical source        # lsblk / blkid, read-only; mount read-only
   → custody verify             # describe/confirm the verification set
   → custody status             # has custody been proven?
 ```
+
+Each step is a separate, individually authorized command. `new` records who the
+card is, `import` records what has been observed about it, `status`/`plan` read,
+and only an explicitly authorized executor moves bytes.
 
 Hermes can then answer every question in the table in §1 without reconstructing
 anything from logs.
@@ -332,6 +424,10 @@ authorizes execution explicitly.
 | status/plan cause zero filesystem mutation | `test_custody_readonly.py` (CPython audit hook in a subprocess) |
 | no duplicate task generation | `test_custody_idempotency.py` |
 | a different card cannot inherit state | `test_custody_identity.py` |
+| a card's identity is unprovable without a UUID/device/serial | `test_custody_new_campaign.py::test_label_only_is_refused` |
+| evidence is never overwritten | `test_custody_new_campaign.py::test_existing_campaign_is_never_overwritten` |
 | JSON serialisation is deterministic | `test_custody_idempotency.py::test_status_json_keys_are_sorted` |
+| the only writes are the two authorized commands | `test_custody_legacy_watchers.py::test_the_only_writes_are_the_two_explicitly_authorized_commands` |
+| read commands take no clock/randomness | `test_custody_legacy_watchers.py::test_writing_commands_are_the_only_ones_taking_a_clock` |
 | custody does not depend on legacy watchers | `test_custody_legacy_watchers.py` |
 | the fixture is not wired to the card | `test_custody_fixture_card01.py` |

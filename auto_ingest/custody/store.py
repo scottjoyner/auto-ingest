@@ -6,11 +6,13 @@ A campaign bundle is a directory:
     <bundle>/evidence.json        bounded evidence counters (never per-file rows)
     <bundle>/ledgers/*.jsonl      optional per-file detail (read-only)
 
-Everything here is read-only except :func:`import_evidence`, which is the single
-explicit write in the package and refuses to do anything without ``apply=True``.
-Loading never creates, repairs or "fixes" a bundle: a bundle that is missing
-fields yields a campaign whose derived state is *BLOCKED* or *DISCOVERED*,
-which is the honest answer.
+Everything here is read-only except :func:`import_evidence` and
+:func:`new_campaign`, which are the only two explicit writes in the package.
+``import_evidence`` refuses to do anything without ``apply=True`` and
+``new_campaign`` refuses to overwrite an existing campaign. Loading never
+creates, repairs or "fixes" a bundle: a bundle that is missing fields yields a
+campaign whose derived state is *BLOCKED* or *DISCOVERED*, which is the honest
+answer.
 
 Status assembly is a pure fold over (campaign, evidence, policy): running
 ``status`` twice against an unchanged bundle produces identical output.
@@ -24,7 +26,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
-from .campaign import Campaign, CampaignResolution, CardIdentity, resolve_campaign
+from .campaign import (
+    Campaign,
+    CampaignResolution,
+    CardIdentity,
+    SourceRef,
+    resolve_campaign,
+)
 from .destination import (
     DestinationRef,
     load_custody_config,
@@ -314,6 +322,92 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+class CampaignCreationError(RuntimeError):
+    """Raised when a new campaign must not be created as requested."""
+
+
+def new_campaign(
+    bundle: str | Path,
+    *,
+    card_id: str,
+    observed: CardIdentity,
+    mount_point: Optional[str] = None,
+    read_only: bool = False,
+    created_at: Optional[str] = None,
+    destination: Optional[DestinationRef] = None,
+    config: Optional[Mapping[str, Any]] = None,
+    env: Optional[Mapping[str, str]] = None,
+    apply: bool = False,
+) -> Dict[str, Any]:
+    """Create a campaign record for physically observed card hardware.
+
+    The entry point of the operator loop, and the only place a campaign id is
+    minted. Three refusals, all fail-closed:
+
+    * **no provable identity** - a label alone (``UNTITLED``) identifies nothing,
+      so the campaign is not created;
+    * **an existing campaign** - creation never overwrites. A card that reappears
+      keeps its evidence; a *different* card gets a new bundle;
+    * **unresolved destination** is recorded as unresolved (``host_path=None``)
+      rather than guessed; it blocks the release gate, it does not block
+      onboarding.
+
+    Read-only unless ``apply=True``.
+    """
+    root = Path(bundle)
+    target = root / CAMPAIGN_FILE
+    result: Dict[str, Any] = {
+        "applied": False,
+        "bundle": str(root),
+        "would_write": str(target),
+    }
+
+    if not observed.known:
+        raise CampaignCreationError(
+            "card identity is unprovable: provide at least one of device, "
+            "filesystem_uuid or serial (a label alone is not identity)"
+        )
+    if target.exists():
+        raise CampaignCreationError(
+            f"campaign already exists at {target}; refusing to overwrite evidence"
+        )
+
+    if destination is None:
+        destination = resolve_destination(config or {}, env=env)
+
+    source = SourceRef(mount_point=mount_point, read_only=bool(read_only), card=observed)
+    campaign = Campaign.create(
+        card_id=card_id,
+        source=source,
+        destination=destination,
+        created_at=created_at,
+    )
+
+    # Provenance: if another campaign already exists elsewhere we cannot see it
+    # from here, but within this bundle a prior record would have been refused
+    # above, so a fresh id is always correct.
+    resolution = resolve_campaign(observed, [], mount_point=mount_point)
+    result.update({
+        "campaign_id": campaign.campaign_id,
+        "card_id": card_id,
+        "card_key": campaign.card_key,
+        "created_at": campaign.created_at,
+        "destination_resolved": campaign.destination.resolved,
+        "identity_reason": resolution.reason,
+        "source_read_only": campaign.source.read_only,
+        "state": CampaignState.DISCOVERED.value,
+    })
+    if not apply:
+        result["mode"] = "validate_only"
+        return result
+
+    root.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic(target, campaign.to_dict())
+    result["applied"] = True
+    result["mode"] = "applied"
+    return result
+
+
 def select_campaign(
     observed: CardIdentity,
     bundle: str | Path,
@@ -333,6 +427,7 @@ def select_campaign(
 __all__ = [
     "BundleError",
     "CAMPAIGN_FILE",
+    "CampaignCreationError",
     "CampaignStatus",
     "EVIDENCE_FILE",
     "PLAN_SCHEMA",
@@ -345,5 +440,6 @@ __all__ = [
     "load_policy",
     "load_policy_and_destination",
     "load_status",
+    "new_campaign",
     "select_campaign",
 ]

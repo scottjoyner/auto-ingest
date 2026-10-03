@@ -40,7 +40,7 @@ def run(argv, capsys):
 def test_parser_exposes_the_documented_subcommands():
     parser = build_parser()
     sub = [a for a in parser._subparsers._group_actions if hasattr(a, "choices")][0]
-    assert set(sub.choices) == {"status", "plan", "verify", "import"}
+    assert set(sub.choices) == {"status", "plan", "verify", "import", "new"}
 
 
 def test_status_defaults_are_read_only():
@@ -52,6 +52,12 @@ def test_status_defaults_are_read_only():
 
 def test_import_does_not_apply_without_the_flag():
     args = build_parser().parse_args(["import", "--bundle", "x", "--evidence", "y"])
+    assert args.apply is False
+
+
+def test_new_does_not_apply_without_the_flag():
+    args = build_parser().parse_args(["new", "--bundle", "x", "--card-id", "CARD-02",
+                                      "--uuid", "ABCD-1234"])
     assert args.apply is False
 
 
@@ -266,8 +272,20 @@ def test_status_accepts_the_same_card(capsys):
     assert json.loads(out)["observed_card_matches_campaign"] is True
 
 
-@pytest.mark.parametrize("cmd", ["status", "plan", "verify"])
-def test_no_subcommand_writes_by_default(cmd, capsys):
+@pytest.mark.parametrize("cmd", ["status", "plan", "verify", "new"])
+def test_no_subcommand_writes_by_default(cmd, capsys, tmp_path):
+    """Even `new`, pointed at an existing bundle, writes nothing."""
     before = sorted(p.name for p in CARD_01_BUNDLE.iterdir())
-    run([cmd, "--bundle", str(CARD_01_BUNDLE)], capsys)
+    argv = [cmd, "--bundle", str(CARD_01_BUNDLE)]
+    if cmd == "new":
+        argv += ["--card-id", "CARD-XX", "--uuid", "ABCD-1234"]
+    run(argv, capsys)
+    assert sorted(p.name for p in CARD_01_BUNDLE.iterdir()) == before
+
+
+def test_status_writes_nothing_even_with_a_missing_policy_override(capsys):
+    before = sorted(p.name for p in CARD_01_BUNDLE.iterdir())
+    code, _, _ = run(["status", "--bundle", str(CARD_01_BUNDLE),
+                      "--observed-uuid", "7A3E-2C19"], capsys)
+    assert code == EXIT_OK
     assert sorted(p.name for p in CARD_01_BUNDLE.iterdir()) == before
