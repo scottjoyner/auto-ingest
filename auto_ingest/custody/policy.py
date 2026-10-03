@@ -111,6 +111,18 @@ class CustodyPolicy:
     def hash_exemptions_allowed(self) -> bool:
         return self.allow_hash_exemptions and bool(self.declared_hash_exemptions)
 
+    def required_objects(self, inventory_files: int, hashed_files: int) -> int:
+        """How many objects this policy demands custody for.
+
+        Single definition of "required scope", used by *both* the state machine
+        and the release gate. They used to disagree: ``hashed_set`` weakened the
+        gate's plan-scope check while the machine still demanded full inventory
+        coverage, so a policy knob silently did half of what it said.
+        """
+        if self.required_scope == "hashed_set":
+            return max(hashed_files, 0)
+        return max(inventory_files, 0)
+
     def honour_exemption(self, pattern: str) -> bool:
         """True when ``pattern`` is an exemption this policy actually honours."""
         return self.hash_exemptions_allowed and pattern in self.declared_hash_exemptions

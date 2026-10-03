@@ -22,7 +22,12 @@ from custody_helpers import (
     worker,
 )
 
-from auto_ingest.custody import CampaignState, derive_state, find_contradictions
+from auto_ingest.custody import (
+    CampaignState,
+    derive_state,
+    evaluate_release,
+    find_contradictions,
+)
 from auto_ingest.custody.machine import hash_coverage_complete
 
 
@@ -349,6 +354,71 @@ def test_a_genuine_contradiction_keeps_its_own_reason():
     assert d.reasons == ("evidence_contradicts_itself",)
 
 
+# ---------------------------------------------------------------------------
+# malformed counts: blocked, and honest about why
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("bad", ["6,764", "abc", "1e3", "twelve", {}, []])
+def test_a_non_numeric_count_blocks_with_a_malformed_reason(bad):
+    """A thousands separator in hand-written JSON must not read as a contradiction.
+
+    The machine blocks either way, but telling an operator that evidence
+    "contradicts itself" sends them looking for inconsistent observations when
+    the actual fault is a comma.
+    """
+    from auto_ingest.custody import CampaignEvidence
+
+    ev = CampaignEvidence.from_dict({
+        "inventory": {"discovered_files": bad, "discovered_bytes": 1, "complete": True},
+        "hash": {"verified_files": 67644, "verified_bytes": 1, "complete": True},
+    }, strict_policy())
+    assert ev.inventory.discovered_files == 0
+    assert ev.coerced_fields and ev.coerced_fields[0].startswith(
+        "inventory.discovered_files=")
+    d = derive_state(campaign(), ev, strict_policy())
+    assert d.state is CampaignState.BLOCKED
+    assert d.reasons == ("evidence_counts_are_malformed",)
+
+
+def test_a_numeric_string_count_is_accepted():
+    from auto_ingest.custody import CampaignEvidence
+
+    ev = CampaignEvidence.from_dict({"inventory": {"discovered_files": "67644"}},
+                                    strict_policy())
+    assert ev.inventory.discovered_files == 67644
+    assert ev.coerced_fields == ()
+
+
+def test_negative_counts_are_contradictions_not_coercions():
+    """-5 parses fine; it is an impossible value, not malformed text."""
+    ev = evidence(inv=inventory(-5, 1, complete=True, verified=True))
+    assert ev.coerced_fields == ()
+    assert derive(ev).reasons == ("evidence_contradicts_itself",)
+
+
+def test_a_fractional_count_truncates_and_stays_safe():
+    """3.9 -> 3 through the parser. Not a blocker, but never enables a release."""
+    from auto_ingest.custody import CampaignEvidence
+
+    ev = CampaignEvidence.from_dict({
+        "inventory": {"discovered_files": 3.9, "discovered_bytes": 1,
+                      "complete": True, "verified": True},
+    }, strict_policy())
+    assert ev.inventory.discovered_files == 3
+    assert ev.coerced_fields == ()
+    state = derive_state(campaign(), ev, strict_policy()).state
+    assert state is CampaignState.SOURCE_VERIFIED
+    assert state is not CampaignState.SAFE_TO_RELEASE
+
+
+def test_coerced_fields_round_trip_through_the_summary():
+    from auto_ingest.custody import CampaignEvidence
+
+    raw = {"inventory": {"discovered_files": "6,764", "complete": True}}
+    ev = CampaignEvidence.from_dict(raw, strict_policy())
+    assert "coerced_fields" in ev.to_dict()
+    assert ev.to_dict()["coerced_fields"] == list(ev.coerced_fields)
+
+
 def test_find_contradictions_is_empty_for_a_coherent_campaign():
     camp, ev = fully_copied_campaign()
     assert find_contradictions(camp, ev) == ()
@@ -374,6 +444,46 @@ def test_declared_exemption_completes_hash_coverage():
     policy = strict_policy(declared_hash_exemptions=("*.tmp",))
     assert hash_coverage_complete(ev, policy) is True
     assert derive(ev, policy=policy).state is CampaignState.COPY_PENDING
+
+
+# ---------------------------------------------------------------------------
+# required scope: one definition, used by the machine AND the gate
+# ---------------------------------------------------------------------------
+def test_the_state_machine_honours_the_policy_scope():
+    """A policy knob that only half-applies is worse than no knob at all."""
+    ev = evidence(inv=inventory(100, 1000, complete=True, verified=True),
+                  hsh=hashing(40, verified_bytes=400, complete=False),
+                  cpy=copying(planned_files=40, planned_bytes=400, started=False))
+    assert derive(ev, policy=strict_policy()).state is CampaignState.HASHING
+    assert derive(ev, policy=strict_policy(required_scope="hashed_set")).state \
+        is CampaignState.COPY_PENDING
+
+
+def test_the_default_scope_still_demands_the_whole_card():
+    ev = evidence(inv=inventory(100, 1000, complete=True, verified=True),
+                  hsh=hashing(40, verified_bytes=400, complete=False),
+                  cpy=copying(planned_files=40, planned_bytes=400, started=False))
+    d = derive(ev, policy=strict_policy())
+    assert d.state is CampaignState.HASHING
+    assert any("scope=all_inventory" in r for r in d.reasons)
+
+
+def test_machine_and_gate_agree_on_the_required_count():
+    ev = evidence(inv=inventory(100, 1000, complete=True, verified=True),
+                  hsh=hashing(40, verified_bytes=400, complete=False),
+                  cpy=copying(planned_files=40, planned_bytes=400, completed_files=40,
+                              completed_bytes=400, started=True, result_complete=True,
+                              ledger_complete=True),
+                  dst=destination_evidence(verified_files=40, verified_bytes=400,
+                                           verification_started=True,
+                                           verification_complete=True),
+                  rec=reconciliation())
+    for scope in ("all_inventory", "hashed_set"):
+        policy = strict_policy(required_scope=scope)
+        machine_done = derive(ev, policy=policy).state is not CampaignState.HASHING
+        gate_short = "hash_evidence_incomplete" in {
+            b.code for b in evaluate_release(campaign(), ev, policy).blockers}
+        assert machine_done is not gate_short, scope
 
 
 # ---------------------------------------------------------------------------

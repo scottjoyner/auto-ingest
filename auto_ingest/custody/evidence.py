@@ -19,7 +19,7 @@ Counters are named so their direction is unambiguous:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .destination import StorageIdentity
 from .policy import MAX_SUMMARY_ENTRIES, CustodyPolicy
@@ -36,6 +36,27 @@ def _int(value: Any) -> int:
             return 1
         return int(value)
     except (TypeError, ValueError):
+        return 0
+
+
+def _count(value: Any, where: str, coerced: List[str]) -> int:
+    """Parse a count, recording when the input was not actually a count.
+
+    A malformed count must not silently become 0: the machine still blocks on it
+    (zero objects contradicts any non-zero hash evidence), but reporting *why*
+    saves an operator from hunting for inconsistent evidence when the real fault
+    is a thousands separator in their JSON.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        coerced.append(f"{where}={value!r}")
         return 0
 
 
@@ -79,10 +100,13 @@ class Counts:
     bytes: int = 0
 
     @classmethod
-    def from_dict(cls, raw: Any) -> "Counts":
+    def from_dict(cls, raw: Any, where: str = "counts",
+                  coerced: Optional[List[str]] = None) -> "Counts":
+        c = coerced if coerced is not None else []
         if not isinstance(raw, Mapping):
-            return cls(_int(raw), 0)
-        return cls(_int(raw.get("files")), _int(raw.get("bytes")))
+            return cls(_count(raw, f"{where}.files", c), 0)
+        return cls(_count(raw.get("files"), f"{where}.files", c),
+                   _count(raw.get("bytes"), f"{where}.bytes", c))
 
     def to_dict(self) -> Dict[str, int]:
         return {"bytes": self.bytes, "files": self.files}
@@ -104,11 +128,15 @@ class InventoryEvidence:
     observed_at: Optional[str] = None
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any], limit: int) -> "InventoryEvidence":
+    def from_dict(cls, raw: Mapping[str, Any], limit: int,
+                  coerced: Optional[List[str]] = None) -> "InventoryEvidence":
         raw = raw or {}
+        c = coerced if coerced is not None else []
         return cls(
-            discovered_files=_int(raw.get("discovered_files", raw.get("files"))),
-            discovered_bytes=_int(raw.get("discovered_bytes", raw.get("bytes"))),
+            discovered_files=_count(raw.get("discovered_files", raw.get("files")),
+                                    "inventory.discovered_files", c),
+            discovered_bytes=_count(raw.get("discovered_bytes", raw.get("bytes")),
+                                    "inventory.discovered_bytes", c),
             complete=_bool(raw.get("complete")),
             verified=_bool(raw.get("verified")),
             started=_bool(raw.get("started", raw.get("complete") or raw.get("verified"))),
@@ -142,12 +170,16 @@ class HashEvidence:
     last_checkpoint: Optional[str] = None
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any], limit: int) -> "HashEvidence":
+    def from_dict(cls, raw: Mapping[str, Any], limit: int,
+                  coerced: Optional[List[str]] = None) -> "HashEvidence":
         raw = raw or {}
+        c = coerced if coerced is not None else []
         return cls(
-            verified_files=_int(raw.get("verified_files", raw.get("hashed_files"))),
-            verified_bytes=_int(raw.get("verified_bytes", raw.get("hashed_bytes"))),
-            failed=_int(raw.get("errors", raw.get("failed"))),
+            verified_files=_count(raw.get("verified_files", raw.get("hashed_files")),
+                                  "hash.verified_files", c),
+            verified_bytes=_count(raw.get("verified_bytes", raw.get("hashed_bytes")),
+                                  "hash.verified_bytes", c),
+            failed=_count(raw.get("errors", raw.get("failed")), "hash.errors", c),
             complete=_bool(raw.get("complete")),
             started=_bool(raw.get("started", raw.get("complete") or
                                _int(raw.get("verified_files", raw.get("hashed_files"))) > 0)),
@@ -185,11 +217,13 @@ class CopyEvidence:
     last_checkpoint: Optional[str] = None
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any], limit: int) -> "CopyEvidence":
+    def from_dict(cls, raw: Mapping[str, Any], limit: int,
+                  coerced: Optional[List[str]] = None) -> "CopyEvidence":
         raw = raw or {}
+        c = coerced if coerced is not None else []
         return cls(
-            planned=Counts.from_dict(raw.get("planned")),
-            completed=Counts.from_dict(raw.get("completed")),
+            planned=Counts.from_dict(raw.get("planned"), "copy.planned", c),
+            completed=Counts.from_dict(raw.get("completed"), "copy.completed", c),
             started=_bool(raw.get("started")),
             result_complete=_bool(raw.get("result_complete", raw.get("complete"))),
             interrupted=_bool(raw.get("interrupted")),
@@ -230,16 +264,21 @@ class DestinationEvidence:
     last_checkpoint: Optional[str] = None
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any], limit: int) -> "DestinationEvidence":
+    def from_dict(cls, raw: Mapping[str, Any], limit: int,
+                  coerced: Optional[List[str]] = None) -> "DestinationEvidence":
         raw = raw or {}
+        c = coerced if coerced is not None else []
         identity_raw = raw.get("observed_identity")
         return cls(
-            verified_files=_int(raw.get("verified_files")),
-            verified_bytes=_int(raw.get("verified_bytes")),
-            failures=_int(raw.get("failures")),
+            verified_files=_count(raw.get("verified_files"),
+                                  "destination.verified_files", c),
+            verified_bytes=_count(raw.get("verified_bytes"),
+                                  "destination.verified_bytes", c),
+            failures=_count(raw.get("failures"), "destination.failures", c),
             verification_started=_bool(raw.get("verification_started", raw.get("started"))),
             verification_complete=_bool(raw.get("verification_complete", raw.get("complete"))),
-            unverified_present_files=_int(raw.get("unverified_present_files")),
+            unverified_present_files=_count(raw.get("unverified_present_files"),
+                                             "destination.unverified_present_files", c),
             observed_identity=StorageIdentity.from_dict(identity_raw)
             if isinstance(identity_raw, Mapping) else None,
             error_summary=_bounded(raw.get("error_summary"), limit),
@@ -271,12 +310,16 @@ class ReconciliationEvidence:
     reconciled_at: Optional[str] = None
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "ReconciliationEvidence":
+    def from_dict(cls, raw: Mapping[str, Any],
+                  coerced: Optional[List[str]] = None) -> "ReconciliationEvidence":
         raw = raw or {}
+        c = coerced if coerced is not None else []
         return cls(
-            source_only=_int(raw.get("source_only")),
-            destination_only=_int(raw.get("destination_only")),
-            mismatched=_int(raw.get("mismatched", raw.get("mismatch"))),
+            source_only=_count(raw.get("source_only"), "reconciliation.source_only", c),
+            destination_only=_count(raw.get("destination_only"),
+                                    "reconciliation.destination_only", c),
+            mismatched=_count(raw.get("mismatched", raw.get("mismatch")),
+                              "reconciliation.mismatched", c),
             reconciled_at=_opt_str(raw.get("reconciled_at")),
         )
 
@@ -347,12 +390,14 @@ class ErrorEvidence:
     witness: Optional[str] = None
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any], limit: int) -> "ErrorEvidence":
+    def from_dict(cls, raw: Mapping[str, Any], limit: int,
+                  coerced: Optional[List[str]] = None) -> "ErrorEvidence":
         raw = raw or {}
+        c = coerced if coerced is not None else []
         witness = _opt_str(raw.get("witness") or raw.get("operator_witness"))
         return cls(
-            unresolved=_int(raw.get("unresolved")),
-            fatal=_int(raw.get("fatal")),
+            unresolved=_count(raw.get("unresolved"), "errors.unresolved", c),
+            fatal=_count(raw.get("fatal"), "errors.fatal", c),
             summaries=_bounded(raw.get("summaries") or raw.get("error_summary"), limit),
             witness=witness,
         )
@@ -380,6 +425,7 @@ class CampaignEvidence:
     errors: ErrorEvidence = field(default_factory=ErrorEvidence)
     observed_at: Optional[str] = None
     ignored_declared_fields: Tuple[str, ...] = ()
+    coerced_fields: Tuple[str, ...] = ()
 
     @classmethod
     def from_dict(
@@ -390,17 +436,22 @@ class CampaignEvidence:
         raw = raw or {}
         limit = (policy or CustodyPolicy()).max_summary_entries or MAX_SUMMARY_ENTRIES
         declared = tuple(k for k in DECLARED_STATE_KEYS if k in raw)
+        coerced: List[str] = []
         return cls(
             campaign_id=str(raw.get("campaign_id") or ""),
-            inventory=InventoryEvidence.from_dict(raw.get("inventory") or {}, limit),
-            hashing=HashEvidence.from_dict(raw.get("hash") or raw.get("hashing") or {}, limit),
-            copy=CopyEvidence.from_dict(raw.get("copy") or {}, limit),
-            destination=DestinationEvidence.from_dict(raw.get("destination") or {}, limit),
-            reconciliation=ReconciliationEvidence.from_dict(raw.get("reconciliation") or {}),
+            inventory=InventoryEvidence.from_dict(raw.get("inventory") or {}, limit, coerced),
+            hashing=HashEvidence.from_dict(
+                raw.get("hash") or raw.get("hashing") or {}, limit, coerced),
+            copy=CopyEvidence.from_dict(raw.get("copy") or {}, limit, coerced),
+            destination=DestinationEvidence.from_dict(
+                raw.get("destination") or {}, limit, coerced),
+            reconciliation=ReconciliationEvidence.from_dict(
+                raw.get("reconciliation") or {}, coerced),
             worker=WorkerEvidence.from_dict(raw.get("worker") or {}),
-            errors=ErrorEvidence.from_dict(raw.get("errors") or {}, limit),
+            errors=ErrorEvidence.from_dict(raw.get("errors") or {}, limit, coerced),
             observed_at=_opt_str(raw.get("observed_at")),
             ignored_declared_fields=declared,
+            coerced_fields=tuple(sorted(coerced)),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -409,6 +460,7 @@ class CampaignEvidence:
             "destination": self.destination.to_dict(),
             "errors": self.errors.to_dict(),
             "hash": self.hashing.to_dict(),
+            "coerced_fields": list(self.coerced_fields),
             "ignored_declared_fields": list(self.ignored_declared_fields),
             "inventory": self.inventory.to_dict(),
             "observed_at": self.observed_at,
@@ -424,16 +476,6 @@ class CampaignEvidence:
     @property
     def verified_at_destination(self) -> int:
         return self.destination.verified_files
-
-    @property
-    def missing_at_destination(self) -> int:
-        """Source objects with no verified destination copy (fail-closed)."""
-        return max(self.inventory_files - self.destination.verified_files, 0)
-
-    @property
-    def remaining_objects(self) -> int:
-        """Objects still needing a verified destination copy."""
-        return self.missing_at_destination
 
     @property
     def hash_coverage(self) -> int:

@@ -147,6 +147,7 @@ class CampaignStatus:
                 "verified_bytes": ev.destination.verified_bytes,
                 "verified_files": ev.destination.verified_files,
             },
+            "coerced_fields": list(ev.coerced_fields),
             "errors": {
                 "fatal": ev.errors.fatal,
                 "summaries": list(ev.errors.summaries),

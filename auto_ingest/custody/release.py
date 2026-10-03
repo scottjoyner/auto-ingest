@@ -142,11 +142,13 @@ def evaluate_release(
             "exemptions not declared by policy: " + ",".join(sorted(undeclared)),
             "declare the exemption patterns in custody.policy.declared_hash_exemptions",
         ))
-    if evidence.hash_coverage_under(policy) < inv.discovered_files:
+    if evidence.hash_coverage_under(policy) < policy.required_objects(
+        inv.discovered_files, hsh.verified_files
+    ):
         blockers.append(Blocker(
             "hash_evidence_incomplete",
             f"covered={evidence.hash_coverage_under(policy)} "
-            f"of discovered={inv.discovered_files}",
+            f"of required={policy.required_objects(inv.discovered_files, hsh.verified_files)}",
             "finish hashing the remaining objects (or declare the exemption)",
         ))
 
@@ -201,8 +203,7 @@ def evaluate_release(
             "resolve every campaign error before release",
         ))
 
-    required = inv.discovered_files if policy.required_scope == "all_inventory" \
-        else hsh.verified_files
+    required = policy.required_objects(inv.discovered_files, hsh.verified_files)
     if cpy.planned.files != required:
         blockers.append(Blocker(
             "plan_scope_shortfall",
@@ -220,6 +221,16 @@ def evaluate_release(
 
     if dst.unverified_present_files:
         warnings.append(f"unverified_objects_present_at_destination={dst.unverified_present_files}")
+
+    out_of_scope = inv.discovered_files - required
+    if out_of_scope > 0:
+        # The operator opted into a narrower scope, so this is not a blocker -
+        # but it must never be silent, or a later reader will assume the whole
+        # card was verified when only part of it was.
+        warnings.append(
+            f"{out_of_scope} inventoried objects are OUTSIDE the required scope "
+            f"({policy.required_scope}): they are not covered by this release"
+        )
 
     return ReleaseDecision(
         allowed=not blockers,

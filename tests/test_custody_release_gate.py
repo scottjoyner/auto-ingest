@@ -168,6 +168,39 @@ def test_plan_scope_must_cover_every_inventoried_object():
     assert evaluate_release(camp, ev, weaker).allowed is True
 
 
+def test_a_narrower_scope_is_never_silent():
+    """`hashed_set` may release a subset, but must say how much it left out."""
+    camp = campaign()
+    ev = evidence(
+        inv=inventory(100, 100, complete=True, verified=True),
+        hsh=hashing(40, verified_bytes=40, complete=False),
+        cpy=copying(planned_files=40, planned_bytes=40, completed_files=40,
+                    completed_bytes=40, started=True, result_complete=True,
+                    ledger_complete=True),
+        dst=destination_evidence(verified_files=40, verified_bytes=40,
+                                 verification_started=True, verification_complete=True,
+                                 observed_identity=camp.destination.identity),
+        rec=reconciliation(), wkr=worker(status="stopped"),
+    )
+    weaker = strict_policy(required_scope="hashed_set")
+    decision = evaluate_release(camp, ev, weaker)
+    assert decision.allowed is True
+    assert any("60 inventoried objects are OUTSIDE the required scope" in w
+               for w in decision.warnings)
+
+    # the default scope is unaffected and still refuses
+    strict = evaluate_release(camp, ev, strict_policy())
+    assert strict.allowed is False
+    assert not any("OUTSIDE the required scope" in w for w in strict.warnings)
+
+
+def test_required_objects_is_the_single_definition_of_scope():
+    policy = strict_policy()
+    assert policy.required_objects(100, 40) == 100
+    assert strict_policy(required_scope="hashed_set").required_objects(100, 40) == 40
+    assert strict_policy(required_scope="hashed_set").required_objects(100, 0) == 0
+
+
 def test_operator_witness_requirement():
     camp, ev = fully_copied_campaign()
     assert "operator_witness_missing" in codes(

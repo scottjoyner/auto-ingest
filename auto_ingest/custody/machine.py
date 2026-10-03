@@ -104,15 +104,27 @@ def find_contradictions(campaign: Campaign, evidence: CampaignEvidence) -> Tuple
             out.append(f"destination_identity_conflict:{match.reason}")
     if evidence.errors.fatal > 0:
         out.append(f"fatal_errors:{evidence.errors.fatal}")
+    if evidence.coerced_fields:
+        # A count that had to be coerced out of a non-numeric value is not a
+        # contradiction between observations; it is malformed evidence. Both
+        # block, but they send an operator to different places.
+        out.append("malformed_counts:" + ",".join(evidence.coerced_fields))
     return tuple(out)
 
 
 def hash_coverage_complete(evidence: CampaignEvidence, policy: CustodyPolicy) -> bool:
-    """Hash evidence covers every object in scope (or an honoured exemption)."""
+    """Hash evidence covers every object the policy puts in scope.
+
+    The required count comes from ``policy.required_objects`` so the machine and
+    the release gate can never disagree about what "required" means.
+    """
     undeclared = policy.undeclared_exemptions(evidence.hashing.exemptions)
     if undeclared:
         return False
-    return evidence.hash_coverage_under(policy) >= evidence.inventory_files
+    required = policy.required_objects(
+        evidence.inventory_files, evidence.hashing.verified_files
+    )
+    return evidence.hash_coverage_under(policy) >= required
 
 
 def derive_state(
@@ -134,9 +146,12 @@ def derive_state(
         # A fatal error is not a contradiction, and saying so would send an
         # operator hunting for inconsistent evidence instead of reading the
         # error summary.
-        fatal = [c for c in contradictions if c.startswith("fatal_errors:")]
-        reason = ("campaign_has_fatal_errors" if fatal
-                  else "evidence_contradicts_itself")
+        if any(c.startswith("malformed_counts:") for c in contradictions):
+            reason = "evidence_counts_are_malformed"
+        elif any(c.startswith("fatal_errors:") for c in contradictions):
+            reason = "campaign_has_fatal_errors"
+        else:
+            reason = "evidence_contradicts_itself"
         return Derivation(
             CampaignState.BLOCKED,
             reasons=(reason,),
@@ -183,7 +198,8 @@ def derive_state(
             reasons=(
                 "hash_evidence_incomplete",
                 f"hashed={hsh.verified_files}+exempt={len(hsh.exemptions)}"
-                f" of discovered={inv.discovered_files}",
+                f" of required={policy.required_objects(inv.discovered_files, hsh.verified_files)}"
+                f" (scope={policy.required_scope}, discovered={inv.discovered_files})",
             ),
         )
 

@@ -122,8 +122,9 @@ Precedence (first match wins) lives in `auto_ingest/custody/machine.py`:
 
 | # | condition | state |
 | --- | --- | --- |
-| 0 | arithmetic contradiction, destination identity conflict | `BLOCKED` |
+| 0 | arithmetic contradiction, destination identity conflict | `BLOCKED` (`evidence_contradicts_itself`) |
 | 0b | fatal campaign errors | `BLOCKED` (`campaign_has_fatal_errors`) |
+| 0c | malformed counts (`coerced_fields`) | `BLOCKED` (`evidence_counts_are_malformed`) |
 | 1 | nothing observed at all | `DISCOVERED` |
 | 2 | inventory incomplete, work underway | `HASHING` |
 | 3 | inventory incomplete, nothing underway | `DISCOVERED` |
@@ -385,9 +386,34 @@ operator witness (if policy requires)
 accounted for, so a copy plan that quietly dropped objects is a blocker, not a
 pass. `hashed_set` is available as a weaker, explicit opt-in.
 
+"Required scope" has exactly one definition, `policy.required_objects()`,
+called by **both** the state machine and the release gate. They used to disagree:
+`hashed_set` weakened the gate's plan-scope check while the machine still
+demanded full inventory coverage, so the knob silently did half of what it said.
+A narrower scope is also never silent — releasing on a subset emits
+`N inventoried objects are OUTSIDE the required scope (hashed_set): they are not
+covered by this release`, because a later reader must not assume the whole card
+was verified.
+
 Hash exemptions only count when `custody.policy.declared_hash_exemptions`
 declares the pattern; an exemption appearing only in evidence is a blocker
 (`hash_exemptions_not_declared`).
+
+### Malformed evidence
+
+Counts that are not numbers (`"6,764"`, `"abc"`) are recorded in
+`coerced_fields` and treated as a distinct failure from contradictory evidence,
+because they send an operator to different places:
+
+| input | result |
+| --- | --- |
+| `"6,764"`, `"abc"`, `{}` | coerced to 0, `BLOCKED` / `evidence_counts_are_malformed` |
+| `"67644"` | accepted (numeric strings are fine) |
+| `-5` | `BLOCKED` / `evidence_contradicts_itself` (impossible value, parses fine) |
+| `3.9` | truncates to 3, not a blocker — and can never enable a release |
+
+Malformed evidence fails *closed* in every case: a zeroed count contradicts any
+non-zero hash evidence, so the machine blocks rather than progressing.
 
 ---
 
@@ -571,6 +597,9 @@ authorizes execution explicitly.
 | the summary stays bounded at card scale | `test_custody_scale.py` |
 | a digest-less record is never custody | `test_custody_reconcile.py::test_a_record_without_a_digest_never_counts_as_custody` |
 | reconciliation cannot prove destination identity | `test_custody_reconcile.py::test_reconciliation_alone_cannot_prove_destination_identity` |
+| machine and gate agree on the required scope | `test_custody_state_machine.py::test_machine_and_gate_agree_on_the_required_count` |
+| a narrower scope is never silent | `test_custody_release_gate.py::test_a_narrower_scope_is_never_silent` |
+| malformed counts block and say why | `test_custody_state_machine.py::test_a_non_numeric_count_blocks_with_a_malformed_reason` |
 | preview == what import would do | `test_custody_reconcile.py::test_preview_agrees_with_import` |
 | the only writes are the two authorized commands | `test_custody_legacy_watchers.py::test_the_only_writes_are_the_two_explicitly_authorized_commands` |
 | read commands take no clock/randomness | `test_custody_legacy_watchers.py::test_writing_commands_are_the_only_ones_taking_a_clock` |
