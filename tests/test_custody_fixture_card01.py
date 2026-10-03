@@ -114,6 +114,30 @@ def test_card_01_with_a_destination_configured_is_still_not_releasable():
     assert status.plan.safe_to_resume is True
 
 
+def test_fixture_ledgers_are_coherent_files(tmp_path):
+    """A committed fixture must not itself look like an interrupted producer.
+
+    The sample ledger initially shipped without a trailing newline, which the
+    coherence check correctly read as a truncated write. Caught by the check,
+    which is the point of it.
+    """
+    for summary in load_status(CARD_01_BUNDLE).ledgers.values():
+        if summary.present:
+            assert summary.coherent is True, f"{summary.path}: {summary.to_dict()}"
+
+
+def test_card_01_reconcile_is_honest_about_why_it_has_no_answer(capsys):
+    from auto_ingest.custody.cli import main
+
+    main(["reconcile", "--bundle", str(CARD_01_BUNDLE), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["usable"] is False
+    assert payload["reconciliation"]["incoherent"] == ["hash_ledger_absent"]
+    # The sample ledger has 3 rows, all `pending`, so it proves 0 verified objects.
+    assert payload["reconciliation"]["destination_objects"] == 0
+    assert payload["reconciliation"]["verified"] == 0
+
+
 def test_card_01_json_status_contract_keys():
     status = load_status(CARD_01_BUNDLE)
     data = status.to_dict()

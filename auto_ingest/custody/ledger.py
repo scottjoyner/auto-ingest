@@ -88,13 +88,17 @@ class LedgerSummary:
     by_status: Dict[str, int] = field(default_factory=dict)
     error_samples: Tuple[str, ...] = ()
     truncated: bool = False
+    malformed: int = 0
+    coherent: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "bytes": self.bytes,
             "by_status": dict(sorted(self.by_status.items())),
+            "coherent": self.coherent,
             "error_samples": list(self.error_samples),
             "files": self.files,
+            "malformed_lines": self.malformed,
             "path": self.path,
             "present": self.present,
             "records": self.records,
@@ -108,7 +112,12 @@ def summarize_ledger(
     max_error_samples: int = MAX_SUMMARY_ENTRIES,
     verified_statuses: Iterable[str] = ("verified", "verified_at_destination"),
 ) -> LedgerSummary:
-    """Aggregate a ledger into bounded counts. Never returns the record list."""
+    """Aggregate a ledger into bounded counts. Never returns the record list.
+
+    Corrupt ledgers are reported, not silently under-counted: ``malformed`` and
+    ``truncated`` make ``coherent`` False, which is what stops a half-written
+    ledger from being read as "everything present is verified".
+    """
     p = Path(path)
     if not p.is_file():
         return LedgerSummary(present=False, path=str(p), by_status={})
@@ -117,17 +126,23 @@ def summarize_ledger(
     files = 0
     nbytes = 0
     errors: List[str] = []
+    malformed = 0
+    truncated = False
     verified = set(verified_statuses)
-    with p.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
+    with p.open("r", encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            if not raw_line.endswith("\n"):
+                truncated = True
+            line = raw_line.strip()
             if not line:
                 continue
             try:
                 row = json.loads(line)
             except json.JSONDecodeError:
+                malformed += 1
                 continue
             if not isinstance(row, dict):
+                malformed += 1
                 continue
             record = LedgerRecord.from_dict(row)
             records += 1
@@ -146,7 +161,9 @@ def summarize_ledger(
         bytes=nbytes,
         by_status=by_status,
         error_samples=tuple(errors),
-        truncated=bool(errors) and len(errors) >= max_error_samples,
+        truncated=truncated,
+        malformed=malformed,
+        coherent=(malformed == 0 and not truncated),
     )
 
 
@@ -176,8 +193,17 @@ def ledger_disagreements(
     instrumented elsewhere.
     """
     problems: List[str] = []
+    for name, summary in sorted(ledger_summaries.items()):
+        if not summary.present:
+            continue
+        if not summary.coherent:
+            problems.append(
+                f"{name} ledger is not coherent "
+                f"(malformed_lines={summary.malformed}, truncated={summary.truncated}); "
+                "its counts cannot be trusted"
+            )
     destination = ledger_summaries.get("destination.jsonl")
-    if destination is not None and destination.present:
+    if destination is not None and destination.present and destination.coherent:
         declared = int(evidence_summary.get("verified_files") or 0)
         if destination.files != declared:
             problems.append(
@@ -185,7 +211,7 @@ def ledger_disagreements(
                 f"declares {declared}"
             )
     hashing = ledger_summaries.get("hash.jsonl")
-    if hashing is not None and hashing.present:
+    if hashing is not None and hashing.present and hashing.coherent:
         declared_hash = int(evidence_summary.get("hashed_files") or 0)
         if declared_hash and hashing.files != declared_hash:
             problems.append(
@@ -219,32 +245,54 @@ class ReconciliationResult:
     destination_only_samples: Tuple[str, ...] = ()
     mismatched_samples: Tuple[str, ...] = ()
     unverifiable_samples: Tuple[str, ...] = ()
+    source_read: Optional[LedgerRead] = None
+    destination_read: Optional[LedgerRead] = None
+    expected_source_objects: Optional[int] = None
+
+    @property
+    def incoherent(self) -> Tuple[str, ...]:
+        """Reasons this diff must not be trusted, in report order."""
+        reasons: List[str] = []
+        for name, read in (("hash", self.source_read), ("destination", self.destination_read)):
+            if read is None or not read.present:
+                reasons.append(f"{name}_ledger_absent")
+                continue
+            if read.malformed:
+                reasons.append(f"{name}_ledger_malformed_lines={read.malformed}")
+            if read.truncated:
+                reasons.append(f"{name}_ledger_truncated")
+        if self.expected_source_objects is not None and self.source_objects:
+            if self.source_objects != self.expected_source_objects:
+                reasons.append(
+                    f"hash_ledger_covers_{self.source_objects}_of_"
+                    f"{self.expected_source_objects}_inventoried_objects"
+                )
+        return tuple(reasons)
 
     @property
     def usable(self) -> bool:
-        """True only when both ledgers were actually read.
+        """True only when both ledgers were read *coherently*.
 
-        Without this an absent ledger would yield an all-zero proposal, and
-        applying that would silently *overwrite* real counts with zeros - the
-        exact opposite of fail-closed. So an unusable result proposes nothing.
+        Coherent, not merely present. A ledger truncated by an interrupted
+        producer reads as healthy for every row it does contain, so a
+        presence-only gate would propose "these N objects are in custody" and
+        say nothing about the M it never reached - which would then read as
+        proven custody for the whole card. Corruption must void the proposal,
+        not shrink it.
         """
-        return self.hash_ledger_present and self.destination_ledger_present
+        return not self.incoherent
 
     @property
     def complete(self) -> bool:
-        """True only when both sides were present and agree exactly.
-
-        An absent ledger is never "complete": we cannot prove what we did not
-        read.
-        """
+        """True only when both sides were read coherently and agree exactly."""
         return (self.usable and self.source_only == 0 and self.destination_only == 0
                 and self.mismatched == 0 and self.unverifiable == 0)
 
     def proposal(self) -> Optional[Dict[str, Any]]:
-        """The evidence fragment to import, or ``None`` if unusable.
+        """The evidence fragment to import, or ``None`` if not usable.
 
         Not a claim of verification - a claim of *coverage*. The ledgers are the
-        verification evidence, so a readable destination ledger means a
+        verification evidence, so a coherently-read destination ledger means a
         verification pass ran, and a diff in which every source object is proven
         at the destination means that pass covered the whole campaign.
 
@@ -253,6 +301,8 @@ class ReconciliationResult:
         * objects present on both sides but lacking a digest on either one are
           folded into ``source_only``, because they do not have *proven* custody
           (the ``unverifiable`` count stays visible in the report);
+        * a malformed or truncated ledger yields **no** proposal at all, rather
+          than a proposal covering only the rows that survived;
         * ``copy`` is never touched - copy attestation is a separate fact that a
           diff cannot establish.
         """
@@ -277,14 +327,10 @@ class ReconciliationResult:
     def to_evidence(self) -> Dict[str, Any]:
         """Like :meth:`proposal`, but refuses loudly instead of returning None."""
         if not self.usable:
-            missing = []
-            if not self.hash_ledger_present:
-                missing.append(HASH_LEDGER)
-            if not self.destination_ledger_present:
-                missing.append(DESTINATION_LEDGER)
             raise ReconciliationUnavailable(
-                "cannot reconcile: missing ledger(s) " + ", ".join(missing)
-                + " (refusing to propose zeroed counts over real evidence)"
+                "cannot reconcile: "
+                + "; ".join(self.incoherent)
+                + " (refusing to propose a partial or untrusted diff)"
             )
         return self.proposal()  # type: ignore[return-value]
 
@@ -295,7 +341,9 @@ class ReconciliationResult:
             "destination_only": self.destination_only,
             "destination_only_samples": list(self.destination_only_samples),
             "destination_objects": self.destination_objects,
+            "expected_source_objects": self.expected_source_objects,
             "hash_ledger_present": self.hash_ledger_present,
+            "incoherent": list(self.incoherent),
             "mismatched": self.mismatched,
             "mismatched_samples": list(self.mismatched_samples),
             "source_objects": self.source_objects,
@@ -303,8 +351,96 @@ class ReconciliationResult:
             "source_only_samples": list(self.source_only_samples),
             "unverifiable": self.unverifiable,
             "unverifiable_samples": list(self.unverifiable_samples),
+            "usable": self.usable,
             "verified": self.verified,
         }
+
+
+@dataclass(frozen=True)
+class LedgerRead:
+    """Result of reading one ledger, including how badly it was read."""
+
+    present: bool = False
+    key_digests: Dict[str, Optional[str]] = field(default_factory=dict)
+    objects: int = 0
+    total_lines: int = 0
+    malformed: int = 0
+    truncated: bool = False
+    undigested_samples: Tuple[str, ...] = ()
+
+    @property
+    def coherent(self) -> bool:
+        """True when every line parsed and the file ends where a writer ended.
+
+        A ledger truncated by an interrupted producer is the single most likely
+        corruption here, and it is the most dangerous: the surviving rows look
+        perfectly healthy, so a naive diff happily reports "all these objects are
+        in custody" for the rows it did read and stays silent about the rest.
+        """
+        return self.present and self.malformed == 0 and not self.truncated
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "coherent": self.coherent,
+            "malformed_lines": self.malformed,
+            "objects": self.objects,
+            "present": self.present,
+            "total_lines": self.total_lines,
+            "truncated": self.truncated,
+            "undigested_samples": list(self.undigested_samples),
+        }
+
+
+def _read_ledger(path: Path, statuses: Tuple[str, ...], max_samples: int) -> LedgerRead:
+    """Read one ledger into ``key -> digest``. Read-only; absent is reported."""
+    if not path.is_file():
+        return LedgerRead(present=False)
+    wanted = set(statuses)
+    index: Dict[str, Optional[str]] = {}
+    undigested: List[str] = []
+    objects = 0
+    total = 0
+    malformed = 0
+    truncated = False
+
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            total += 1
+            line = raw_line.strip()
+            if not line:
+                continue
+            # A final line without a terminating newline means the writer was
+            # interrupted mid-append: that row cannot be trusted.
+            if not raw_line.endswith("\n"):
+                truncated = True
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                malformed += 1
+                continue
+            if not isinstance(row, dict):
+                malformed += 1
+                continue
+            record = LedgerRecord.from_dict(row)
+            if record.status not in wanted:
+                continue
+            if not record.key:
+                malformed += 1
+                continue
+            objects += 1
+            digest = record.digest.strip().lower() if record.digest else None
+            index[record.key] = digest
+            if digest is None and len(undigested) < max_samples:
+                undigested.append(record.key)
+    return LedgerRead(
+        present=True,
+        key_digests=index,
+        objects=objects,
+        total_lines=total,
+        malformed=malformed,
+        truncated=truncated,
+        undigested_samples=tuple(undigested),
+    )
 
 
 def _digest_index(
@@ -312,37 +448,9 @@ def _digest_index(
     statuses: Tuple[str, ...],
     max_samples: int,
 ) -> Tuple[Dict[str, Optional[str]], bool, int, List[str]]:
-    """Build ``key -> digest`` for records in a verified status.
-
-    Returns the index, whether the file existed, the object count, and capped
-    samples of keys whose record carries no digest. Read-only.
-    """
-    if not path.is_file():
-        return {}, False, 0, []
-    wanted = set(statuses)
-    index: Dict[str, Optional[str]] = {}
-    undigested: List[str] = []
-    present = 0
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(row, dict):
-                continue
-            record = LedgerRecord.from_dict(row)
-            if record.status not in wanted or not record.key:
-                continue
-            present += 1
-            digest = record.digest.strip().lower() if record.digest else None
-            index[record.key] = digest
-            if digest is None and len(undigested) < max_samples:
-                undigested.append(record.key)
-    return index, True, present, undigested
+    """Legacy tuple shim over :func:`_read_ledger`. Kept for the aggregate API."""
+    read = _read_ledger(path, statuses, max_samples)
+    return read.key_digests, read.present, read.objects, list(read.undigested_samples)
 
 
 def reconcile_ledgers(
@@ -352,6 +460,7 @@ def reconcile_ledgers(
     max_samples: int = MAX_SUMMARY_ENTRIES,
     source_statuses: Tuple[str, ...] = SOURCE_VERIFIED_STATUSES,
     destination_statuses: Tuple[str, ...] = DESTINATION_VERIFIED_STATUSES,
+    expected_source_objects: Optional[int] = None,
 ) -> ReconciliationResult:
     """Compute the source-vs-destination set difference from two ledgers.
 
@@ -364,15 +473,17 @@ def reconcile_ledgers(
 
     Destination keys with no source counterpart -> ``destination_only``.
 
-    Fail-closed throughout: an absent ledger, a record without a digest, or an
-    empty digest never counts as custody.
+    Fail-closed throughout: an absent, malformed or truncated ledger, or a record
+    without a digest, never counts as custody. ``expected_source_objects`` (the
+    campaign's recorded inventory) is cross-checked so a partially-written ledger
+    cannot masquerade as a complete one.
+
+    ``errors="replace"`` on the read keeps undecodable bytes from raising - they
+    are counted as malformed instead.
     """
-    src, src_present, src_count, _src_undigested = _digest_index(
-        Path(hash_ledger), source_statuses, max_samples
-    )
-    dst, dst_present, dst_count, _ = _digest_index(
-        Path(destination_ledger), destination_statuses, max_samples
-    )
+    src_read = _read_ledger(Path(hash_ledger), source_statuses, max_samples)
+    dst_read = _read_ledger(Path(destination_ledger), destination_statuses, max_samples)
+    src, dst = src_read.key_digests, dst_read.key_digests
 
     verified = 0
     mismatched = 0
@@ -402,10 +513,10 @@ def reconcile_ledgers(
     destination_only = sorted(dst_keys - set(src))
 
     return ReconciliationResult(
-        hash_ledger_present=src_present,
-        destination_ledger_present=dst_present,
-        source_objects=src_count,
-        destination_objects=dst_count,
+        hash_ledger_present=src_read.present,
+        destination_ledger_present=dst_read.present,
+        source_objects=src_read.objects,
+        destination_objects=dst_read.objects,
         verified=verified,
         source_only=len(source_only),
         destination_only=len(destination_only),
@@ -415,6 +526,9 @@ def reconcile_ledgers(
         destination_only_samples=tuple(destination_only[:max_samples]),
         mismatched_samples=tuple(mismatched_samples),
         unverifiable_samples=tuple(unverifiable_samples),
+        source_read=src_read,
+        destination_read=dst_read,
+        expected_source_objects=expected_source_objects,
     )
 
 
@@ -422,6 +536,7 @@ def reconcile_bundle(
     bundle: str | Path,
     *,
     max_samples: int = MAX_SUMMARY_ENTRIES,
+    expected_source_objects: Optional[int] = None,
 ) -> ReconciliationResult:
     """Reconcile the ledgers of a campaign bundle. Absent ledgers stay absent."""
     root = ledger_dir(bundle)
@@ -429,6 +544,7 @@ def reconcile_bundle(
         root / HASH_LEDGER,
         root / DESTINATION_LEDGER,
         max_samples=max_samples,
+        expected_source_objects=expected_source_objects,
     )
 
 
@@ -438,6 +554,7 @@ __all__ = [
     "DESTINATION_VERIFIED_STATUSES",
     "HASH_LEDGER",
     "LEDGER_DIRNAME",
+    "LedgerRead",
     "LedgerRecord",
     "LedgerSummary",
     "ReconciliationResult",

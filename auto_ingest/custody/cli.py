@@ -69,17 +69,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="custody_cmd", required=True)
 
-    def common(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    def common(p: argparse.ArgumentParser, *, gate: bool = True,
+               observed: bool = True) -> argparse.ArgumentParser:
         p.add_argument("--bundle", required=True,
                        help="campaign bundle directory (campaign.json + evidence.json)")
         p.add_argument("--json", action="store_true", help="emit JSON instead of text")
-        p.add_argument("--require-release", action="store_true",
-                       help=f"exit {EXIT_GATE_CLOSED} unless the release gate is open")
-        p.add_argument("--observed-device", default=None,
-                       help="device of the card now mounted (identity cross-check)")
-        p.add_argument("--observed-uuid", default=None,
-                       help="filesystem UUID of the card now mounted")
-        p.add_argument("--observed-label", default=None, help="volume label of the card")
+        if gate:
+            p.add_argument("--require-release", action="store_true",
+                           help=f"exit {EXIT_GATE_CLOSED} unless the release gate is open")
+        if observed:
+            p.add_argument("--observed-device", default=None,
+                           help="device of the card now mounted (identity cross-check)")
+            p.add_argument("--observed-uuid", default=None,
+                           help="filesystem UUID of the card now mounted")
+            p.add_argument("--observed-label", default=None,
+                           help="volume label of the card")
         p.add_argument("--policy-file", default=None,
                        help="JSON file overriding custody.policy")
         return p
@@ -90,7 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
                                help="Describe the destination verification set (read-only)."))
     pv.add_argument("--execute", action="store_true",
                     help="refused: verification execution is separately authorized")
-    pi = common(sub.add_parser("import", help="Validate (default) or apply an evidence document."))
+    # No --require-release on import: it is a mid-campaign write, so "is this
+    # releasable yet?" has no coherent meaning there. Accepting a flag and
+    # ignoring it is worse than not having it.
+    pi = common(sub.add_parser("import", help="Validate (default) or apply an evidence document."),
+                gate=False, observed=False)
     pi.add_argument("--evidence", required=True, help="path to an evidence JSON document")
     pi.add_argument("--apply", action="store_true", help="write the evidence into the bundle")
 
@@ -120,6 +128,8 @@ def build_parser() -> argparse.ArgumentParser:
     prc.add_argument("--policy-file", default=None, help="JSON file overriding custody.policy")
     prc.add_argument("--require-release", action="store_true",
                      help=f"exit {EXIT_GATE_CLOSED} unless the release gate is open")
+    prc.add_argument("--require-proposal", action="store_true",
+                     help=f"exit {EXIT_GATE_CLOSED} unless a usable proposal is offered")
     return parser
 
 
@@ -322,8 +332,8 @@ def cmd_reconcile(args) -> int:
             "applied                    false  (import the proposal with --apply)",
         ]
         if not result.usable:
-            lines.insert(1, "NOTE: a ledger is missing; no proposal is offered "
-                            "because zeroed counts must not overwrite real evidence")
+            lines.insert(1, "NOTE: no proposal is offered - "
+                            + "; ".join(result.incoherent))
         for name, samples in (
             ("source_only", result.source_only_samples),
             ("destination_only", result.destination_only_samples),
@@ -333,6 +343,10 @@ def cmd_reconcile(args) -> int:
             if samples:
                 lines.append(f"  {name:<21} {', '.join(samples)}")
         sys.stdout.write("\n".join(lines) + "\n")
+    if args.require_proposal and not result.usable:
+        print("custody: ledgers are not coherent; refusing to report a diff as a result",
+              file=sys.stderr)
+        return EXIT_GATE_CLOSED
     if args.require_release and not status.source_release_allowed:
         return EXIT_GATE_CLOSED
     return EXIT_OK

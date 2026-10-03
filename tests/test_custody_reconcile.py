@@ -153,7 +153,8 @@ def test_missing_ledgers_are_unusable_and_propose_nothing(tmp_path):
 def test_to_evidence_refuses_when_unusable(tmp_path):
     with pytest.raises(ReconciliationUnavailable) as exc:
         reconcile_ledgers(tmp_path / "nope.jsonl", tmp_path / "nope2.jsonl").to_evidence()
-    assert "refusing to propose zeroed counts" in str(exc.value)
+    assert "refusing to propose a partial or untrusted diff" in str(exc.value)
+    assert "hash_ledger_absent" in str(exc.value)
 
 
 def test_an_empty_but_present_ledger_is_usable_and_says_zero_source_only(tmp_path):
@@ -164,6 +165,145 @@ def test_an_empty_but_present_ledger_is_usable_and_says_zero_source_only(tmp_pat
     assert r.usable is True
     assert r.complete is True
     assert r.source_objects == 0
+
+
+# ---------------------------------------------------------------------------
+# corruption must void the proposal, never shrink it
+# ---------------------------------------------------------------------------
+def test_interrupted_producer_does_not_claim_custody_for_rows_it_reached(tmp_path):
+    """THE dangerous case: a ledger truncated mid-append.
+
+    The 40 rows that made it to disk look perfectly healthy. A presence-only
+    gate would propose "40 verified, 0 source_only" and say nothing about the
+    60 it never reached - which then reads as proven custody for the whole card.
+    """
+    full = [{"key": f"k{i}", "digest": f"d{i}", "status": "verified"} for i in range(100)]
+    d = write_ledger(tmp_path / "d.jsonl", full)
+    h = tmp_path / "h.jsonl"
+    h.write_text("".join(json.dumps(r) + "\n" for r in full[:40])
+                  + '{"key": "k40", "diges', encoding="utf-8")
+    r = reconcile_ledgers(h, d, expected_source_objects=100)
+    assert r.usable is False
+    assert r.proposal() is None
+    assert "hash_ledger_truncated" in r.incoherent
+    assert "hash_ledger_malformed_lines=1" in r.incoherent
+
+
+def test_truncated_destination_ledger_also_voids_the_proposal(tmp_path):
+    full = [{"key": f"k{i}", "digest": f"d{i}", "status": "verified"} for i in range(10)]
+    h = write_ledger(tmp_path / "h.jsonl", full)
+    d = tmp_path / "d.jsonl"
+    d.write_text("".join(json.dumps(r) + "\n" for r in full[:5]) + '{"key":"k5","dig',
+                 encoding="utf-8")
+    r = reconcile_ledgers(h, d)
+    assert r.usable is False
+    assert "destination_ledger_truncated" in r.incoherent
+
+
+def test_a_partially_written_hash_ledger_cannot_masquerade_as_complete(tmp_path):
+    """Cross-checked against the recorded inventory, not just its own line count."""
+    full = [{"key": f"k{i}", "digest": f"d{i}", "status": "verified"} for i in range(100)]
+    d = write_ledger(tmp_path / "d.jsonl", full)
+    h = write_ledger(tmp_path / "h.jsonl", full[:40])
+    r = reconcile_ledgers(h, d, expected_source_objects=67644)
+    assert r.usable is False
+    assert any("covers_40_of_67644" in reason for reason in r.incoherent)
+
+
+def test_a_garbage_ledger_is_not_an_empty_one(tmp_path):
+    h = tmp_path / "h.jsonl"
+    h.write_text("\x00\x01not json\n[]\n{}\n\n", encoding="utf-8")
+    d = write_ledger(tmp_path / "d.jsonl", [{"key": "a", "digest": "A",
+                                             "status": "verified"}])
+    r = reconcile_ledgers(h, d)
+    assert r.usable is False
+    assert r.proposal() is None
+        # 3 junk lines: unparseable, a JSON array, and an object with no status
+    assert "hash_ledger_malformed_lines=2" in r.incoherent
+
+
+def test_undecodable_bytes_do_not_raise(tmp_path):
+    h = tmp_path / "h.jsonl"
+    h.write_bytes(b'{"key": "a", "digest": "A", "status": "verified"}\n\xff\xfe\x00bad\n')
+    d = write_ledger(tmp_path / "d.jsonl", [{"key": "a", "digest": "A",
+                                             "status": "verified"}])
+    r = reconcile_ledgers(h, d)  # must not raise
+    assert r.usable is False
+    assert r.verified == 1
+
+
+def test_coherence_ignores_trailing_blank_lines(tmp_path):
+    """A final newline after the last record is normal, not truncation."""
+    rows = [{"key": f"k{i}", "digest": f"d{i}", "status": "verified"} for i in range(3)]
+    h = write_ledger(tmp_path / "h.jsonl", rows)
+    h.write_text(h.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    d = write_ledger(tmp_path / "d.jsonl", rows)
+    r = reconcile_ledgers(h, d)
+    assert r.usable is True
+    assert r.verified == 3
+
+
+def test_no_inventory_cross_check_available_still_works(tmp_path):
+    """Nothing inventoried yet -> no cross-check, but coherence still required."""
+    rows = [{"key": f"k{i}", "digest": f"d{i}", "status": "verified"} for i in range(3)]
+    h = write_ledger(tmp_path / "h.jsonl", rows)
+    d = write_ledger(tmp_path / "d.jsonl", rows)
+    r = reconcile_ledgers(h, d, expected_source_objects=None)
+    assert r.usable is True
+    assert r.complete is True
+
+
+def test_to_evidence_names_the_corruption(tmp_path):
+    rows = [{"key": "a", "digest": "A", "status": "verified"}]
+    h = write_ledger(tmp_path / "h.jsonl", rows)
+    d = tmp_path / "d.jsonl"
+    d.write_text('{"key": "a", "dig', encoding="utf-8")
+    with pytest.raises(ReconciliationUnavailable) as exc:
+        reconcile_ledgers(h, d).to_evidence()
+    assert "destination_ledger_truncated" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# corruption is visible in status too
+# ---------------------------------------------------------------------------
+def test_summarize_reports_coherence(tmp_path):
+    from auto_ingest.custody.ledger import summarize_ledger
+
+    good = summarize_ledger(write_ledger(tmp_path / "g.jsonl", [
+        {"key": "a", "digest": "A", "status": "verified"}]))
+    assert (good.coherent, good.malformed, good.truncated) == (True, 0, False)
+
+    bad = tmp_path / "b.jsonl"
+    bad.write_text('{"key": "a", "diges', encoding="utf-8")
+    summary = summarize_ledger(bad)
+    assert summary.coherent is False
+    assert summary.truncated is True
+
+
+def test_a_corrupt_ledger_is_reported_as_a_status_disagreement(tmp_path):
+    from auto_ingest.custody.ledger import ledger_disagreements, summarize_ledger
+
+    good = write_ledger(tmp_path / "g.jsonl", [{"key": "a", "status": "verified"}])
+    bad = tmp_path / "b.jsonl"
+    bad.write_text('{"key": "a", "diges', encoding="utf-8")
+    problems = ledger_disagreements(
+        {"verified_files": 1, "hashed_files": 1},
+        {"destination.jsonl": summarize_ledger(good),
+         "hash.jsonl": summarize_ledger(bad)},
+    )
+    assert any("not coherent" in p for p in problems)
+
+
+def test_status_surfaces_an_incoherent_ledger(tmp_path, capsys):
+    camp = campaign()
+    bundle = write_bundle(tmp_path / "b", camp, evidence())
+    write_ledger(bundle / "ledgers" / "hash.jsonl", [{"key": "a", "status": "verified"}])
+    (bundle / "ledgers" / "destination.jsonl").write_text(
+        '{"key": "a", "dig', encoding="utf-8")
+    main(["status", "--bundle", str(bundle), "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["ledgers"]["destination.jsonl"]["coherent"] is False
+    assert any("not coherent" in d for d in data["ledger_disagreements"])
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +464,7 @@ def test_cli_reconcile_text_output_flags_a_missing_ledger(capsys):
     main(["reconcile", "--bundle", str(CARD_01_BUNDLE)])
     out = capsys.readouterr().out
     assert "ledgers_readable           false" in out
-    assert "zeroed counts must not overwrite real evidence" in out
+    assert "no proposal is offered - hash_ledger_absent" in out
 
 
 def test_cli_reconcile_require_release_gates(tmp_path, capsys):

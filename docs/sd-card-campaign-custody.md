@@ -252,6 +252,59 @@ The command is read-only and prints `state_if_imported` — what the campaign wo
 derive once the proposal is applied. Preview and import share one merge
 implementation, so the preview cannot drift from what `--apply` actually does.
 
+### Ledger record contract (what a producer must emit)
+
+The reader is the specification. An executor written later must emit these
+records, one JSON object per line, newline-terminated:
+
+| field | required | meaning |
+| --- | --- | --- |
+| `key` | yes | stable object identity; **the join key between the two ledgers** |
+| `digest` | yes | lowercase hex sha256 of the object's bytes |
+| `status` | yes | `verified` / `hashed` on the source side; `verified` / `verified_at_destination` / `copied` on the destination side |
+| `path` | no | recorded, not used for the diff |
+| `size` | no | recorded, not used for the diff |
+| `phase` | no | free-form |
+| `detail` | no | free-form, surfaced in error samples |
+
+Rules the reader enforces, and why:
+
+* **`key` is the join key.** Two ledgers are only reconcilable if both sides use
+  the same key for the same object. Anything else silently reconciles to
+  "everything is source_only".
+* **Records in a non-verified status do not participate** (`failed`,
+  `mismatch`, `missing`, `skipped`, `pending` are read but excluded from the
+  counts), so a half-finished writer cannot inflate custody.
+* **Every line must be newline-terminated.** A final line without `\n` means an
+  interrupted append and voids the whole diff. This is the single most likely
+  corruption and the most dangerous one, because the rows that *did* land look
+  perfectly healthy.
+* **Unparseable lines and keyless records are counted, not skipped silently.**
+* **The hash ledger is cross-checked against the recorded inventory.** If
+  `evidence.inventory.discovered_files` is known and the ledger covers a
+  different number of objects, the diff is void: a partially-written ledger
+  cannot masquerade as a complete one.
+* **Undecodable bytes must not raise** — the reader opens with
+  `errors="replace"` and counts the damage.
+
+Corruption voids the *entire* diff (`incoherent` lists why) rather than shrinking
+it. A proposal that covers only the rows that survived is worse than no proposal,
+because the uncovered rows then read as proven custody.
+
+### Scale
+
+Measured on a card-sized bundle — 67,644 objects, 21.5 MB of ledgers:
+
+| command | wall time | report size |
+| --- | --- | --- |
+| `status` | 0.40 s | 3.9 KB |
+| ledger summarise | 0.32 s | 0.8 KB |
+| `reconcile` (preview) | 0.73 s | 3.9 KB |
+
+Counts are exact; samples are capped, so the report does not grow with the card.
+`tests/test_custody_scale.py` builds the full-size fixture and asserts the read
+paths stay inside a generous budget and the summary stays under 32 KB.
+
 ---
 
 ## 5. Canonical destination abstraction
@@ -367,6 +420,7 @@ auto-ingest custody status  --bundle /path/to/campaign          # human
 auto-ingest custody status  --bundle /path/to/campaign --json   # machine
 auto-ingest custody plan    --bundle /path/to/campaign --json
 auto-ingest custody reconcile --bundle /path/to/campaign         # diff the two ledgers
+                                                   [--require-proposal]
 auto-ingest custody verify  --bundle /path/to/campaign          # describes; --execute is refused
 auto-ingest custody import  --bundle /path/to/campaign --evidence ev.json   # validate only
 auto-ingest custody import  --bundle /path/to/campaign --evidence ev.json --apply
@@ -497,6 +551,9 @@ authorizes execution explicitly.
 | JSON serialisation is deterministic | `test_custody_idempotency.py::test_status_json_keys_are_sorted` |
 | import merges, never replaces | `test_custody_reconcile.py::test_import_merges_a_narrow_document_instead_of_replacing`, `test_import_preserves_recorded_subfields_the_document_does_not_mention`, `test_an_explicit_zero_in_the_document_wins` |
 | an absent ledger proposes nothing | `test_custody_reconcile.py::test_missing_ledgers_are_unusable_and_propose_nothing` |
+| a truncated ledger proposes nothing (fails open otherwise) | `test_custody_reconcile.py::test_interrupted_producer_does_not_claim_custody_for_rows_it_reached` |
+| a partial ledger cannot masquerade as complete | `test_custody_reconcile.py::test_a_partially_written_hash_ledger_cannot_masquerade_as_complete` |
+| the summary stays bounded at card scale | `test_custody_scale.py` |
 | a digest-less record is never custody | `test_custody_reconcile.py::test_a_record_without_a_digest_never_counts_as_custody` |
 | reconciliation cannot prove destination identity | `test_custody_reconcile.py::test_reconciliation_alone_cannot_prove_destination_identity` |
 | preview == what import would do | `test_custody_reconcile.py::test_preview_agrees_with_import` |

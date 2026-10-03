@@ -540,9 +540,14 @@ def reconcile_preview(
     if policy is None:
         policy = load_policy(load_custody_config())
     samples = max_samples if max_samples is not None else policy.max_summary_entries
-    result = reconcile_bundle(root, max_samples=samples)
     campaign = load_campaign(root)
     current = load_evidence(root, policy)
+    # The recorded inventory is the only independent count of how many objects
+    # this card has, so it is what a partially-written hash ledger is checked
+    # against. Zero (nothing inventoried yet) means "no cross-check available".
+    expected = current.inventory.discovered_files or None
+    result = reconcile_bundle(root, max_samples=samples,
+                              expected_source_objects=expected)
     proposal = result.proposal()
     # Preview and import MUST agree, so both go through the same merge: an
     # unusable proposal (absent ledger) leaves the current evidence alone rather

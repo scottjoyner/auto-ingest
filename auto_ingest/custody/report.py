@@ -117,7 +117,8 @@ def status_text(status: CampaignStatus) -> str:
     for name, summary in sorted(status.ledgers.items()):
         lines.append(
             f"  ledger {name:<18} present={str(summary.present).lower()} "
-            f"records={summary.records} verified_files={summary.files}"
+            f"records={summary.records} verified_files={summary.files} "
+            f"coherent={str(summary.coherent).lower()}"
         )
     return "\n".join(lines) + "\n"
 
