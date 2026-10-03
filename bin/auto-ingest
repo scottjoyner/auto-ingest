@@ -215,8 +215,9 @@ def cmd_claims(args) -> int:
 def cmd_reap(args) -> int:
     env = neo4j_env()
     try:
-        from auto_ingest import ingest_claim
         from neo4j import GraphDatabase
+
+        from auto_ingest import ingest_claim
     except Exception as e:
         print(f"unavailable: {e}", file=sys.stderr)
         return 1
@@ -350,6 +351,21 @@ def cmd_link_concepts(args) -> int:
     """Forward to scripts/link_utterances_to_concepts.py (W-56)."""
     return _run("scripts/link_utterances_to_concepts.py", args.rest,
                 extra_env=neo4j_env())
+
+
+# ---------------------------------------------------------------------------
+# custody  (SD-card ingest campaign state — read-only by default)
+# ---------------------------------------------------------------------------
+def cmd_custody(args) -> int:
+    """Forward to the SD-card custody state machine (status/plan/verify/import).
+
+    Runs in-process rather than as a subprocess so `custody status` and
+    `custody plan` are guaranteed to be side-effect free: nothing in this
+    subcommand family mounts, copies, deletes or schedules anything.
+    """
+    from auto_ingest.custody.cli import main as custody_main
+
+    return custody_main(args.rest)
 
 
 def cmd_worker(args) -> int:
@@ -587,6 +603,14 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Link spoken Utterances to research Concepts (W-56).")
     plc.add_argument("rest", nargs=argparse.REMAINDER, help="Forwarded to link_utterances_to_concepts.py")
     plc.set_defaults(func=cmd_link_concepts)
+
+    pcu = sub.add_parser("custody",
+                         help="SD-card ingest custody state machine (read-only).",
+                         add_help=False)
+    pcu.add_argument("rest", nargs=argparse.REMAINDER,
+                     help="Forwarded to auto_ingest.custody.cli "
+                          "(subcommands: status | plan | verify | import)")
+    pcu.set_defaults(func=cmd_custody)
 
     pi = sub.add_parser("ingest", help="Ingest iPhone movies/pictures (Nextcloud/local) -> graph + content.")
     src = pi.add_mutually_exclusive_group()

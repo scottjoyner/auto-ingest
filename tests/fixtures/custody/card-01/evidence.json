@@ -1,0 +1,72 @@
+{
+  "campaign_id": "sdcard-9f1c4a2b7d3e5a60-20260412",
+  "observed_at": "2026-10-02T18:20:00Z",
+  "inventory": {
+    "discovered_files": 67644,
+    "discovered_bytes": 412885402112,
+    "complete": true,
+    "verified": true,
+    "started": true,
+    "roots": [
+      "DCIM/Movie",
+      "DCIM/Movie/RO"
+    ]
+  },
+  "hash": {
+    "algorithm": "sha256",
+    "verified_files": 67644,
+    "verified_bytes": 412885402112,
+    "errors": 0,
+    "complete": true,
+    "started": true,
+    "exemptions": [],
+    "error_summary": [],
+    "last_checkpoint": "2026-04-12T09:58:40Z"
+  },
+  "copy": {
+    "planned": {
+      "files": 67644,
+      "bytes": 412885402112
+    },
+    "completed": {
+      "files": 0,
+      "bytes": 0
+    },
+    "started": true,
+    "result_complete": false,
+    "interrupted": true,
+    "ledger_complete": false,
+    "error_summary": [],
+    "last_checkpoint": "2026-04-12T10:02:11Z"
+  },
+  "destination": {
+    "verified_files": 0,
+    "verified_bytes": 0,
+    "failures": 0,
+    "verification_started": true,
+    "verification_complete": false,
+    "unverified_present_files": 0,
+    "observed_identity": null,
+    "error_summary": [],
+    "last_checkpoint": "2026-04-12T10:02:11Z"
+  },
+  "reconciliation": {
+    "source_only": 67644,
+    "destination_only": 0,
+    "mismatched": 0,
+    "reconciled_at": null
+  },
+  "worker": {
+    "identity": "legacy-dashcam-copy@host",
+    "status": "stopped",
+    "started_at": "2026-04-12T10:00:00Z",
+    "stopped_at": "2026-04-12T10:02:11Z",
+    "last_checkpoint": "2026-04-12T10:02:11Z"
+  },
+  "errors": {
+    "unresolved": 0,
+    "fatal": 0,
+    "summaries": [],
+    "witness": null
+  }
+}

@@ -52,6 +52,31 @@ machine_paths:
     hot_ssd_root: /mnt/8TB_2025/fileserver/audio
     nas_mirror_root: /media/scott/NAS5
 
+# SD-card ingest custody (see auto_ingest/custody/, docs/sd-card-campaign-custody.md)
+#
+# The custody state machine is host-agnostic on purpose: it stores a *logical*
+# destination name plus a relative path, and resolves the host path at runtime.
+# It deliberately carries NO hardcoded mount here. Point it at whatever this host
+# calls the canonical destination (the current runtime architecture uses /nas);
+# a host with no destination configured simply fails closed at the release gate.
+custody:
+  # Host path of the canonical custody destination, relative-path below appended.
+  # Resolved at runtime; override per-run with CUSTODY_DESTINATION_ROOT.
+  destination_root: ${CUSTODY_DESTINATION_ROOT}
+  destination_name: primary
+  destination_relative_path: fileserver/dashcam
+  policy:
+    # 'all_inventory'  -> every inventoried source object must be verified
+    # 'hashed_set'     -> only objects covered by hash evidence (weaker, opt-in)
+    required_scope: all_inventory
+    allow_hash_exemptions: true
+    declared_hash_exemptions: []
+    require_operator_witness: false
+    strict_destination_scope: false
+    require_destination_identity: true
+    require_read_only_source: true
+    require_mounted_destination: true
+
 # Knowledge Map System configuration (added 2026-05-30)
 knowledge_map:
   # Active working vault used by Hermes and knowledge_map.
