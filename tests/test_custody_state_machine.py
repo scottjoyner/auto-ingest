@@ -504,6 +504,7 @@ def test_declared_state_is_ignored():
     from auto_ingest.custody import CampaignEvidence
 
     ev = CampaignEvidence.from_dict(raw, strict_policy())
+    # canonical DECLARED_STATE_KEYS order, not dict insertion order
     assert ev.ignored_declared_fields == ("state", "status", "safe_to_release")
     assert ev.destination.verified_files == 0
     d = derive_state(campaign(card_id="CARD-X"), ev, strict_policy())

@@ -14,6 +14,7 @@ from custody_helpers import (
     hashing,
     inventory,
     reconciliation,
+    strict_policy,
     worker,
     write_bundle,
 )
@@ -25,7 +26,7 @@ from auto_ingest.custody.cli import (
     build_parser,
     main,
 )
-from auto_ingest.custody.store import STATUS_SCHEMA
+from auto_ingest.custody.store import STATUS_SCHEMA, load_status
 
 
 def run(argv, capsys):
@@ -304,6 +305,71 @@ def test_no_observed_hardware_means_no_conflict_claim(capsys):
     data = json.loads(out)
     assert data["observed_card_matches_campaign"] is None
     assert data["observed_card_conflict"] is None
+
+
+# ---------------------------------------------------------------------------
+# the default mode is human: a diagnostic only in --json is invisible
+# ---------------------------------------------------------------------------
+def test_malformed_counts_are_visible_without_json(tmp_path):
+    """`status` defaults to human output, so that is where a fault must show."""
+    from auto_ingest.custody import CampaignEvidence
+    from auto_ingest.custody.report import status_text
+
+    bundle = write_bundle(tmp_path / "b", campaign(), evidence())
+    bad = CampaignEvidence.from_dict({
+        "inventory": {"discovered_files": "6,764", "discovered_bytes": 1,
+                      "complete": True},
+        "hash": {"verified_files": 67644, "verified_bytes": 1, "complete": True},
+    }, strict_policy())
+    (bundle / "evidence.json").write_text(json.dumps(bad.to_dict()), encoding="utf-8")
+    text = status_text(load_status(bundle, strict_policy()))
+    assert "MALFORMED COUNT" in text
+    assert "6,764" in text
+    assert "evidence_counts_are_malformed" in text
+
+
+def test_the_malformed_count_diagnostic_survives_a_round_trip(tmp_path):
+    """`import --apply` writes normalised evidence and reads it back.
+
+    Without rehydration the record of the malformation would be dropped by the
+    very operation an operator runs to inspect it, and they would be told only
+    that evidence "contradicts itself".
+    """
+    from auto_ingest.custody import CampaignEvidence
+    from auto_ingest.custody.store import load_status
+
+    bundle = write_bundle(tmp_path / "b", campaign(), evidence())
+    doc = tmp_path / "e.json"
+    doc.write_text(json.dumps({
+        "inventory": {"discovered_files": "6,764", "discovered_bytes": 1,
+                      "complete": True},
+        "hash": {"verified_files": 67644, "verified_bytes": 1, "complete": True},
+    }), encoding="utf-8")
+
+    code = main(["import", "--bundle", str(bundle), "--evidence", str(doc),
+                 "--apply", "--json"])
+    assert code == EXIT_OK
+
+    stored = json.loads((bundle / "evidence.json").read_text(encoding="utf-8"))
+    assert stored["coerced_fields"] == ["inventory.discovered_files='6,764'"]
+
+    reread = CampaignEvidence.from_dict(stored, strict_policy())
+    assert reread.coerced_fields == ("inventory.discovered_files='6,764'",)
+    status = load_status(bundle, strict_policy())
+    assert status.derivation.reasons == ("evidence_counts_are_malformed",)
+
+
+def test_ignored_declared_state_keys_are_visible_without_json(tmp_path):
+    from auto_ingest.custody.report import status_text
+
+    bundle = write_bundle(tmp_path / "b", campaign(), evidence())
+    raw = json.loads((bundle / "evidence.json").read_text(encoding="utf-8"))
+    raw["state"] = "SAFE_TO_RELEASE"
+    raw["ignored_declared_fields"] = ["state"]
+    (bundle / "evidence.json").write_text(json.dumps(raw), encoding="utf-8")
+    text = status_text(load_status(bundle, strict_policy()))
+    assert "IGNORED" in text
+    assert "state" in text
 
 
 def test_status_accepts_the_same_card(capsys):

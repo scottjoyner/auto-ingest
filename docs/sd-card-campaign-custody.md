@@ -415,6 +415,23 @@ because they send an operator to different places:
 Malformed evidence fails *closed* in every case: a zeroed count contradicts any
 non-zero hash evidence, so the machine blocks rather than progressing.
 
+Two properties keep the diagnostic from evaporating:
+
+* **It survives the round trip.** `import --apply` writes normalised evidence and
+  reads it back; without rehydration the record of the malformation would be
+  dropped by exactly the operation an operator runs to investigate it.
+* **It is visible without `--json`.** `status` defaults to human output, so a
+  diagnostic that only appears in JSON is invisible to the operator who needs it:
+
+```
+state              BLOCKED
+reasons            evidence_counts_are_malformed
+  MALFORMED COUNT  inventory.discovered_files='6,764'  (not numbers; fixed to 0 - fix the source evidence)
+```
+
+The same rule applies to `ignored_declared_fields`, so a dropped declared state
+is reported in both modes.
+
 ---
 
 ## 8. The interrupted-copy case
@@ -600,6 +617,8 @@ authorizes execution explicitly.
 | machine and gate agree on the required scope | `test_custody_state_machine.py::test_machine_and_gate_agree_on_the_required_count` |
 | a narrower scope is never silent | `test_custody_release_gate.py::test_a_narrower_scope_is_never_silent` |
 | malformed counts block and say why | `test_custody_state_machine.py::test_a_non_numeric_count_blocks_with_a_malformed_reason` |
+| diagnostics survive the import round trip | `test_custody_cli.py::test_the_malformed_count_diagnostic_survives_a_round_trip` |
+| diagnostics are visible in the default human mode | `test_custody_cli.py::test_malformed_counts_are_visible_without_json` |
 | preview == what import would do | `test_custody_reconcile.py::test_preview_agrees_with_import` |
 | the only writes are the two authorized commands | `test_custody_legacy_watchers.py::test_the_only_writes_are_the_two_explicitly_authorized_commands` |
 | read commands take no clock/randomness | `test_custody_legacy_watchers.py::test_writing_commands_are_the_only_ones_taking_a_clock` |

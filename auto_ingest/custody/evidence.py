@@ -450,8 +450,21 @@ class CampaignEvidence:
             worker=WorkerEvidence.from_dict(raw.get("worker") or {}),
             errors=ErrorEvidence.from_dict(raw.get("errors") or {}, limit, coerced),
             observed_at=_opt_str(raw.get("observed_at")),
-            ignored_declared_fields=declared,
-            coerced_fields=tuple(sorted(coerced)),
+            ignored_declared_fields=tuple(
+                k for k in DECLARED_STATE_KEYS
+                if k in declared or k in _bounded(raw.get("ignored_declared_fields"), 8)
+            ),
+            # Rehydrate the diagnostic from the document as well as detecting it
+            # fresh. Without this, writing normalised evidence and reading it
+            # back drops the record of the malformation - and the round trip is
+            # exactly what `import --apply` does, so the operator would be told
+            # "evidence contradicts itself" with no way to learn it was a comma.
+            coerced_fields=tuple(sorted(
+                set(coerced) | set(_bounded(raw.get("coerced_fields"), 64))
+            )),
+            # Same reasoning as coerced_fields: `import --apply` writes and
+            # re-reads, so a diagnostic that is not rehydrated disappears on
+            # exactly the round trip an operator performs to investigate it.
         )
 
     def to_dict(self) -> Dict[str, Any]:

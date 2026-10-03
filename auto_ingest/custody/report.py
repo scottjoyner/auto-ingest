@@ -99,6 +99,19 @@ def status_text(status: CampaignStatus) -> str:
     lines.append(f"source_deletion_allowed    {str(data['source_deletion_allowed']).lower()}")
     if data["reasons"]:
         lines.append("reasons            " + "; ".join(data["reasons"]))
+    if data.get("coerced_fields"):
+        # A diagnostic that only appears in --json is invisible to an operator
+        # running the default human mode, which is exactly the fault they need
+        # to see: their own count was not a number.
+        lines.append(
+            "  MALFORMED COUNT  " + ", ".join(data["coerced_fields"])
+            + "  (not numbers; fixed to 0 - fix the source evidence)"
+        )
+    if data.get("ignored_declared_fields"):
+        lines.append(
+            "  IGNORED          declared state keys dropped: "
+            + ", ".join(data["ignored_declared_fields"])
+        )
     conflict = data.get("observed_card_conflict")
     if conflict:
         lines.append(

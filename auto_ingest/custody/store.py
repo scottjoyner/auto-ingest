@@ -148,6 +148,7 @@ class CampaignStatus:
                 "verified_files": ev.destination.verified_files,
             },
             "coerced_fields": list(ev.coerced_fields),
+            "ignored_declared_fields": list(ev.ignored_declared_fields),
             "errors": {
                 "fatal": ev.errors.fatal,
                 "summaries": list(ev.errors.summaries),
@@ -173,6 +174,9 @@ class CampaignStatus:
             "next_phase": self.next_phase,
             "next_safe_action": self.next_safe_action,
             "observed_at": ev.observed_at or campaign.last_observed_at,
+            # Kept distinct from observed_at: when the card was last *seen* is
+            # not the same question as when this evidence was recorded.
+            "last_observed_at": campaign.last_observed_at,
             "observed_card_matches_campaign": self.observed_card_matches,
             "observed_card_conflict": self.card_conflict_detail(),
             "policy": self.policy_dict,
