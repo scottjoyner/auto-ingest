@@ -187,7 +187,6 @@ def plan_resume(
     hash_remaining = max(inv.discovered_files - hsh.verified_files - honoured_exemptions, 0)
     verified = dst.verified_files
     remaining_files = max(inv.discovered_files - verified, 0)
-    remaining_bytes = int(round(_bytes_per_file(evidence) * remaining_files))
     unverified_present = dst.unverified_present_files
     copy_remaining_files = max(cpy.planned.files - verified, 0)
     copy_remaining_bytes = int(round(_bytes_per_file(evidence) * copy_remaining_files))
@@ -249,9 +248,16 @@ def plan_resume(
             rationale="destination verification is underway and incomplete",
         ))
     elif state is CampaignState.RECONCILE_REQUIRED:
+        # Objects already sitting at the destination are NOT copy work: they are
+        # verification work. If the copy action counted them too, the plan would
+        # tell the operator to verify N objects and then re-copy those same N -
+        # the exact waste reconciliation exists to avoid. So the copy estimate is
+        # what remains *after* setting aside what is present-but-unattested.
+        present_unverified = min(unverified_present, remaining_files)
+        genuinely_absent = max(remaining_files - present_unverified, 0)
         verify_first = _make(
             phase, "verify_existing_destination",
-            files=unverified_present,
+            files=present_unverified,
             excludes_verified=True,
             rationale=(
                 "destination objects are present but unattested; verify them before "
@@ -261,19 +267,21 @@ def plan_resume(
         actions.append(verify_first)
         actions.append(_make(
             phase, "copy_objects",
-            files=remaining_files,
-            nbytes=remaining_bytes,
+            files=genuinely_absent,
+            nbytes=int(round(_bytes_per_file(evidence) * genuinely_absent)),
             excludes_verified=True,
             gated_by=(verify_first.action_id,),
             rationale=(
-                "only objects without a verified destination copy may be copied again "
-                f"({verified} already verified, {remaining_files} outstanding)"
+                "objects with neither a verified nor an unverified destination "
+                f"presence ({genuinely_absent}); "
+                f"{verified} already verified, {present_unverified} present but "
+                "unattested and therefore excluded from the copy"
             ),
         ))
         actions.append(_make(
             phase, "verify_destination",
-            files=remaining_files,
-            nbytes=remaining_bytes,
+            files=genuinely_absent,
+            nbytes=int(round(_bytes_per_file(evidence) * genuinely_absent)),
             excludes_verified=True,
             gated_by=(actions[1].action_id,),
             rationale="verify what was copied during reconciliation",

@@ -201,13 +201,68 @@ def test_resume_plan_skips_content_already_verified_at_destination():
     )
     plan = plan_for(ev)
     copy_action = next(a for a in plan.actions if a.operation == "copy_objects")
-    assert copy_action.estimated_files == 67644 - verified
+    verify_existing = next(a for a in plan.actions
+                           if a.operation == "verify_existing_destination")
+
+    # 67,644 source objects, 60,000 already verified, 7,000 sitting at the
+    # destination unattested. Only the 644 with no destination presence at all
+    # are copy work; the 7,000 are verification work.
+    outstanding = 67644 - verified
+    assert verify_existing.estimated_files == 7000
+    assert copy_action.estimated_files == outstanding - 7000
     assert copy_action.excludes_verified is True
-    assert verified not in (copy_action.estimated_files,)
-    # nothing anywhere claims to copy the verified 60k again
-    assert all(a.estimated_files <= 67644 - verified
-               for a in plan.actions if a.operation in {"copy_objects",
-                                                        "verify_destination"})
+
+    # the two actions partition the outstanding set - nothing double-counted
+    assert (verify_existing.estimated_files + copy_action.estimated_files
+            == outstanding)
+
+
+def test_objects_present_but_unverified_are_never_re_copied():
+    """The plan must not tell you to copy what it just said to verify.
+
+    Counting present-but-unattested objects as copy work would re-copy bytes that
+    are already at the destination - the waste reconciliation exists to prevent.
+    """
+    ev = evidence(
+        inv=inventory(100, 1000, complete=True, verified=True),
+        hsh=hashing(100, verified_bytes=1000, complete=True),
+        cpy=copying(planned_files=100, planned_bytes=1000, started=True,
+                    result_complete=False, interrupted=True),
+        dst=destination_evidence(verified_files=0, verification_started=True,
+                                 verification_complete=False,
+                                 unverified_present_files=100),
+        rec=reconciliation(source_only=100),
+        wkr=worker(status="stopped"),
+    )
+    plan = plan_for(ev)
+    copy_action = next(a for a in plan.actions if a.operation == "copy_objects")
+    verify_existing = next(a for a in plan.actions
+                           if a.operation == "verify_existing_destination")
+    assert verify_existing.estimated_files == 100
+    assert copy_action.estimated_files == 0
+    assert "unattested" in copy_action.rationale
+
+
+def test_present_unverified_cannot_exceed_the_outstanding_set():
+    """A miscounted destination ledger must not produce a negative copy estimate."""
+    ev = evidence(
+        inv=inventory(10, 1000, complete=True, verified=True),
+        hsh=hashing(10, verified_bytes=1000, complete=True),
+        cpy=copying(planned_files=10, planned_bytes=1000, started=True,
+                    result_complete=False, interrupted=True),
+        dst=destination_evidence(verified_files=8, verification_started=True,
+                                 verification_complete=False,
+                                 unverified_present_files=500),
+        rec=reconciliation(source_only=2),
+        wkr=worker(status="stopped"),
+    )
+    plan = plan_for(ev)
+    copy_action = next(a for a in plan.actions if a.operation == "copy_objects")
+    verify_existing = next(a for a in plan.actions
+                           if a.operation == "verify_existing_destination")
+    assert verify_existing.estimated_files == 2
+    assert copy_action.estimated_files == 0
+    assert copy_action.estimated_files >= 0
 
 
 def test_reconciled_campaign_with_verified_subset_keeps_verified_content():

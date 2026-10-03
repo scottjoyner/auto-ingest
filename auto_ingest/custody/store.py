@@ -143,6 +143,7 @@ class CampaignStatus:
                 "mounted": campaign.destination.mounted,
                 "resolved": campaign.destination.resolved,
                 "resolved_from": campaign.destination.resolved_from,
+                "unverified_present_files": ev.destination.unverified_present_files,
                 "verification_complete": ev.destination.verification_complete,
                 "verified_bytes": ev.destination.verified_bytes,
                 "verified_files": ev.destination.verified_files,

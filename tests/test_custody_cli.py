@@ -164,9 +164,14 @@ def test_reconcile_campaign_with_verified_subset_skips_verified(capsys, tmp_path
     )
     bundle = write_bundle(tmp_path / "subset", camp, ev)
     _, out, _ = run(["plan", "--bundle", str(bundle), "--json"], capsys)
-    copy_action = next(a for a in json.loads(out)["actions"]
-                       if a["operation"] == "copy_objects")
-    assert copy_action["estimated_files"] == 200
+    actions = json.loads(out)["actions"]
+    copy_action = next(a for a in actions if a["operation"] == "copy_objects")
+    verify_existing = next(a for a in actions
+                           if a["operation"] == "verify_existing_destination")
+    # 1000 inventoried, 800 verified, 50 present-but-unattested:
+    # 200 outstanding, of which 50 need verifying rather than copying.
+    assert verify_existing["estimated_files"] == 50
+    assert copy_action["estimated_files"] == 150
     assert copy_action["excludes_verified"] is True
 
 

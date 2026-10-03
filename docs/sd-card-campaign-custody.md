@@ -356,8 +356,23 @@ always reports:
 **Verification before re-copy.** After an interrupted copy the destination may
 already hold most of the payload. The plan therefore always emits
 `verify_existing_destination` first, and every copy action carries
-`excludes_verified=true` with an estimate that already subtracts the verified
-objects. Copying a byte-identical file again is wasted I/O and pointless churn.
+`excludes_verified=true`.
+
+The outstanding set is then **partitioned**, not copied wholesale. Objects split
+into three groups, and the two actions must add up to exactly the outstanding
+count:
+
+| group | action |
+| --- | --- |
+| verified at the destination | neither — done |
+| present at the destination, unattested | `verify_existing_destination` |
+| no destination presence at all | `copy_objects` |
+
+Getting this wrong is easy and invisible: counting present-but-unattested objects
+as copy work makes the plan tell the operator to *verify 7,000 objects and then
+copy those same 7,000 again*. The copy estimate is therefore
+`outstanding − present_unverified`, clamped at zero so a miscounted ledger cannot
+produce a negative estimate.
 
 **Idempotent task identity.** `action_id` is a digest of the action's own
 content and `plan_fingerprint` digests the whole action set, so `inspect → plan
