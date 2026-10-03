@@ -26,13 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
-from .campaign import (
-    Campaign,
-    CampaignResolution,
-    CardIdentity,
-    SourceRef,
-    resolve_campaign,
-)
+from .campaign import Campaign, CardIdentity, SourceRef, resolve_campaign
 from .destination import (
     DestinationRef,
     load_custody_config,
@@ -54,7 +48,6 @@ from .release import ReleaseDecision, evaluate_release
 from .states import NEXT_SAFE_ACTION, STATE_PHASE, CampaignState
 
 STATUS_SCHEMA = "auto_ingest.custody.status.v1"
-PLAN_SCHEMA = "auto_ingest.custody.plan.v1"
 
 CAMPAIGN_FILE = "campaign.json"
 EVIDENCE_FILE = "evidence.json"
@@ -93,6 +86,9 @@ class CampaignStatus:
     policy: CustodyPolicy = CustodyPolicy()
     ledger_disagreements: Tuple[str, ...] = ()
     observed_card_matches: Optional[bool] = None
+    card_conflict_fields: Tuple[str, ...] = ()
+    card_different_fields: Tuple[str, ...] = ()
+    card_unprovable_fields: Tuple[str, ...] = ()
 
     # -- projections -----------------------------------------------------
     @property
@@ -173,6 +169,7 @@ class CampaignStatus:
             "next_safe_action": self.next_safe_action,
             "observed_at": ev.observed_at or campaign.last_observed_at,
             "observed_card_matches_campaign": self.observed_card_matches,
+            "observed_card_conflict": self.card_conflict_detail(),
             "policy": self.policy_dict,
             "reconciliation": ev.reconciliation.to_dict(),
             "reasons": list(self.derivation.reasons),
@@ -198,24 +195,37 @@ class CampaignStatus:
     def policy_dict(self) -> Dict[str, Any]:
         return _policy_dict(self.policy)
 
+    def card_conflict_detail(self) -> Optional[Dict[str, Any]]:
+        """What to do when the hardware now mounted is not this campaign's card.
+
+        ``filesystem_uuid`` in ``conflicting_fields`` means *provably different
+        hardware*. The other field names mean identity could not be proven
+        comparable in that direction (recorded but not observed, or vice versa),
+        which is also a refusal to reuse - see ``CardIdentity.differences``.
+        """
+        if self.observed_card_matches is not False:
+            return None
+        return {
+            "conflicting_fields": list(self.card_conflict_fields),
+            "different_hardware": bool(self.card_different_fields),
+            "different_fields": list(self.card_different_fields),
+            "kind": ("different_card" if self.card_different_fields
+                     else "identity_unprovable"),
+            "remedy": (
+                "do not resume this campaign; the card in "
+                f"{self.campaign.source.mount_point or 'the mount point'} is not the one "
+                "this campaign describes. Onboard it with `auto-ingest custody new` "
+                "into a separate bundle."
+            ),
+            "unprovable_fields": list(self.card_unprovable_fields),
+        }
+
     def to_json(self, *, indent: int | None = None) -> str:
         return json.dumps(self.to_dict(), sort_keys=True, indent=indent, default=str)
 
 
 def _policy_dict(policy: CustodyPolicy) -> Dict[str, Any]:
     return dict(sorted(policy.to_dict().items()))
-
-
-def load_policy_and_destination(
-    repo_root: Optional[str | Path] = None,
-    *,
-    env: Optional[Mapping[str, str]] = None,
-) -> Tuple[CustodyPolicy, DestinationRef, Dict[str, Any]]:
-    """Load the custody config block, policy and resolved destination."""
-    config = load_custody_config(repo_root)
-    policy = load_policy(config, env)
-    destination = resolve_destination(config, env=env)
-    return policy, destination, config
 
 
 def load_campaign(bundle: str | Path) -> Campaign:
@@ -256,8 +266,15 @@ def build_status(
     ledgers = ledgers if ledgers is not None else {}
     raw_dest = evidence.destination.to_dict()
     matches = None
+    conflict: Tuple[str, ...] = ()
+    different: Tuple[str, ...] = ()
+    unprovable: Tuple[str, ...] = ()
     if observed_card is not None:
-        matches = not observed_card.differences(campaign.source.card)
+        comparison = observed_card.compare(campaign.source.card)
+        different = comparison.different_fields
+        unprovable = comparison.unprovable_fields
+        conflict = tuple(observed_card.differences(campaign.source.card))
+        matches = comparison.matched
     status = CampaignStatus(
         campaign=campaign,
         evidence=evidence,
@@ -268,6 +285,9 @@ def build_status(
         policy=policy,
         ledger_disagreements=ledger_disagreements(raw_dest, ledgers),
         observed_card_matches=matches,
+        card_conflict_fields=conflict,
+        card_different_fields=different,
+        card_unprovable_fields=unprovable,
     )
     return status
 
@@ -503,22 +523,6 @@ def new_campaign(
     return result
 
 
-def select_campaign(
-    observed: CardIdentity,
-    bundle: str | Path,
-    *,
-    mount_point: Optional[str] = None,
-) -> CampaignResolution:
-    """Decide whether the hardware now at ``bundle`` owns an existing campaign."""
-    root = Path(bundle)
-    campaigns: list[Campaign] = []
-    if root.is_file():
-        campaigns.append(load_campaign(root.parent))
-    elif (root / CAMPAIGN_FILE).is_file():
-        campaigns.append(load_campaign(root))
-    return resolve_campaign(observed, campaigns, mount_point=mount_point)
-
-
 def reconcile_preview(
     bundle: str | Path,
     policy: CustodyPolicy | None = None,
@@ -557,7 +561,6 @@ __all__ = [
     "CampaignCreationError",
     "CampaignStatus",
     "EVIDENCE_FILE",
-    "PLAN_SCHEMA",
     "STATUS_SCHEMA",
     "build_status",
     "import_evidence",
@@ -565,11 +568,9 @@ __all__ = [
     "load_custody_config",
     "load_evidence",
     "load_policy",
-    "load_policy_and_destination",
     "EVIDENCE_BLOCKS",
     "load_status",
     "merge_evidence_documents",
     "new_campaign",
     "reconcile_preview",
-    "select_campaign",
 ]

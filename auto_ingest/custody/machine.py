@@ -112,7 +112,7 @@ def hash_coverage_complete(evidence: CampaignEvidence, policy: CustodyPolicy) ->
     undeclared = policy.undeclared_exemptions(evidence.hashing.exemptions)
     if undeclared:
         return False
-    return evidence.hash_coverage >= evidence.inventory_files
+    return evidence.hash_coverage_under(policy) >= evidence.inventory_files
 
 
 def derive_state(

@@ -132,6 +132,61 @@ def test_with_observation_refreshes_only_observation_fields():
 
 
 # ---------------------------------------------------------------------------
+# compare(): three outcomes, not two
+# ---------------------------------------------------------------------------
+def test_compare_reports_a_match_across_a_usb_port_change():
+    result = card(device="/dev/sdb1").compare(card(device="/dev/sdc9"))
+    assert result.matched is True
+    assert result.different_fields == ()
+    assert result.unprovable_fields == ()
+
+
+def test_compare_reports_a_provably_different_card():
+    result = card(uuid="AAAA-1111").compare(card(uuid="BBBB-2222"))
+    assert result.matched is False
+    assert result.different_fields == ("filesystem_uuid",)
+    assert result.unprovable_fields == ()
+
+
+def test_compare_reports_unprovable_rather_than_different():
+    """A recorded UUID the observation lacks is not evidence of another card."""
+    recorded = card(uuid="AAAA-1111", serial="0xabc")
+    observed = CardIdentity(device=recorded.device, label="UNTITLED")
+    result = observed.compare(recorded)
+    assert result.matched is False
+    assert result.different_fields == ()
+    assert set(result.unprovable_fields) == {"filesystem_uuid", "serial"}
+
+
+def test_compare_does_not_consult_lower_authority_fields_after_a_decision():
+    recorded = card(uuid="AAAA-1111", serial="0xabc", device="/dev/sdb1")
+    observed = CardIdentity(filesystem_uuid="aaaa-1111", serial="0xzzz",
+                            device="/dev/sdc9")
+    result = observed.compare(recorded)
+    assert result.matched is True
+    assert result.different_fields == ()
+    assert result.unprovable_fields == ()
+
+
+def test_compare_on_two_unknown_identities_is_unprovable():
+    result = CardIdentity().compare(CardIdentity())
+    assert result.matched is False
+    assert result.to_dict()["reuse_allowed"] is False
+
+
+def test_differences_is_the_union_of_both_refusal_reasons():
+    recorded = card(uuid="AAAA-1111", device="/dev/sdb1")
+    assert set(card(uuid="BBBB-2222").differences(recorded)) == {"filesystem_uuid"}
+    unprovable = CardIdentity(device="/dev/sdb1").differences(recorded)
+    assert "filesystem_uuid" in unprovable and "serial" in unprovable
+
+
+def test_uuid_comparison_is_case_insensitive():
+    assert CardIdentity(filesystem_uuid="aabb").compare(
+        CardIdentity(filesystem_uuid="AABB")).matched is True
+
+
+# ---------------------------------------------------------------------------
 # canonical destination abstraction
 # ---------------------------------------------------------------------------
 def test_destination_is_unresolved_without_configuration():

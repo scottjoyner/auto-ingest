@@ -9,7 +9,7 @@ same fields - no extra lookups, no clock, no ordering by dict iteration.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import List
 
 from .planner import ResumePlan
 from .store import CampaignStatus
@@ -99,6 +99,13 @@ def status_text(status: CampaignStatus) -> str:
     lines.append(f"source_deletion_allowed    {str(data['source_deletion_allowed']).lower()}")
     if data["reasons"]:
         lines.append("reasons            " + "; ".join(data["reasons"]))
+    conflict = data.get("observed_card_conflict")
+    if conflict:
+        lines.append(
+            f"  CARD MISMATCH   {conflict['kind']}: "
+            + ",".join(conflict["conflicting_fields"])
+        )
+        lines.append(f"      {conflict['remedy']}")
     for blocker in data["blockers"]:
         lines.append(
             f"  BLOCKED          {blocker['code']}: {blocker['detail']} -> {blocker['remedy']}"
@@ -155,9 +162,4 @@ def plan_text(plan: ResumePlan) -> str:
     return "\n".join(lines) + "\n"
 
 
-def payload_dict(status: CampaignStatus) -> Dict[str, Any]:
-    """Convenience accessor for callers embedding status into other payloads."""
-    return status.to_dict()
-
-
-__all__ = ["payload_dict", "plan_json", "plan_text", "status_json", "status_text"]
+__all__ = ["plan_json", "plan_text", "status_json", "status_text"]

@@ -161,10 +161,23 @@ campaign_id  = "sdcard-<card_key>-<sha256(created_at)[:8]>"
 ```
 
 Comparison order is most-authoritative-first: `filesystem_uuid` → `serial` →
-`device`. A matching UUID is enough even when the card moved to another USB slot
-(the device node changes); a *different* UUID never matches; and when a stored
-record carries a UUID the current observation does not, reuse is refused because
-sameness is unprovable.
+`device`. The first field **both sides carry** decides, so a matching UUID is
+enough even when the card moved to another USB slot (the device node changes);
+lower-priority fields are not consulted afterwards.
+
+`CardIdentity.compare()` returns three outcomes, not two — and the distinction
+matters operationally:
+
+| outcome | meaning | `status` reports |
+| --- | --- | --- |
+| `matched` | the deciding field agrees | `observed_card_matches_campaign: true` |
+| `different_fields` | it disagrees — provably another card | `kind: different_card` |
+| `unprovable_fields` | one side carries a field the other lacks — sameness unprovable | `kind: identity_unprovable` |
+
+The third case is not "the same card" and not "another card"; reuse is refused
+either way, but reporting it as a hardware difference would send an operator
+hunting for a card swap that did not happen. Both refusals surface in `status`
+with a remedy (`custody new` into a separate bundle) rather than a bare `false`.
 
 This is what stops a second unformatted card at `/media/scott/UNTITLED` from
 inheriting CARD-01's evidence — every such card shares the label, and the label
@@ -363,11 +376,14 @@ Observed hardware can be cross-checked inline:
 
 ```bash
 auto-ingest custody status --bundle ... --json \
-  --observed-uuid "$(...)" --observed-device /dev/sdb1 --observed-label UNTITLED
+  --observed-uuid "$(blkid -s UUID -o value /dev/sdb1)" --observed-device /dev/sdb1
 ```
 
-`observed_card_matches_campaign: false` means a different card is sitting where
-this campaign's card used to be.
+`observed_card_matches_campaign: false` means the card now at this campaign's
+mount point is not provably the one the campaign describes. `observed_card_conflict`
+distinguishes `different_card` (a recorded field disagrees) from
+`identity_unprovable` (one side carries an identity field the other lacks) and
+carries the remedy.
 
 ### plan vs execute
 

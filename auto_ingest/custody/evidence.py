@@ -437,6 +437,11 @@ class CampaignEvidence:
 
     @property
     def hash_coverage(self) -> int:
+        """Raw coverage, counting *every* exemption.
+
+        Not gate-safe: an exemption the policy never declared is still counted
+        here. Gate decisions must use :meth:`hash_coverage_under`.
+        """
         return self.hashing.verified_files + len(self.hashing.exemptions)
 
     def hash_coverage_under(self, policy: "CustodyPolicy") -> int:

@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .campaign import Campaign
 from .evidence import CampaignEvidence
-from .machine import Derivation, derive_state, hash_coverage_complete
+from .machine import Derivation, derive_state
 from .policy import CustodyPolicy
 from .release import Blocker, evaluate_release
 from .states import NEXT_SAFE_ACTION, STATE_PHASE, CampaignState
@@ -334,18 +334,10 @@ def plan_resume(
     )
 
 
-def hash_coverage_is_complete(
-    evidence: CampaignEvidence, policy: CustodyPolicy | None = None
-) -> bool:
-    """Re-exported convenience so callers need only import the planner."""
-    return hash_coverage_complete(evidence, policy or CustodyPolicy())
-
-
 __all__ = [
     "PlannedAction",
     "ResumePlan",
     "SOURCE_DELETION_ALLOWED",
     "SOURCE_MUTATION_ALLOWED",
-    "hash_coverage_is_complete",
     "plan_resume",
 ]

@@ -42,6 +42,40 @@ IDENTITY_FIELDS: Tuple[str, ...] = ("filesystem_uuid", "serial", "device")
 
 
 @dataclass(frozen=True)
+class IdentityComparison:
+    """Result of comparing two card identities.
+
+    Three outcomes, not two:
+
+    * ``matched`` - the most authoritative comparable field agrees;
+    * ``different_fields`` - it disagrees, so this is provably another card;
+    * ``unprovable_fields`` - one side carries a field the other does not, so
+      sameness cannot be proven. That is *not* evidence of a different card, and
+      it is not evidence of the same one either; reuse is refused either way.
+    """
+
+    matched: bool
+    different_fields: Tuple[str, ...] = ()
+    unprovable_fields: Tuple[str, ...] = ()
+
+    @property
+    def reuse(self) -> bool:
+        return self.matched
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "different_fields": list(self.different_fields),
+            "matched": self.matched,
+            "reuse_allowed": self.reuse,
+            "unprovable_fields": list(self.unprovable_fields),
+        }
+
+
+def _norm_cmp(name: str, value: Optional[str]) -> str:
+    return _norm(value) if name == "filesystem_uuid" else (value or "")
+
+
+@dataclass(frozen=True)
 class CardIdentity:
     """Who the physical card is, independent of where it was mounted."""
 
@@ -79,33 +113,38 @@ class CardIdentity:
     def known(self) -> bool:
         return bool(self.device or self.filesystem_uuid or self.serial)
 
-    def differences(self, other: "CardIdentity") -> Tuple[str, ...]:
-        """Fields that mean "this is a *different* card", or that it cannot be proven.
+    def compare(self, other: "CardIdentity") -> IdentityComparison:
+        """Compare identities most-authoritative-first.
 
-        Compared most-authoritative-first. A matching filesystem UUID is enough
-        even if the device node changed (the card moved to another slot). An
-        identity field present on one side only makes the comparison
-        *unprovable*, which is reported the same way as a mismatch: reuse is
-        refused.
+        The first field both sides carry decides: a matching filesystem UUID is
+        enough even when the card moved to another USB slot, so lower-priority
+        fields are not consulted afterwards. Identity fields present on one side
+        only block reuse when they are *more* authoritative than the deciding
+        field - we recorded a UUID, the observation has none, so sameness is
+        unprovable even though the device node happens to match.
         """
-        unverifiable: List[Tuple[int, str]] = []
-        for index, name in enumerate(IDENTITY_FIELDS):
+        unprovable: List[str] = []
+        for name in IDENTITY_FIELDS:
             mine = getattr(self, name)
             theirs = getattr(other, name)
             if bool(mine) != bool(theirs):
-                unverifiable.append((index, name))
+                unprovable.append(name)
                 continue
             if not mine:
                 continue
-            a = _norm(mine) if name == "filesystem_uuid" else mine
-            b = _norm(theirs) if name == "filesystem_uuid" else theirs
-            if a != b:
-                return (name,)
-            # This field matches and is the most authoritative one both sides
-            # carry: less authoritative fields (a changed USB slot) are noise.
-            blocked = [n for i, n in unverifiable if i < index]
-            return tuple(blocked)
-        return tuple(n for _, n in unverifiable)
+            if _norm_cmp(name, mine) != _norm_cmp(name, theirs):
+                return IdentityComparison(False, (name,), tuple(unprovable))
+            return IdentityComparison(not unprovable, (), tuple(unprovable))
+        return IdentityComparison(False, (), tuple(unprovable))
+
+    def differences(self, other: "CardIdentity") -> Tuple[str, ...]:
+        """Fields that mean "different card" *or* "cannot be proven the same".
+
+        Every field is blocking; see :meth:`compare` for which kind each is.
+        Mount point and label are never included - they are not identity.
+        """
+        result = self.compare(other)
+        return result.different_fields + result.unprovable_fields
 
 
 def _opt(value: Any) -> Optional[str]:
@@ -328,21 +367,12 @@ def _prior_at_mount(
     return None
 
 
-def campaigns_sharing_mount(existing: Iterable[Campaign], mount_point: Optional[str]) -> List[str]:
-    """Campaign ids previously observed at ``mount_point`` (diagnostics only)."""
-    if not mount_point:
-        return []
-    return sorted(
-        c.campaign_id for c in existing if c.source.mount_point == mount_point
-    )
-
-
 __all__ = [
     "Campaign",
+    "IdentityComparison",
     "CampaignResolution",
     "CardIdentity",
     "SourceRef",
-    "campaigns_sharing_mount",
     "derive_campaign_id",
     "resolve_campaign",
 ]

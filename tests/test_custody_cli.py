@@ -265,6 +265,47 @@ def test_status_flags_a_different_card_at_the_same_mount(capsys):
     assert data["observed_card_matches_campaign"] is False
 
 
+def test_card_mismatch_says_what_to_do(capsys):
+    """A bare `false` is not actionable; the operator needs the remedy."""
+    _, out, _ = run(
+        ["status", "--bundle", str(CARD_01_BUNDLE),
+         "--observed-uuid", "FFFF-9999", "--observed-device", "/dev/sdc1"],
+        capsys,
+    )
+    assert "CARD MISMATCH   different_card: filesystem_uuid" in out
+    assert "custody new" in out
+    assert "do not resume this campaign" in out
+
+
+def test_card_mismatch_is_absent_when_hardware_matches(capsys):
+    _, out, _ = run(
+        ["status", "--bundle", str(CARD_01_BUNDLE), "--json",
+         "--observed-uuid", "7A3E-2C19", "--observed-device", "/dev/sdc9"],
+        capsys,
+    )
+    assert json.loads(out)["observed_card_conflict"] is None
+
+
+def test_unprovable_identity_is_distinguished_from_a_different_card(capsys):
+    """Recorded a UUID, observed none: not "same", and not "provably different"."""
+    _, out, _ = run(
+        ["status", "--bundle", str(CARD_01_BUNDLE), "--json",
+         "--observed-device", "/dev/sdb1"],
+        capsys,
+    )
+    conflict = json.loads(out)["observed_card_conflict"]
+    assert conflict["kind"] == "identity_unprovable"
+    assert conflict["different_hardware"] is False
+    assert "filesystem_uuid" in conflict["unprovable_fields"]
+
+
+def test_no_observed_hardware_means_no_conflict_claim(capsys):
+    _, out, _ = run(["status", "--bundle", str(CARD_01_BUNDLE), "--json"], capsys)
+    data = json.loads(out)
+    assert data["observed_card_matches_campaign"] is None
+    assert data["observed_card_conflict"] is None
+
+
 def test_status_accepts_the_same_card(capsys):
     _, out, _ = run(
         ["status", "--bundle", str(CARD_01_BUNDLE), "--json",
