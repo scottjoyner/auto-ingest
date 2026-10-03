@@ -54,7 +54,8 @@ def test_custody_help_is_reachable():
 
 
 def test_subcommand_help_is_reachable():
-    for sub in ("status", "plan", "verify", "import", "new", "reconcile"):
+    for sub in ("status", "plan", "verify", "import", "new", "reconcile",
+                "observe-mount", "capacity", "preflight"):
         proc = run("custody", sub, "--help")
         assert proc.returncode == 0, proc.stderr
         assert "--bundle" in proc.stdout
@@ -135,7 +136,7 @@ def test_new_then_status_through_the_real_cli(tmp_path):
 
 def test_read_only_commands_leave_no_temporary_files(tmp_path):
     bundle = write_bundle(tmp_path / "b", campaign(), evidence())
-    for sub in ("status", "plan", "verify", "reconcile"):
+    for sub in ("status", "plan", "verify", "reconcile", "observe-mount", "capacity"):
         run("custody", sub, "--bundle", str(bundle))
     leftovers = [p.name for p in bundle.iterdir() if ".tmp" in p.name]
     assert leftovers == []

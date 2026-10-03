@@ -206,6 +206,49 @@ Boundedness: every free-form list (`roots`, `exemptions`, `error_summary`,
 `summaries`) is capped at `policy.max_summary_entries` (default 20). The ledger
 reader returns counts plus a capped error sample — never the record list.
 
+### Phase A: what the kernel and the filesystem actually say
+
+`campaign.source.read_only` is a **declared** field. Before Phase A, a bundle
+that merely asserted `read_only: true` passed the release gate with **zero
+blockers** — the single condition protecting the source was a claim in a file.
+`/proc/mounts` states what the kernel actually applied, so three read-only
+observers now supply the missing facts.
+
+```bash
+auto-ingest custody observe-mount --bundle PATH [--json] [--apply]
+auto-ingest custody capacity      --bundle PATH [--json]
+auto-ingest custody preflight     --bundle PATH [--json] [--job-dir PATH]
+```
+
+| command | reads | answers |
+| --- | --- | --- |
+| `observe-mount` | `/proc/mounts` | is the source **actually** `ro`? does the declaration agree? |
+| `capacity` | `statvfs` | is there room for the **outstanding** bytes, plus headroom? |
+| `preflight` | all of the above + the release gate | could an executor run at all, and if not, which check failed? |
+
+Three properties matter here:
+
+* **The declaration is never overwritten.** `--apply` records
+  `observed_read_only` *beside* `read_only`, because those are different claims —
+  what a file asserts and what the kernel reports. Only a human resolves a
+  disagreement, and the report says `CONFLICT` when they differ.
+* **`observe-mount` exits 3 unless the source is observed read-only.** That is the
+  gate a future executor needs; the current release gate deliberately still reads
+  the declared field, and flipping that is a separate explicit decision.
+* **Capacity uses outstanding bytes, not inventory.** A card 61% copied needs
+  the remaining 39%. Headroom is 5% with a 1 GiB floor, because "exactly enough"
+  is how a copy dies at 99%. An unstatable or unresolved destination reports
+  `sufficient: false` — "I could not check" must never read as "fine".
+
+`preflight` is deliberately **complete**: an executor may only proceed when it
+says `safe_to_execute`, so anything it leaves unchecked is a hole in the gate.
+It aggregates mount observation, destination resolution, capacity, queued
+`.job` files (the `ingest-worker` race, `docker-compose.yml:49`), and the
+release blockers into one answer with a remedy per failed check.
+
+All three are clock-free, deterministic, and covered by the audit-hook
+read-only proof.
+
 ### Import merges; it never replaces
 
 `custody import` overlays the incoming document **field by field**. What the
@@ -472,6 +515,9 @@ All read-only by default. `--require-release` exits 3 when the gate is closed,
 which makes the commands usable as a CI/Hermes gate.
 
 ```bash
+auto-ingest custody observe-mount --bundle /path/to/campaign      # what the kernel says
+auto-ingest custody capacity      --bundle /path/to/campaign      # will it fit?
+auto-ingest custody preflight     --bundle /path/to/campaign      # could an executor run?
 auto-ingest custody new     --bundle /path/to/campaign --card-id CARD-02 \
   --uuid "$(blkid -s UUID -o value /dev/sdb1)" --device /dev/sdb1 \
   --label UNTITLED --mount /media/scott/UNTITLED --read-only --apply
@@ -627,6 +673,10 @@ authorizes execution explicitly.
 | a truncated ledger proposes nothing (fails open otherwise) | `test_custody_reconcile.py::test_interrupted_producer_does_not_claim_custody_for_rows_it_reached` |
 | a partial ledger cannot masquerade as complete | `test_custody_reconcile.py::test_a_partially_written_hash_ledger_cannot_masquerade_as_complete` |
 | the summary stays bounded at card scale | `test_custody_scale.py` |
+| an observation can contradict the declaration | `test_custody_observers.py::test_a_declaration_alone_passes_the_gate_but_observation_refuses` |
+| capacity uses outstanding bytes, not inventory | `test_custody_observers.py::test_capacity_uses_outstanding_not_total` |
+| the observers cannot write | `test_custody_observers.py::test_the_observers_emit_no_mutating_syscall` |
+| preflight names every failed check | `test_custody_observers.py::test_preflight_refuses_card01_and_names_every_reason` |
 | a digest-less record is never custody | `test_custody_reconcile.py::test_a_record_without_a_digest_never_counts_as_custody` |
 | reconciliation cannot prove destination identity | `test_custody_reconcile.py::test_reconciliation_alone_cannot_prove_destination_identity` |
 | machine and gate agree on the required scope | `test_custody_state_machine.py::test_machine_and_gate_agree_on_the_required_count` |

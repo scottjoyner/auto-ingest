@@ -6,6 +6,9 @@
     auto-ingest custody import  --bundle PATH --evidence FILE [--apply]
     auto-ingest custody new     --bundle PATH --card-id ID --uuid/--device/--label ... [--apply]
     auto-ingest custody reconcile --bundle PATH [--json]
+    auto-ingest custody observe-mount --bundle PATH [--json] [--apply]
+    auto-ingest custody capacity --bundle PATH [--json]
+    auto-ingest custody preflight --bundle PATH [--json] [--job-dir PATH]
 
 Every command is read-only by default. The only writes in this package are
 ``import --apply`` and ``new --apply``, both explicit. ``--execute`` is accepted
@@ -28,20 +31,30 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 from .campaign import CardIdentity
+from .capacity import (
+    DEFAULT_HEADROOM_FRACTION,
+    DEFAULT_HEADROOM_MIN_BYTES,
+    capacity_report,
+)
+from .mounts import observe_campaign
 from .policy import CustodyPolicy
 from .report import plan_json, plan_text, status_json, status_text
 from .store import (
     BundleError,
     CampaignCreationError,
     CampaignStatus,
+    _write_json_atomic,
     import_evidence,
+    load_campaign,
     load_custody_config,
+    load_evidence,
     load_policy,
     load_status,
     new_campaign,
@@ -101,6 +114,34 @@ def build_parser() -> argparse.ArgumentParser:
                 gate=False, observed=False)
     pi.add_argument("--evidence", required=True, help="path to an evidence JSON document")
     pi.add_argument("--apply", action="store_true", help="write the evidence into the bundle")
+
+    pom = common(sub.add_parser(
+        "observe-mount",
+        help="Observe what the kernel says is mounted (read-only)."),
+        observed=False)
+    pom.add_argument("--apply", action="store_true",
+                     help="record the observation into the campaign bundle")
+
+    pcap = common(sub.add_parser(
+        "capacity",
+        help="Check the destination has room for the outstanding bytes (read-only)."),
+        observed=False)
+    pcap.add_argument("--headroom-fraction", type=float,
+                      default=DEFAULT_HEADROOM_FRACTION,
+                      help="extra space demanded as a fraction of the requirement")
+    pcap.add_argument("--headroom-min-bytes", type=int,
+                      default=DEFAULT_HEADROOM_MIN_BYTES,
+                      help="floor for the headroom, so 'nearly full' still fails")
+
+    pf = common(sub.add_parser(
+        "preflight",
+        help="Everything an executor would need to be safe, in one answer."),
+        observed=False)
+    pf.add_argument("--headroom-fraction", type=float,
+                    default=DEFAULT_HEADROOM_FRACTION)
+    pf.add_argument("--headroom-min-bytes", type=int, default=DEFAULT_HEADROOM_MIN_BYTES)
+    pf.add_argument("--job-dir", default=None,
+                    help="directory of .job files whose presence means work is queued")
 
     pn = sub.add_parser("new", help="Create a campaign record for observed card hardware.")
     pn.add_argument("--bundle", required=True, help="campaign bundle directory to create")
@@ -254,6 +295,206 @@ def cmd_import(args) -> int:
     return EXIT_OK if not result.get("error") else EXIT_USAGE
 
 
+def cmd_observe_mount(args) -> int:
+    """Report what the kernel says is mounted. Read-only; --apply records it.
+
+    The point is that `campaign.source.read_only` is a *declared* field, so this
+    is the first thing that can contradict it.
+    """
+    policy = _policy_from_file(getattr(args, "policy_file", None))
+    if policy is None:
+        policy = load_policy(load_custody_config())
+    campaign = load_campaign(args.bundle)
+    report = observe_campaign(campaign)
+    source = report["source"]
+    payload = {
+        "campaign_id": report["campaign_id"],
+        "source": source,
+        "destination": report["destination"],
+        "declared_read_only_trusted": False,
+        "observations": True,
+        "applied": False,
+    }
+    if args.apply:
+        campaign_path = Path(args.bundle) / "campaign.json"
+        _record_observed_read_only(campaign_path, source)
+        payload["applied"] = True
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, indent=2, default=str))
+    else:
+        lines = [
+            f"campaign_id                {report['campaign_id']}",
+            f"source_mount_point         {source['mount_point']}",
+            f"source_present             {str(source['observation']['present']).lower()}",
+            f"source_observed_read_only  {source['observed_read_only']}",
+            f"source_declared_read_only  {str(source['declared_read_only']).lower()}",
+            f"declaration_agrees         {source['read_only_agrees_with_declaration']}",
+            f"source_filesystem          {source['observation']['filesystem_type']}",
+            f"destination_present        "
+            f"{str(report['destination']['observed_mounted']).lower()}",
+            f"destination_filesystem     "
+            f"{report['destination']['observation']['filesystem_type']}",
+            f"applied                    {str(payload['applied']).lower()}",
+        ]
+        if source["observed_read_only"] is False:
+            lines.append(
+                "  WARNING           the source is mounted WRITABLE; do not copy from it"
+            )
+        if source["read_only_agrees_with_declaration"] is False:
+            lines.append(
+                "  CONFLICT          the bundle's declared read_only disagrees with the"
+                " kernel"
+            )
+        sys.stdout.write("\n".join(lines) + "\n")
+    if source["observed_read_only"] is not True:
+        return EXIT_GATE_CLOSED
+    return EXIT_OK
+
+
+def _record_observed_read_only(campaign_path: Path, source: dict) -> None:
+    """Stamp the observation next to the declaration, never over it.
+
+    The declaration survives untouched, because the two are different claims: one
+    is what the bundle asserts, the other is what the kernel reports. Only a
+    human can resolve a disagreement between them.
+    """
+    raw = json.loads(campaign_path.read_text(encoding="utf-8"))
+    src = raw.setdefault("source", {})
+    src["observed_read_only"] = source["observed_read_only"]
+    src["read_only_agrees_with_declaration"] = source[
+        "read_only_agrees_with_declaration"
+    ]
+    _write_json_atomic(campaign_path, raw)
+
+
+def cmd_capacity(args) -> int:
+    """Ask whether the destination can hold what is outstanding. Read-only."""
+    policy = _policy_from_file(getattr(args, "policy_file", None))
+    if policy is None:
+        policy = load_policy(load_custody_config())
+    campaign = load_campaign(args.bundle)
+    evidence = load_evidence(args.bundle, policy)
+    report = capacity_report(
+        campaign, evidence,
+        headroom_fraction=args.headroom_fraction,
+        headroom_min_bytes=args.headroom_min_bytes,
+    )
+    payload = dict(report.to_dict())
+    payload["campaign_id"] = campaign.campaign_id
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, indent=2, default=str))
+    else:
+        sys.stdout.write(
+            f"campaign_id            {campaign.campaign_id}\n"
+            f"destination            {report.path or 'UNRESOLVED'}\n"
+            f"outstanding_bytes      {report.required_bytes}\n"
+            f"headroom_bytes         {report.headroom_bytes}\n"
+            f"total_needed_bytes     {report.total_needed}\n"
+            f"available_bytes        {report.available_bytes}\n"
+            f"sufficient             {report.sufficient}\n"
+            + (f"reason                 {report.reason}\n" if report.reason else "")
+        )
+    if report.sufficient is not True:
+        return EXIT_GATE_CLOSED
+    return EXIT_OK
+
+
+def _queued_jobs(job_dir: Optional[str]) -> Tuple[int, ...]:
+    """Count queued ``.job`` files. A read of one directory, no enumeration of /nas."""
+    if not job_dir:
+        return ()
+    try:
+        entries = os.listdir(job_dir)
+    except OSError:
+        return ()
+    return tuple(sorted(e for e in entries if e.endswith(".job")))
+
+
+def cmd_preflight(args) -> int:
+    """One answer to "could an executor run right now, and why not if not?".
+
+    Aggregates the observers plus the release gate, because an operator should
+    not have to correlate four commands by hand - and because the whole value of
+    preflight is that it is *complete*: an executor may only proceed when this
+    says so, so anything left unchecked here is a hole in the gate.
+
+    Read-only, like everything else in this package.
+    """
+    policy = _policy_from_file(getattr(args, "policy_file", None))
+    if policy is None:
+        policy = load_policy(load_custody_config())
+    campaign = load_campaign(args.bundle)
+    evidence = load_evidence(args.bundle, policy)
+    status = load_status(args.bundle, policy)
+
+    mounts = observe_campaign(campaign)
+    source = mounts["source"]
+    cap = capacity_report(campaign, evidence,
+                          headroom_fraction=args.headroom_fraction,
+                          headroom_min_bytes=args.headroom_min_bytes)
+    queued = _queued_jobs(args.job_dir)
+
+    checks: list[dict] = []
+
+    def add(name: str, ok: Optional[bool], detail: str, remedy: str) -> None:
+        checks.append({"name": name, "ok": ok, "detail": detail, "remedy": remedy})
+
+    add("source_present", source["observation"]["present"],
+        f"mount_point={source['mount_point']}",
+        "insert the card, or correct campaign.source.mount_point")
+    add("source_read_only_observed", source["observed_read_only"] is True,
+        f"observed={source['observed_read_only']} declared={source['declared_read_only']}",
+        "remount the source read-only; do not copy from a writable card")
+    if source["read_only_agrees_with_declaration"] is False:
+        add("declaration_matches_observation", False,
+            "campaign.source.read_only disagrees with the kernel",
+            "re-record the campaign with `custody new` for the card actually present")
+    add("destination_resolved", campaign.destination.resolved,
+        f"host_path={campaign.destination.host_path or 'UNRESOLVED'}",
+        "set CUSTODY_DESTINATION_ROOT or custody.destination_root")
+    add("destination_mounted", cap.checked and campaign.destination.mounted is not False,
+        f"statable={cap.checked} mounted={campaign.destination.mounted}",
+        "mount the canonical destination")
+    add("capacity_sufficient", cap.sufficient,
+        f"need={cap.total_needed} available={cap.available_bytes}",
+        "free space at the destination, or point at a larger one")
+    add("no_competing_jobs", not queued,
+        f"queued={len(queued)}" + (f" {queued[:5]}" if queued else ""),
+        "let the existing worker drain the queue, or stop it for the campaign")
+    add("release_gate_open", status.release.allowed,
+        "blockers=" + ",".join(b.code for b in status.release.blockers),
+        "resolve the release blockers; see `custody status`")
+
+    failed = [c for c in checks if c["ok"] is False]
+    unknown = [c for c in checks if c["ok"] is None]
+    payload = {
+        "campaign_id": campaign.campaign_id,
+        "state": status.derivation.state.value,
+        "safe_to_execute": not failed and not unknown,
+        "checks": checks,
+        "failed": [c["name"] for c in failed],
+        "unverified": [c["name"] for c in unknown],
+        "source_release_allowed": status.source_release_allowed,
+        "plan_fingerprint": status.plan.plan_fingerprint,
+    }
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, indent=2, default=str))
+    else:
+        lines = [
+            f"campaign_id            {payload['campaign_id']}",
+            f"state                  {payload['state']}",
+            f"safe_to_execute        {str(payload['safe_to_execute']).lower()}",
+            "checks:",
+        ]
+        for check in checks:
+            mark = {True: "ok  ", False: "FAIL", None: "unknown"}[check["ok"]]
+            lines.append(f"  [{mark}] {check['name']:<28} {check['detail']}")
+            if check["ok"] is not True:
+                lines.append(f"         -> {check['remedy']}")
+        sys.stdout.write("\n".join(lines) + "\n")
+    return EXIT_OK if payload["safe_to_execute"] else EXIT_GATE_CLOSED
+
+
 def cmd_new(args) -> int:
     """Create a campaign record for observed card hardware. Explicitly authorized."""
     observed = CardIdentity(
@@ -359,6 +600,9 @@ _HANDLERS = {
     "import": cmd_import,
     "new": cmd_new,
     "reconcile": cmd_reconcile,
+    "observe-mount": cmd_observe_mount,
+    "capacity": cmd_capacity,
+    "preflight": cmd_preflight,
 }
 
 
