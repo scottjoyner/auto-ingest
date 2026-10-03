@@ -55,7 +55,7 @@ def test_custody_help_is_reachable():
 
 def test_subcommand_help_is_reachable():
     for sub in ("status", "plan", "verify", "import", "new", "reconcile",
-                "observe-mount", "capacity", "preflight"):
+                "observe-mount", "capacity", "preflight", "hash"):
         proc = run("custody", sub, "--help")
         assert proc.returncode == 0, proc.stderr
         assert "--bundle" in proc.stdout

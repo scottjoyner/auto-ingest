@@ -35,7 +35,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 from .campaign import CardIdentity
 from .capacity import (
@@ -43,6 +43,7 @@ from .capacity import (
     DEFAULT_HEADROOM_MIN_BYTES,
     capacity_report,
 )
+from .hashing import DEFAULT_ALGORITHM, hash_source, to_evidence
 from .mounts import observe_campaign
 from .policy import CustodyPolicy
 from .report import plan_json, plan_text, status_json, status_text
@@ -142,6 +143,18 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--headroom-min-bytes", type=int, default=DEFAULT_HEADROOM_MIN_BYTES)
     pf.add_argument("--job-dir", default=None,
                     help="directory of .job files whose presence means work is queued")
+
+    ph = common(sub.add_parser(
+        "hash",
+        help="Hash source objects into the campaign ledger (read-only on source)."),
+        observed=False)
+    ph.add_argument("--root", action="append", default=None,
+                    help="directory to walk; repeatable")
+    ph.add_argument("--limit", type=int, default=None,
+                    help="stop after N new hashes (a bounded probe)")
+    ph.add_argument("--algorithm", default=DEFAULT_ALGORITHM)
+    ph.add_argument("--apply", action="store_true",
+                    help="record the result as campaign evidence")
 
     pn = sub.add_parser("new", help="Create a campaign record for observed card hardware.")
     pn.add_argument("--bundle", required=True, help="campaign bundle directory to create")
@@ -495,6 +508,75 @@ def cmd_preflight(args) -> int:
     return EXIT_OK if payload["safe_to_execute"] else EXIT_GATE_CLOSED
 
 
+def _discover_keys(roots: Sequence[str], pattern: Optional[str]) -> Dict[str, Path]:
+    """Map custody key -> source path, sorted.
+
+    The key is the POSIX-relative path: it is stable across runs, unique per
+    object, and it is what reconciliation joins on, so both ledgers must use it.
+    """
+    import fnmatch
+
+    found: Dict[str, Path] = {}
+    for root in roots:
+        base = Path(root)
+        if not base.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames.sort()
+            for name in sorted(filenames):
+                if pattern and not fnmatch.fnmatch(name, pattern):
+                    continue
+                full = Path(dirpath) / name
+                found[full.relative_to(base).as_posix()] = full
+    return found
+
+
+def cmd_hash(args) -> int:
+    """Produce hash.jsonl - the first custody ledger that is actually measured.
+
+    Read-only on the source: every file is opened `rb` and read. The only file
+    created is the ledger inside the campaign bundle.
+    """
+    policy = _policy_from_file(getattr(args, "policy_file", None))
+    if policy is None:
+        policy = load_policy(load_custody_config())
+    if not args.root:
+        campaign_obj = load_campaign(args.bundle)
+        if not campaign_obj.source.mount_point:
+            print("custody: no source mount recorded; pass --root", file=sys.stderr)
+            return EXIT_USAGE
+        args.root = [campaign_obj.source.mount_point]
+
+    keys = _discover_keys(args.root, None)
+    result = hash_source(args.bundle, keys, algorithm=args.algorithm,
+                         limit=args.limit)
+    payload = dict(result.to_dict())
+    payload["discovered"] = len(keys)
+    payload["applied"] = False
+    if args.apply:
+        fragment = to_evidence(result, algorithm=args.algorithm)
+        write_status = import_evidence(args.bundle, fragment, policy, apply=True)
+        payload["applied"] = bool(write_status.get("applied"))
+        payload["evidence_result"] = write_status
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, indent=2, default=str))
+    else:
+        sys.stdout.write(
+            f"ledger                {result.ledger_path}\n"
+            f"discovered            {len(keys)}\n"
+            f"hashed                {result.hashed}\n"
+            f"skipped_existing      {result.skipped_existing}\n"
+            f"failed                {result.failed}\n"
+            f"bytes_read            {result.bytes_read}\n"
+            f"complete              {str(result.complete).lower()}\n"
+            f"applied               {str(payload['applied']).lower()}\n"
+            + ("".join(f"  error               {e}\n" for e in result.errors))
+        )
+    if result.failed:
+        return EXIT_GATE_CLOSED
+    return EXIT_OK
+
+
 def cmd_new(args) -> int:
     """Create a campaign record for observed card hardware. Explicitly authorized."""
     observed = CardIdentity(
@@ -603,6 +685,7 @@ _HANDLERS = {
     "observe-mount": cmd_observe_mount,
     "capacity": cmd_capacity,
     "preflight": cmd_preflight,
+    "hash": cmd_hash,
 }
 
 

@@ -218,6 +218,7 @@ observers now supply the missing facts.
 auto-ingest custody observe-mount --bundle PATH [--json] [--apply]
 auto-ingest custody capacity      --bundle PATH [--json]
 auto-ingest custody preflight     --bundle PATH [--json] [--job-dir PATH]
+auto-ingest custody hash       --bundle PATH --root DIR [--limit N] [--apply]
 ```
 
 | command | reads | answers |
@@ -248,6 +249,42 @@ release blockers into one answer with a remedy per failed check.
 
 All three are clock-free, deterministic, and covered by the audit-hook
 read-only proof.
+
+### Phase B: `custody hash` - the first producer
+
+Until this, every number in a campaign was asserted. `hash.jsonl` had a reader, a
+documented contract, and **no writer anywhere in the repository** - so
+`67,644` existed only in tests and in a hand-written fixture. Now it can be
+measured.
+
+```bash
+auto-ingest custody hash --bundle PATH --root DIR [--limit N] [--apply]
+```
+
+Reads each object (`rb`, streamed in 1 MiB chunks), appends a compact
+newline-terminated record, and never writes the source. The custody key is the
+POSIX-relative path, which is what reconciliation joins on.
+
+Four properties, each of which the fail-closed reader demands:
+
+* **Every record is newline-terminated and fsynced.** An unterminated final line
+  reads as a killed producer and voids the *entire* reconciliation.
+* **Resuming never glues a record onto a damaged line.** This was a real defect
+  found by the tests: after a crash, appending straight on produced
+  `{"key":"broken"{"algorithm":...}` - so one crash cost *two* objects, the
+  partial one and the one merged into it. The producer now terminates a damaged
+  trailing line first. It is not *repaired* (guessing where truncated JSON ended
+  would be inventing evidence); it is closed off, so every complete record stays
+  readable and the damage stays visible.
+* **Two runs over an unchanged source are byte-identical**, because records are
+  written in sorted-key order.
+* **Only a complete pass claims completion.** `--limit` produces a real partial
+  count and `complete: false`, so the state machine reports `HASHING` rather than
+  believing the card is hashed.
+
+Read-only on the source is enforced two ways: a scoped audit-hook test that fails
+on any write outside the campaign bundle, and an AST check that the module
+references no `os.remove`/`shutil`/`subprocess`.
 
 ### Import merges; it never replaces
 
@@ -677,6 +714,10 @@ authorizes execution explicitly.
 | capacity uses outstanding bytes, not inventory | `test_custody_observers.py::test_capacity_uses_outstanding_not_total` |
 | the observers cannot write | `test_custody_observers.py::test_the_observers_emit_no_mutating_syscall` |
 | preflight names every failed check | `test_custody_observers.py::test_preflight_refuses_card01_and_names_every_reason` |
+| resuming never merges onto a partial line | `test_custody_hash.py::test_resuming_never_glues_a_record_onto_a_partial_line` |
+| a crashed producer voids its own diff | `test_custody_hash.py::test_a_simulated_crash_voids_the_whole_diff` |
+| two runs are byte-identical | `test_custody_hash.py::test_two_runs_over_an_unchanged_source_are_byte_identical` |
+| a partial pass never claims completion | `test_custody_hash.py::test_a_partial_pass_does_not_claim_completion` |
 | a digest-less record is never custody | `test_custody_reconcile.py::test_a_record_without_a_digest_never_counts_as_custody` |
 | reconciliation cannot prove destination identity | `test_custody_reconcile.py::test_reconciliation_alone_cannot_prove_destination_identity` |
 | machine and gate agree on the required scope | `test_custody_state_machine.py::test_machine_and_gate_agree_on_the_required_count` |
