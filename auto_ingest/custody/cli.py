@@ -44,6 +44,7 @@ from .capacity import (
     capacity_report,
 )
 from .hashing import DEFAULT_ALGORITHM, hash_source, to_evidence
+from .lock import competing_activity, is_locked, uncoordinated_writers
 from .mounts import observe_campaign
 from .policy import CustodyPolicy
 from .report import plan_json, plan_text, status_json, status_text
@@ -155,6 +156,8 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--headroom-min-bytes", type=int, default=DEFAULT_HEADROOM_MIN_BYTES)
     pf.add_argument("--job-dir", default=None,
                     help="directory of .job files whose presence means work is queued")
+    pf.add_argument("--drop-root", default=None,
+                    help="ingest-worker DROP_ROOT, to check for claimed work")
 
     ph = common(sub.add_parser(
         "hash",
@@ -504,16 +507,17 @@ def cmd_preflight(args) -> int:
     policy = _policy_from_file(getattr(args, "policy_file", None))
     if policy is None:
         policy = load_policy(load_custody_config())
-    campaign = load_campaign(args.bundle)
     evidence = load_evidence(args.bundle, policy)
     status = load_status(args.bundle, policy)
+    campaign_obj = status.campaign
 
-    mounts = observe_campaign(campaign)
+    mounts = observe_campaign(campaign_obj)
     source = mounts["source"]
-    cap = capacity_report(campaign, evidence,
+    cap = capacity_report(campaign_obj, evidence,
                           headroom_fraction=args.headroom_fraction,
                           headroom_min_bytes=args.headroom_min_bytes)
     queued = _queued_jobs(args.job_dir)
+    activity = competing_activity(job_dir=args.job_dir, drop_root=args.drop_root)
 
     checks: list[dict] = []
 
@@ -522,19 +526,19 @@ def cmd_preflight(args) -> int:
 
     add("source_present", source["observation"]["present"],
         f"mount_point={source['mount_point']}",
-        "insert the card, or correct campaign.source.mount_point")
+        "insert the card, or correct campaign_obj.source.mount_point")
     add("source_read_only_observed", source["observed_read_only"] is True,
         f"observed={source['observed_read_only']} declared={source['declared_read_only']}",
         "remount the source read-only; do not copy from a writable card")
     if source["read_only_agrees_with_declaration"] is False:
         add("declaration_matches_observation", False,
-            "campaign.source.read_only disagrees with the kernel",
+            "campaign_obj.source.read_only disagrees with the kernel",
             "re-record the campaign with `custody new` for the card actually present")
-    add("destination_resolved", campaign.destination.resolved,
-        f"host_path={campaign.destination.host_path or 'UNRESOLVED'}",
+    add("destination_resolved", campaign_obj.destination.resolved,
+        f"host_path={campaign_obj.destination.host_path or 'UNRESOLVED'}",
         "set CUSTODY_DESTINATION_ROOT or custody.destination_root")
-    add("destination_mounted", cap.checked and campaign.destination.mounted is not False,
-        f"statable={cap.checked} mounted={campaign.destination.mounted}",
+    add("destination_mounted", cap.checked and campaign_obj.destination.mounted is not False,
+        f"statable={cap.checked} mounted={campaign_obj.destination.mounted}",
         "mount the canonical destination")
     add("capacity_sufficient", cap.sufficient,
         f"need={cap.total_needed} available={cap.available_bytes}",
@@ -542,6 +546,21 @@ def cmd_preflight(args) -> int:
     add("no_competing_jobs", not queued,
         f"queued={len(queued)}" + (f" {queued[:5]}" if queued else ""),
         "let the existing worker drain the queue, or stop it for the campaign")
+
+    dest_key = campaign_obj.destination.logical.canonical
+    lock_held = is_locked(dest_key)
+    add("destination_not_locked_by_another_campaign", not lock_held,
+        f"{dest_key} locked={lock_held}",
+        "another campaign holds this destination; wait for it or pick another")
+
+    # Competing writers are reported, not gated on: they are a standing property
+    # of this host, and none of them takes the campaign lock yet. Silently passing
+    # this would claim a safety the repo cannot currently provide.
+    blockers_ = uncoordinated_writers(activity)
+    add("no_uncoordinated_writers", not blockers_,
+        "none" if not blockers_ else ",".join(blockers_),
+        "stop sync-service / ingest-worker for the campaign, or teach them to "
+        "consult the campaign lock as a separate change")
     add("release_gate_open", status.release.allowed,
         "blockers=" + ",".join(b.code for b in status.release.blockers),
         "resolve the release blockers; see `custody status`")
@@ -549,10 +568,13 @@ def cmd_preflight(args) -> int:
     failed = [c for c in checks if c["ok"] is False]
     unknown = [c for c in checks if c["ok"] is None]
     payload = {
-        "campaign_id": campaign.campaign_id,
+        "campaign_id": campaign_obj.campaign_id,
         "state": status.derivation.state.value,
-        "safe_to_execute": not failed and not unknown,
+        # Known, standing, uncoordinated writers keep this false. They cannot be
+        # resolved from inside this package: the fix belongs to those services.
+        "safe_to_execute": not failed and not unknown and not blockers_,
         "checks": checks,
+        "competing_activity": [a.to_dict() for a in activity],
         "failed": [c["name"] for c in failed],
         "unverified": [c["name"] for c in unknown],
         "source_release_allowed": status.source_release_allowed,
@@ -572,6 +594,8 @@ def cmd_preflight(args) -> int:
             lines.append(f"  [{mark}] {check['name']:<28} {check['detail']}")
             if check["ok"] is not True:
                 lines.append(f"         -> {check['remedy']}")
+        for item in payload["competing_activity"]:
+            lines.append(f"  competing     {item['kind']}: {item['detail']}")
         sys.stdout.write("\n".join(lines) + "\n")
     return EXIT_OK if payload["safe_to_execute"] else EXIT_GATE_CLOSED
 

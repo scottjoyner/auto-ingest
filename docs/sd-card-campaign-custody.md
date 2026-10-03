@@ -360,6 +360,55 @@ a diff cannot attest that a *copy* happened. `copy.result_complete` and
 authorized. The pipeline now runs from measurement to a correct refusal; the only
 remaining step is the one that writes bytes.
 
+### Phase C: the campaign lock, and a race this package cannot fix alone
+
+The investigation surfaced a hazard that is not about custody at all, but would
+corrupt a campaign if left alone:
+
+* `sync-service` (`docker-compose.yml:85`, every 10 min) and
+  `deploy/cron/ingest.crontab:5` (every 5 min) run
+  `deploy/sync_from_legacy_drop.sh`, which rsyncs `--archive --ignore-existing`
+  into `$AUDIO_ROOT` / `$DASHCAM_ROOT` / `$BODYCAM_ROOT` — **the same roots a
+  campaign writes to**. No lock, no campaign awareness. It will silently skip
+  whatever a campaign produced, and can populate those roots independently.
+* `ingest-worker` (`docker-compose.yml:49`, every 30 s) claims and executes
+  arbitrary `.job` files from `$DROP_ROOT`, also uncoordinated.
+
+`auto_ingest.custody.lock` provides the primitive:
+
+| function | purpose |
+| --- | --- |
+| `campaign_lock(dest)` | advisory exclusive lock, held for a campaign's duration |
+| `is_locked(dest)` | probe a destination is free — callable by a legacy writer that knows nothing about custody |
+| `competing_activity()` | report writers that may touch the destination uncoordinated |
+
+It deliberately **does not edit** those scripts. Changing a running service's
+behaviour belongs in its own change with its own review. What it does instead is
+make the dependency impossible to miss: `preflight` gained a
+`no_uncoordinated_writers` check, and because `legacy_drop_sync` is a *standing*
+property of this host rather than a transient state, it is always reported.
+
+**That means `safe_to_execute` is currently always false on this host**, and that
+is the honest answer rather than a missing feature:
+
+```
+[FAIL] no_uncoordinated_writers     legacy_drop_sync
+       -> stop sync-service / ingest-worker for the campaign, or teach them to
+          consult the campaign lock as a separate change
+competing legacy_drop_sync: deploy/sync_from_legacy_drop.sh rsyncs
+         --ignore-existing into $DASHCAM_ROOT/$AUDIO_ROOT/$BODYCAM_ROOT
+```
+
+Clearing it requires adding a lock check to `sync_from_legacy_drop.sh` — a
+two-line change in a live service, and therefore **Phase C.5**, which should be
+reviewed and deployed on its own before any executor is authorized. There is
+deliberately no `--force` or `--acknowledge` flag here: a bypass for a hazard
+this real is how the hazard gets forgotten.
+
+Locks are advisory — they coordinate software that agrees to take them. A crashed
+executor releases on the way out, and `is_locked()` needs no custody import, so
+the eventual `sync_from_legacy_drop.sh` change can be a single `flock -n` probe.
+
 ### Import merges; it never replaces
 
 `custody import` overlays the incoming document **field by field**. What the
@@ -796,6 +845,9 @@ authorizes execution explicitly.
 | presence is never custody | `test_custody_verify.py::test_a_present_but_corrupt_object_is_a_mismatch` |
 | a truncated copy is a mismatch | `test_custody_verify.py::test_a_truncated_object_is_a_mismatch` |
 | verification alone cannot release | `test_custody_verify.py::test_the_whole_pipeline_from_measurement_to_correct_refusal` |
+| a lock is released even when the holder crashes | `test_custody_lock.py::test_lock_releases_on_exception` |
+| a lock held by another process is seen | `test_custody_lock.py::test_a_lock_held_by_another_process_is_detected` |
+| preflight refuses on the uncoordinated writer | `test_custody_lock.py::test_preflight_refuses_on_the_uncoordinated_writer` |
 | a digest-less record is never custody | `test_custody_reconcile.py::test_a_record_without_a_digest_never_counts_as_custody` |
 | reconciliation cannot prove destination identity | `test_custody_reconcile.py::test_reconciliation_alone_cannot_prove_destination_identity` |
 | machine and gate agree on the required scope | `test_custody_state_machine.py::test_machine_and_gate_agree_on_the_required_count` |
