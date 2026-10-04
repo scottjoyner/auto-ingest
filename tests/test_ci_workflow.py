@@ -72,14 +72,37 @@ def test_no_comment_swallows_a_continued_command(name, block):
                 f"move it above the command")
 
 
+def _install_lines_only(block: str) -> str:
+    """Return just the pip-install commands, rewritten to print their argv.
+
+    Deliberately narrow: an earlier version of this test handed the whole run
+    block to `bash -c`, which meant the step that runs pytest re-executed the
+    entire suite inside the suite (and timed out). Never execute a workflow
+    step here - only the install command's own tokens, with pip swapped for
+    echo.
+    """
+    out: list[str] = []
+    lines = block.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if re.match(r"^\s*(\.venv/bin/)?pip install", line) and "--upgrade" not in line:
+            chunk = [re.sub(r"^(\s*)(\.venv/bin/)?pip install", r"\1echo ARGV:", line)]
+            while chunk[-1].rstrip().endswith("\\") and i + 1 < len(lines):
+                i += 1
+                chunk.append(lines[i])
+            out.append("\n".join(chunk))
+        i += 1
+    return "\n".join(out)
+
+
 @pytest.mark.parametrize("name, block", run_blocks(),
                          ids=[n for n, _ in run_blocks()])
 def test_each_pip_install_is_a_single_command(name, block):
     """Catch continuation damage that bash -n alone would not flag."""
-    script = "\n".join(
-        re.sub(r"^(\s*)(\.venv/bin/)?pip install", r"\1echo ARGV:", line)
-        for line in block.splitlines()
-    )
+    script = _install_lines_only(block)
+    if not script:
+        pytest.skip("step runs no package install")
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                           timeout=60)
     argv_lines = [line for line in proc.stdout.splitlines() if line.startswith("ARGV:")]
