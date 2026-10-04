@@ -33,6 +33,18 @@ import cv2
 import subprocess
 import tempfile
 
+# --- Geometry guard -------------------------------------------------------
+# ffmpeg `-ss` seeks on corrupt/truncated clips can decode a PARTIAL frame:
+# only a few rows get reconstructed, yielding a thin strip (e.g. 1500x4).
+# cv2.resize preserves aspect ratio, so the strip stays ~375:1 and trips
+# mlx_vlm's "absolute aspect ratio must be smaller than 200" limit, crashing
+# the LM Studio backend. We validate geometry BEFORE sending to the VLM and
+# skip (not raise) degenerate frames so a single bad minute doesn't poison the
+# whole clip. Thresholds are tunable via env vars (inherited by workers).
+MIN_FRAME_DIM = int(os.getenv("DASHCAM_MIN_DIM", "32"))      # reject if min(w,h) < this
+MAX_FRAME_ASPECT = float(os.getenv("DASHCAM_MAX_ASPECT", "10"))  # reject if max/min > this
+VERIFY_PAYLOAD = os.getenv("DASHCAM_VERIFY_PAYLOAD", "") == "1"  # decode exact b64 sent
+
 DEFAULT_PROMPT = (
     "You are a dashcam scene analyst. Describe this dashcam frame concisely and "
     "factually for later semantic search. Cover: road type and condition, weather "
@@ -92,6 +104,20 @@ def probe_duration(mp4_path):
         return 0.0
 
 
+def _geometry_ok(w, h):
+    """Reject thin-strip / partial-decode frames that would crash mlx_vlm's
+    aspect-ratio validation (limit 200). Returns (ok, reason)."""
+    if w <= 0 or h <= 0:
+        return False, "empty"
+    mn = min(w, h)
+    if mn < MIN_FRAME_DIM:
+        return False, f"min-dim {mn}<{MIN_FRAME_DIM}"
+    aspect = max(w, h) / mn
+    if aspect > MAX_FRAME_ASPECT:
+        return False, f"aspect {aspect:.1f}>{MAX_FRAME_ASPECT}"
+    return True, ""
+
+
 def extract_minute_first_frames(mp4_path, max_minutes=None, max_size=640, ff_timeout=30):
     """Decode frames with ffmpeg (robust on corrupt clips); cv2 only resizes/encodes."""
     dur = probe_duration(mp4_path)
@@ -118,6 +144,15 @@ def extract_minute_first_frames(mp4_path, max_minutes=None, max_size=640, ff_tim
         if max(h, w) > max_size:
             scale = max_size / max(h, w)
             img = cv2.resize(img, (int(w * scale), int(h * scale)))
+        # Validate the geometry we are about to transmit. A partial ffmpeg decode
+        # yields a thin strip that survives resize and would crash mlx_vlm's
+        # aspect-ratio check; skip it rather than poison the LM Studio backend.
+        h2, w2 = img.shape[:2]
+        ok_geom, why = _geometry_ok(w2, h2)
+        if not ok_geom:
+            print(f"[skip-bad-geom] {os.path.basename(mp4_path)} m={m} t={t:.1f}s "
+                  f"{w2}x{h2}: {why}", flush=True)
+            continue
         ok, buf = cv2.imencode(".png", img)
         if not ok:
             continue
@@ -127,6 +162,22 @@ def extract_minute_first_frames(mp4_path, max_minutes=None, max_size=640, ff_tim
 def describe(png_bytes, vision_url, vision_model, prompt, sys_prompt, timeout):
     b64 = base64.b64encode(png_bytes).decode()
     data_url = f"data:image/png;base64,{b64}"
+    if VERIFY_PAYLOAD:
+        # Decode the EXACT payload we are about to transmit and confirm its
+        # geometry. Separates an extraction/crop bug from an encoding bug: if
+        # this prints a thin strip, corruption is upstream; if it's sane here
+        # but LM Studio still rejects it, the fault is in serialization/transport.
+        try:
+            import io as _io
+            from PIL import Image as _PILImage
+            dec = _PILImage.open(_io.BytesIO(base64.b64decode(b64)))
+            dw, dh = dec.size
+            if not _geometry_ok(dw, dh):
+                print(f"[payload-bad-geom] transmitted payload is {dw}x{dh} "
+                      f"({dec.format}) — refusing to send", flush=True)
+                raise ValueError(f"transmitted payload geometry invalid: {dw}x{dh}")
+        except ImportError:
+            pass  # PIL not available; rely on the extraction-time guard above
     payload = {
         "model": vision_model,
         "messages": [
