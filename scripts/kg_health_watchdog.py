@@ -21,20 +21,38 @@ Behavior:
 Usage:
     .venv/bin/python scripts/kg_health_watchdog.py            # alert only on failure
     .venv/bin/python scripts/kg_health_watchdog.py --report-always
+    KG_HEALTH_STATE_FILE=/tmp/kg.json .venv/bin/python scripts/kg_health_watchdog.py
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
+from itertools import count
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-STATE_FILE = REPO / "scripts" / ".kg_health_state.json"
+# The state file records the last-seen 768-backfill count so the stall detector
+# has something to compare against; it is a cache of one observation, not a
+# decision record, and it is rewritten in full on every run. Point it somewhere
+# else (a tmp dir) to exercise main() without writing into the repo. Same knob
+# the sibling watchdog exposes, deliberately under a different name: reusing
+# WATCHDOG_STATE_FILE here would make the two watchdogs share one path and
+# clobber each other's JSON.
+STATE_FILE = Path(
+    os.environ.get("KG_HEALTH_STATE_FILE")
+    or REPO / "scripts" / ".kg_health_state.json"
+)
+
+# Unique-per-write temp names, so a failed write cannot eat a concurrent one.
+# See _write_json_atomic() in auto_ingest/custody/store.py for why a FIXED
+# ".tmp" suffix is wrong.
+_WRITE_SEQ = count(1)
 
 
 def log(*a):
@@ -43,6 +61,7 @@ def log(*a):
 
 def get_neo4j():
     from neo4j import GraphDatabase
+
     from auto_ingest_config import get_neo4j_config
     cfg = get_neo4j_config()
     drv = GraphDatabase.driver(cfg["uri"], auth=(cfg["user"], cfg["password"]))
@@ -59,7 +78,21 @@ def load_state():
 
 
 def save_state(st):
-    STATE_FILE.write_text(json.dumps(st, default=str))
+    """Persist the state file atomically. Raises if the write cannot complete."""
+    tmp = STATE_FILE.with_name(f"{STATE_FILE.name}.{os.getpid()}.{next(_WRITE_SEQ)}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(st, f, default=str)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, STATE_FILE)
+    except BaseException:
+        # Never leave a half-written temp file behind for the next run to trip on.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def main():

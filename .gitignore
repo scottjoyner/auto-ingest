@@ -51,6 +51,10 @@ shorts_out_smoke/
 .reembed_*.cursor
 .auto_ingest_outbox.sqlite
 
+# kg-health watchdog baseline: a cached count + wall clock, rewritten in full on
+# every run. Tracked once by accident; nothing but the watchdog itself reads it.
+scripts/.kg_health_state.json
+
 # embed-cache WAL/shm siblings (runtime state, not source)
 emb_cache.sqlite-shm
 emb_cache.sqlite-wal
