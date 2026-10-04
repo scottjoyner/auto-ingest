@@ -114,6 +114,52 @@ class LockUnavailable(RuntimeError):
     """Another campaign already holds this destination."""
 
 
+#: Markers a pre-existing writer can leave to make itself visible to custody.
+#:
+#: The per-destination lock is keyed on the campaign's *logical* destination
+#: ("primary:fileserver/dashcam"), which a shell script that only knows
+#: $DASHCAM_ROOT cannot derive. So the handshake is deliberately cruder and
+#: host-path independent: while any campaign is running it drops one marker file,
+#: and a writer checks for that file. One `test -e`, no import, no arguments.
+ACTIVE_MARKER = "campaign-active"
+
+#: Marker string the patched writer must contain. `competing_activity` greps for
+#: it rather than trusting an operator's word that the script was updated, so
+#: reverting the script makes preflight fail closed again.
+WRITER_PROBE_MARKER = "custody-campaign-lock"
+
+
+def active_marker(root: Optional[str | Path] = None) -> Path:
+    """Path of the "a custody campaign is running" marker."""
+    return lock_root(root) / ACTIVE_MARKER
+
+
+def is_campaign_active(root: Optional[str | Path] = None) -> bool:
+    """Whether any campaign currently holds a destination.
+
+    Deliberately a plain existence test, so a shell script can do the same with
+    ``test -e`` and no dependency on this package.
+    """
+    return active_marker(root).exists()
+
+
+def set_active(root: Optional[str | Path] = None) -> Path:
+    """Drop the marker. Called when a campaign takes a destination."""
+    path = active_marker(root)
+    _ensure(path.parent)
+    path.write_text("custody campaign in progress\n", encoding="utf-8")
+    return path
+
+
+def clear_active(root: Optional[str | Path] = None) -> None:
+    """Remove the marker. Best-effort: a stale marker only causes writers to
+    stand down, which is the safe direction."""
+    try:
+        active_marker(root).unlink()
+    except OSError:
+        pass
+
+
 def campaign_lock(destination_key: str, root: Optional[str | Path] = None) -> CampaignLock:
     """The exclusive lock for one canonical destination."""
     return CampaignLock(lock_root(root) / f"campaign-{_safe(destination_key)}.lock")
@@ -166,10 +212,28 @@ class CompetingActivity:
         }
 
 
+def writer_consults_lock(script: Optional[str | Path]) -> bool:
+    """Whether a writer script actually checks the campaign marker.
+
+    Verified by reading the script rather than trusting a declaration, so
+    reverting the patch makes preflight fail closed again instead of silently
+    claiming a coordination that no longer exists.
+    """
+    if not script:
+        return False
+    path = Path(script)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return WRITER_PROBE_MARKER in text and ACTIVE_MARKER in text
+
+
 def competing_activity(
     *,
     job_dir: Optional[str | Path] = None,
     drop_root: Optional[str | Path] = None,
+    legacy_sync_script: Optional[str | Path] = None,
 ) -> Tuple[CompetingActivity, ...]:
     """Report writers that could touch the destination uncoordinated.
 
@@ -206,17 +270,22 @@ def competing_activity(
                 remedy="drain the queue before copying",
             ))
 
-    # Known uncoordinated writers, named explicitly. This is a standing hazard,
-    # not a transient state, so it is always reported.
+    # The legacy drop sync is the one writer that matters: it runs every 5 minutes
+    # from two places and rsyncs --ignore-existing into the campaign's roots.
+    # Whether it participates is *verified by reading the script*, not asserted.
+    respects = writer_consults_lock(legacy_sync_script)
     found.append(CompetingActivity(
         kind="legacy_drop_sync",
-        detail="deploy/sync_from_legacy_drop.sh rsyncs --ignore-existing into "
-               "$DASHCAM_ROOT/$AUDIO_ROOT/$BODYCAM_ROOT",
-        honours_lock=False,
-        remedy=("sync-service (docker-compose.yml:85, every 10m) and "
+        detail=("deploy/sync_from_legacy_drop.sh stands down while a custody "
+                "campaign is active"
+                if respects else
+                "deploy/sync_from_legacy_drop.sh rsyncs --ignore-existing into "
+                "$DASHCAM_ROOT/$AUDIO_ROOT/$BODYCAM_ROOT with no lock check"),
+        honours_lock=respects,
+        remedy=("" if respects else
+                "sync-service (docker-compose.yml:85, every 10m) and "
                 "ingest.crontab:5 (every 5m) write the same roots without a lock; "
-                "either stop them for the campaign or add a lock check to that "
-                "script as a separate change"),
+                f"add the '{WRITER_PROBE_MARKER}' stand-down probe to that script"),
     ))
     return tuple(found)
 
@@ -227,13 +296,19 @@ def uncoordinated_writers(activity: Tuple[CompetingActivity, ...]) -> Tuple[str,
 
 
 __all__ = [
+    "ACTIVE_MARKER",
+    "WRITER_PROBE_MARKER",
     "CampaignLock",
     "CompetingActivity",
     "DEFAULT_LOCK_ROOT",
     "LockUnavailable",
+    "active_marker",
     "campaign_lock",
+    "clear_active",
     "competing_activity",
+    "is_campaign_active",
     "is_locked",
     "lock_root",
+    "set_active",
     "uncoordinated_writers",
 ]

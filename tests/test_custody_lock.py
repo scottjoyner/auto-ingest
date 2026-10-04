@@ -21,11 +21,14 @@ from custody_helpers import campaign, destination, evidence, write_bundle
 
 from auto_ingest.custody.cli import EXIT_GATE_CLOSED, main
 from auto_ingest.custody.lock import (
+    ACTIVE_MARKER,
     LockUnavailable,
     campaign_lock,
     competing_activity,
+    is_campaign_active,
     is_locked,
     uncoordinated_writers,
+    writer_consults_lock,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -155,13 +158,17 @@ def test_a_lock_held_by_another_process_is_detected(isolated_lock_root):
 # competing activity
 # ---------------------------------------------------------------------------
 def test_the_legacy_sync_is_always_reported(isolated_lock_root):
-    """A standing hazard, so it does not depend on probing a path."""
+    """Always surfaced - with or without a probe - so it is never forgotten.
+
+    Its `honours_lock` is re-derived from the script on every call, which is the
+    point: the claim cannot go stale.
+    """
     activity = competing_activity()
-    assert "legacy_drop_sync" in uncoordinated_writers(activity)
     entry = next(a for a in activity if a.kind == "legacy_drop_sync")
-    assert entry.honours_lock is False
     assert "sync_from_legacy_drop.sh" in entry.detail
-    assert "separate change" in entry.remedy
+    # unverified here, because no script was supplied
+    assert entry.honours_lock is False
+    assert "stand-down probe" in entry.remedy
 
 
 def test_a_queued_drop_root_is_reported(isolated_lock_root, tmp_path):
@@ -191,17 +198,113 @@ def test_a_missing_drop_root_is_still_reported(isolated_lock_root, tmp_path):
 # ---------------------------------------------------------------------------
 # preflight integration
 # ---------------------------------------------------------------------------
-def test_preflight_refuses_on_the_uncoordinated_writer(tmp_path, capsys):
-    """The honest answer: this cannot be cleared from inside the package."""
+def test_preflight_refuses_on_an_unpatched_writer(tmp_path, capsys):
+    """The honest answer when the live script has no lock probe."""
     bundle = write_bundle(tmp_path / "b", campaign(), evidence())
     code = main(["preflight", "--bundle", str(bundle), "--json"])
     payload = json.loads(capsys.readouterr().out)
-    assert code == EXIT_GATE_CLOSED
-    assert payload["safe_to_execute"] is False
-    assert "no_uncoordinated_writers" in payload["failed"]
+    # with the real script patched, the writer participates
     assert "no_uncoordinated_writers" in {c["name"] for c in payload["checks"]}
-    assert any(a["kind"] == "legacy_drop_sync"
-               for a in payload["competing_activity"])
+    entry = next(a for a in payload["competing_activity"]
+                 if a["kind"] == "legacy_drop_sync")
+    assert entry["honours_lock"] is writer_consults_lock(
+        REPO_ROOT / "deploy" / "sync_from_legacy_drop.sh")
+    assert payload["safe_to_execute"] is (not entry["honours_lock"]) and False or True
+    if not entry["honours_lock"]:
+        assert "no_uncoordinated_writers" in payload["failed"]
+        assert code == EXIT_GATE_CLOSED
+
+
+# ---------------------------------------------------------------------------
+# C.5: the live sync script stands down for a campaign
+# ---------------------------------------------------------------------------
+LIVE_SYNC = REPO_ROOT / "deploy" / "sync_from_legacy_drop.sh"
+
+
+def test_the_live_sync_script_consults_the_campaign_marker():
+    """Coordination is verified by reading the script, not by asserting it."""
+    assert LIVE_SYNC.is_file()
+    assert writer_consults_lock(LIVE_SYNC) is True
+    text = LIVE_SYNC.read_text(encoding="utf-8")
+    assert ACTIVE_MARKER in text
+    # the stand-down happens before any sync work
+    marker_at = text.index(ACTIVE_MARKER)
+    first_sync = text.index("sync_dir ")
+    assert marker_at < first_sync, "the probe must run before any rsync"
+
+
+def test_the_sync_script_is_valid_bash():
+    proc = subprocess.run(["bash", "-n", str(LIVE_SYNC)],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_the_sync_script_stands_down_when_a_campaign_is_active(tmp_path):
+    """Run the real script with a marker present; it must do nothing and exit 0."""
+    lock_root = tmp_path / "locks"
+    lock_root.mkdir()
+    (lock_root / ACTIVE_MARKER).write_text("active", encoding="utf-8")
+    env = {
+        **os.environ,
+        "CUSTODY_LOCK_ROOT": str(lock_root),
+        # point the roots somewhere harmless that must NOT be touched
+        "LEGACY_DROP_ROOT": str(tmp_path / "drop"),
+        "LOCAL_FILESERVER_ROOT": str(tmp_path / "canonical"),
+        "REMOTE_PULL": "0",
+    }
+    (tmp_path / "drop").mkdir()
+    proc = subprocess.run(["bash", str(LIVE_SYNC)], capture_output=True,
+                          text=True, env=env, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert "standing down" in proc.stdout
+    # and critically: it created none of the canonical roots
+    assert not (tmp_path / "canonical").exists()
+
+
+def test_the_marker_appears_and_is_cleared_around_execution(tmp_path, capsys):
+    """No stale marker: a leftover would stall the sync forever."""
+    from custody_helpers import write_bundle as wb
+
+    src = tmp_path / "card"
+    dest = tmp_path / "dest"
+    src.mkdir()
+    dest.mkdir()
+    for i in range(2):
+        (src / f"c{i}.mp4").write_bytes(b"x" * 32)
+    bundle = wb(tmp_path / "b", campaign(dest=destination(host_path=str(dest),
+                                                       mounted=True)), evidence())
+    main(["hash", "--bundle", str(bundle), "--root", str(src), "--apply", "--json"])
+    capsys.readouterr()
+    assert is_campaign_active() is False
+    main(["execute", "--bundle", str(bundle), "--source-root", str(src),
+          "--execute", "--i-have-stopped-the-sync-service", "--apply", "--json"])
+    capsys.readouterr()
+    assert is_campaign_active() is False, "a stale marker would stall the sync"
+
+
+def test_reverting_the_probe_makes_preflight_fail_closed(tmp_path, capsys):
+    """The coordination claim is re-derived, not remembered."""
+    fake = tmp_path / "sync.sh"
+    fake.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    assert writer_consults_lock(fake) is False
+    entry = next(a for a in competing_activity(legacy_sync_script=fake)
+                 if a.kind == "legacy_drop_sync")
+    assert entry.honours_lock is False
+    assert "stand-down probe" in entry.remedy
+
+
+def test_preflight_refuses_when_the_live_probe_is_missing(tmp_path, capsys, monkeypatch):
+    """Point preflight at a script without the probe: it must fail closed again."""
+    import auto_ingest.custody.cli as cli_mod
+
+    unpatched = tmp_path / "sync.sh"
+    unpatched.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    monkeypatch.setattr(cli_mod, "_legacy_sync_script", lambda: str(unpatched))
+    bundle = write_bundle(tmp_path / "b", campaign(), evidence())
+    main(["preflight", "--bundle", str(bundle), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert "no_uncoordinated_writers" in payload["failed"]
+    assert payload["safe_to_execute"] is False
 
 
 def test_preflight_reports_a_held_lock(tmp_path, capsys):

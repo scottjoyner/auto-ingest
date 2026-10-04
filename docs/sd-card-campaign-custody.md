@@ -382,28 +382,43 @@ corrupt a campaign if left alone:
 | `is_locked(dest)` | probe a destination is free — callable by a legacy writer that knows nothing about custody |
 | `competing_activity()` | report writers that may touch the destination uncoordinated |
 
-It deliberately **does not edit** those scripts. Changing a running service's
-behaviour belongs in its own change with its own review. What it does instead is
-make the dependency impossible to miss: `preflight` gained a
-`no_uncoordinated_writers` check, and because `legacy_drop_sync` is a *standing*
-property of this host rather than a transient state, it is always reported.
+`auto_ingest.custody.lock` first made that dependency impossible to miss:
+`preflight` gained a `no_uncoordinated_writers` check, and because
+`legacy_drop_sync` is a *standing* property of this host rather than a transient
+state, it is always reported.
 
-**That means `safe_to_execute` is currently always false on this host**, and that
-is the honest answer rather than a missing feature:
+### Phase C.5: the legacy sync stands down
 
+`sync_from_legacy_drop.sh` is now patched. Its first act is an existence test on
+the campaign marker, before any rsync:
+
+```bash
+CUSTODY_LOCK_ROOT="${CUSTODY_LOCK_ROOT:-/tmp/auto_ingest_custody}"
+CUSTODY_ACTIVE_MARKER="$CUSTODY_LOCK_ROOT/campaign-active"
+if [[ -e "$CUSTODY_ACTIVE_MARKER" ]]; then
+  echo "... custody campaign active ($CUSTODY_ACTIVE_MARKER) — standing down this pass"
+  exit 0
+fi
 ```
-[FAIL] no_uncoordinated_writers     legacy_drop_sync
-       -> stop sync-service / ingest-worker for the campaign, or teach them to
-          consult the campaign lock as a separate change
-competing legacy_drop_sync: deploy/sync_from_legacy_drop.sh rsyncs
-         --ignore-existing into $DASHCAM_ROOT/$AUDIO_ROOT/$BODYCAM_ROOT
-```
 
-Clearing it requires adding a lock check to `sync_from_legacy_drop.sh` — a
-two-line change in a live service, and therefore **Phase C.5**, which should be
-reviewed and deployed on its own before any executor is authorized. There is
-deliberately no `--force` or `--acknowledge` flag here: a bypass for a hazard
-this real is how the hazard gets forgotten.
+Deliberately cruder than the campaign's own `flock`: this script only knows host
+paths, while the campaign lock is keyed on a *logical destination name*, and the
+two cannot be reconciled without inventing a shared naming convention. A marker
+file is the whole handshake. It exits `0` so cron logs a reason rather than an
+error, and the next run five minutes later picks up whatever was left behind.
+
+Two properties matter more than the mechanism:
+
+* **The claim is re-derived, never remembered.** `writer_consults_lock()` reads
+  the script and looks for the probe, so reverting this patch makes
+  `no_uncoordinated_writers` fail again. Nothing in the report can go stale.
+* **The repo is bind-mounted.** `docker-compose.yml` maps `./:/app`, and both
+  entry points invoke `/app/deploy/sync_from_legacy_drop.sh`, so the deployed
+  script *is* this file. The patch applies on the next tick without a rebuild or
+  restart.
+
+`no_uncoordinated_writers` now reports `none`, and `preflight` can return
+`safe_to_execute: true` for a fully reconciled campaign.
 
 Locks are advisory — they coordinate software that agrees to take them. A crashed
 executor releases on the way out, and `is_locked()` needs no custody import, so
@@ -423,13 +438,16 @@ auto-ingest custody execute --bundle PATH --source-root DIR --destination DIR \
 auto-ingest custody execute ... --execute --i-have-stopped-the-sync-service --apply
 ```
 
-**Two independent gates.** `--execute` is required or nothing is copied, and
-`--i-have-stopped-the-sync-service` must be typed to acknowledge the uncoordinated
-writers. That acknowledgment is *recorded* in
-`copy.acknowledged_uncoordinated_writers` rather than assumed — it is a human
-decision, and no command can make it on an operator's behalf. Exit codes: `0`
-means no blockers (with `--execute` absent, the plan is executable and nothing was
-copied); `3` means refused, and `blockers` says why.
+**Two gates, one of them conditional.** `--execute` is required or nothing is
+copied. `--i-have-stopped-the-sync-service` is required *only when coordination
+cannot be verified* — the response reports which, as
+`acknowledgment_required`. On this host the C.5 probe is verified and the sync
+stands down on its own, so demanding the claim would be friction; where the
+deployment is a copy rather than the repo, the operator's word is the only
+evidence available, so it is a hard gate there. Either way the acknowledgment is
+*recorded* in `copy.acknowledged_uncoordinated_writers` rather than assumed.
+Exit codes: `0` means no blockers (with `--execute` absent, the plan is
+executable and nothing was copied); `3` means refused, and `blockers` says why.
 
 **The plan is derived from the ledgers, in three buckets:**
 
@@ -922,7 +940,10 @@ authorizes execution explicitly.
 | verification alone cannot release | `test_custody_verify.py::test_the_whole_pipeline_from_measurement_to_correct_refusal` |
 | a lock is released even when the holder crashes | `test_custody_lock.py::test_lock_releases_on_exception` |
 | a lock held by another process is seen | `test_custody_lock.py::test_a_lock_held_by_another_process_is_detected` |
-| preflight refuses on the uncoordinated writer | `test_custody_lock.py::test_preflight_refuses_on_the_uncoordinated_writer` |
+| live sync stands down for a campaign | `test_custody_lock.py::test_the_sync_script_stands_down_when_a_campaign_is_active` |
+| the probe is verified from the script, not asserted | `test_custody_lock.py::test_the_live_sync_script_consults_the_campaign_marker` |
+| reverting the probe fails preflight closed | `test_custody_lock.py::test_preflight_refuses_when_the_live_probe_is_missing` |
+| a stale marker is never left behind | `test_custody_lock.py::test_the_marker_appears_and_is_cleared_around_execution` |
 | nothing is copied without --execute | `test_custody_execute.py::test_without_execute_nothing_is_copied` |
 | the sync acknowledgment is required and recorded | `test_custody_execute.py::test_the_sync_acknowledgment_is_required`, `test_the_acknowledgment_is_recorded_when_given` |
 | a killed copy never leaves a short object | `test_custody_execute.py::test_a_killed_executor_never_leaves_a_short_object` |

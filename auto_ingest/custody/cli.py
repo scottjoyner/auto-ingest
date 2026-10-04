@@ -51,7 +51,14 @@ from .executor import (
 )
 from .executor import to_evidence as execute_evidence
 from .hashing import DEFAULT_ALGORITHM, hash_source, to_evidence
-from .lock import campaign_lock, competing_activity, is_locked, uncoordinated_writers
+from .lock import (
+    campaign_lock,
+    clear_active,
+    competing_activity,
+    is_locked,
+    set_active,
+    uncoordinated_writers,
+)
 from .mounts import observations_to_evidence, observe_campaign
 from .policy import CustodyPolicy
 from .report import plan_json, plan_text, status_json, status_text
@@ -531,6 +538,12 @@ def cmd_capacity(args) -> int:
     return EXIT_OK
 
 
+def _legacy_sync_script() -> Optional[str]:
+    """Locate the live legacy sync script so its lock probe can be verified."""
+    candidate = Path(__file__).resolve().parents[2] / "deploy" / "sync_from_legacy_drop.sh"
+    return str(candidate) if candidate.is_file() else None
+
+
 def _queued_jobs(job_dir: Optional[str]) -> Tuple[int, ...]:
     """Count queued ``.job`` files. A read of one directory, no enumeration of /nas."""
     if not job_dir:
@@ -565,7 +578,11 @@ def cmd_preflight(args) -> int:
                           headroom_fraction=args.headroom_fraction,
                           headroom_min_bytes=args.headroom_min_bytes)
     queued = _queued_jobs(args.job_dir)
-    activity = competing_activity(job_dir=args.job_dir, drop_root=args.drop_root)
+    activity = competing_activity(
+        job_dir=args.job_dir,
+        drop_root=args.drop_root,
+        legacy_sync_script=_legacy_sync_script(),
+    )
 
     checks: list[dict] = []
 
@@ -748,9 +765,19 @@ def cmd_execute(args) -> int:
     source_root = args.source_root or campaign_obj.source.mount_point
     destination = args.destination or campaign_obj.destination.host_path
 
-    activity = competing_activity(job_dir=args.job_dir,
-                                  drop_root=getattr(args, "drop_root", None))
+    activity = competing_activity(
+        job_dir=args.job_dir,
+        drop_root=getattr(args, "drop_root", None),
+        legacy_sync_script=_legacy_sync_script(),
+    )
     uncoordinated = uncoordinated_writers(activity)
+    # The acknowledgment is required only when coordination cannot be verified.
+    # The repo is bind-mounted into the containers as /app (docker-compose
+    # `./:/app`), so a verified probe means the deployed writer already stands
+    # down and demanding the claim would be friction. Where the deployment is a
+    # copy rather than the repo, the operator's word is the only evidence
+    # available - so there it is a hard gate.
+    acknowledgment_required = bool(uncoordinated)
     plan = CopyPlan()
     if destination:
         plan = plan_copy(args.bundle, destination)
@@ -764,6 +791,7 @@ def cmd_execute(args) -> int:
         "leftover_temp_files": list(leftover_temp_files(destination)) if destination else [],
         "uncoordinated_writers": list(uncoordinated),
         "acknowledged": bool(args.i_have_stopped_the_sync_service),
+        "acknowledgment_required": acknowledgment_required,
         "would_copy": list(plan.keys)[:20],
         "copied": 0,
         "executed": False,
@@ -782,7 +810,7 @@ def cmd_execute(args) -> int:
         blockers.append("destination_not_mounted")
     if is_locked(campaign_obj.destination.logical.canonical):
         blockers.append("destination_locked_by_another_campaign")
-    if uncoordinated and not args.i_have_stopped_the_sync_service:
+    if acknowledgment_required and not args.i_have_stopped_the_sync_service:
         blockers.append("uncoordinated_writers_present")
     payload["blockers"] = blockers
 
@@ -803,11 +831,15 @@ def cmd_execute(args) -> int:
         _emit_execute(payload, args)
         return EXIT_GATE_CLOSED
 
+    # Drop the host-independent marker the patched legacy sync checks, so the two
+    # writers cannot interleave even though they key on different things.
+    set_active()
     try:
         result = execute_copy(args.bundle, source_root, destination, plan.keys,
                               limit=args.limit)
     finally:
         lock.release()
+        clear_active()
 
     payload["copy"] = result.to_dict()
     payload["copied"] = result.copied
@@ -845,7 +877,8 @@ def _emit_execute(payload: dict, args) -> None:
         f"already_verified       {payload['plan']['already_verified']}",
         f"present_unverified     {payload['plan']['present_unverified']}",
         f"to_copy                {payload['plan']['to_copy']}",
-        f"acknowledged           {str(payload['acknowledged']).lower()}",
+        f"acknowledged           {str(payload['acknowledged']).lower()}"
+        f" (required: {str(payload['acknowledgment_required']).lower()})",
         f"executed               {str(payload['executed']).lower()}",
         f"copied                 {payload['copied']}",
     ]

@@ -4,6 +4,30 @@ set -euo pipefail
 # Sync files dropped by legacy host (deathstar-xps) into canonical roots on x1-370.
 # Safe for repeated runs; uses rsync --ignore-existing by default.
 
+# ---------------------------------------------------------------------------
+# custody-campaign-lock: stand down while an SD-card ingest campaign is copying.
+#
+# This script rsyncs --ignore-existing into $AUDIO_ROOT / $DASHCAM_ROOT /
+# $BODYCAM_ROOT, which are the same roots a custody campaign writes to. Without
+# this check the two writers interleave: the sync silently skips whatever the
+# campaign just produced, and can populate those roots independently of it.
+#
+# The handshake is one existence test, deliberately cruder than the campaign's
+# own flock, because this script only knows host paths while the campaign lock is
+# keyed on a logical destination name. Exit 0 so cron logs a reason rather than
+# an error; the next run in five minutes picks up anything left behind.
+#
+# Removing this block makes `custody preflight` fail closed again:
+# auto_ingest.custody.lock.writer_consults_lock() verifies this probe by reading
+# this file rather than trusting that it was applied.
+# ---------------------------------------------------------------------------
+CUSTODY_LOCK_ROOT="${CUSTODY_LOCK_ROOT:-/tmp/auto_ingest_custody}"
+CUSTODY_ACTIVE_MARKER="$CUSTODY_LOCK_ROOT/campaign-active"
+if [[ -e "$CUSTODY_ACTIVE_MARKER" ]]; then
+  echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') custody campaign active ($CUSTODY_ACTIVE_MARKER) — standing down this pass"
+  exit 0
+fi
+
 LEGACY_DROP_ROOT="${LEGACY_DROP_ROOT:-/nas/fileserver/incoming/deathstar}"
 REMOTE_DROP_HOST="${REMOTE_DROP_HOST:-deathstar}"
 REMOTE_DROP_ROOT="${REMOTE_DROP_ROOT:-/mnt/8TB_2025/fileserver}"

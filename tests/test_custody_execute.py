@@ -91,13 +91,32 @@ def test_without_execute_nothing_is_copied(tmp_path, capsys):
     assert list(dest.iterdir()) == []    # nothing written
 
 
-def test_the_sync_acknowledgment_is_required(tmp_path, capsys):
+def test_the_acknowledgment_is_not_needed_once_the_probe_is_verified(tmp_path, capsys):
+    """The repo is bind-mounted as /app, so a verified probe means the deployed
+    writer already stands down. Demanding the claim here would be friction."""
     bundle, src, dest = build(tmp_path, capsys=capsys)
-    capsys.readouterr()
+    code, out = run_execute(bundle, src, dest, "--execute", "--json", capsys=capsys)
+    payload = json.loads(out)
+    assert payload["acknowledgment_required"] is False
+    assert payload["blockers"] == []
+    assert payload["mode"] == "executed"
+    assert payload["copied"] == 4
+
+
+def test_the_acknowledgment_is_required_when_coordination_is_unverifiable(
+        tmp_path, capsys, monkeypatch):
+    """Where the deployment is a copy, the operator's word is the only evidence."""
+    import auto_ingest.custody.cli as cli_mod
+
+    unpatched = tmp_path / "sync.sh"
+    unpatched.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    monkeypatch.setattr(cli_mod, "_legacy_sync_script", lambda: str(unpatched))
+    bundle, src, dest = build(tmp_path, capsys=capsys)
     code, out = run_execute(bundle, src, dest, "--execute", "--json", capsys=capsys)
     payload = json.loads(out)
     assert code == EXIT_GATE_CLOSED
     assert payload["mode"] == "refused"
+    assert payload["acknowledgment_required"] is True
     assert "uncoordinated_writers_present" in payload["blockers"]
     assert payload["acknowledged"] is False
     assert list(dest.iterdir()) == []
@@ -354,9 +373,11 @@ def test_to_evidence_reports_totals_not_deltas():
 # ---------------------------------------------------------------------------
 # the real CLI
 # ---------------------------------------------------------------------------
-def test_the_real_cli_refuses_without_authorization(tmp_path):
+def test_the_real_cli_copies_nothing_without_execute(tmp_path):
+    """--execute is still mandatory, even now the acknowledgment is not."""
     bundle, src, dest = build(tmp_path, count=3)
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+
     def run(*args):
         return subprocess.run(
             [sys.executable, str(CLI), "custody", *args],
@@ -365,11 +386,10 @@ def test_the_real_cli_refuses_without_authorization(tmp_path):
     run("hash", "--bundle", str(bundle), "--root", str(src), "--apply", "--json")
     proc = run("execute", "--bundle", str(bundle), "--source-root", str(src),
                "--destination", str(dest), "--json")
-    assert proc.returncode == EXIT_GATE_CLOSED
-    assert json.loads(proc.stdout)["executed"] is False
+    payload = json.loads(proc.stdout)
+    assert payload["executed"] is False
+    assert payload["mode"] == "dry_run"
     assert [p.name for p in dest.iterdir()] == []
-
-
 # ---------------------------------------------------------------------------
 # the whole pipeline
 # ---------------------------------------------------------------------------
