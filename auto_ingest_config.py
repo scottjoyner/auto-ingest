@@ -402,23 +402,38 @@ def build_artifact_ref(path: str, storage_root: str = "local-ssd",
     p = os.path.abspath(os.path.expanduser(str(path)))
     rel = p
     container = None
-    # Relative to known roots if under them. Artifact description itself must
-    # remain usable even when one optional storage tier is offline/unconfigured.
-    roots = []
-    try:
-        roots.append(get_fileserver_root())
-    except RuntimeError:
-        pass
     layout = get_storage_layout()
-    for root in (layout.get("hot_root"), layout.get("cold_root"), layout.get("shared_root")):
-        if root and root not in roots:
-            roots.append(root)
-    for root in roots:
-        rp = os.path.relpath(p, root)
-        if not rp.startswith(".."):
-            rel = rp
-            container = "/nas/" + os.path.relpath(p, "/").lstrip("/")
-            break
+
+    # A container /nas path is only valid for bytes that really live beneath
+    # the configured shared namespace. Local SSD/cache paths may be useful
+    # provenance addresses, but inventing a /nas alias for them is path fiction.
+    shared_root = layout.get("shared_root")
+    if shared_root:
+        shared = os.path.abspath(os.path.expanduser(str(shared_root)))
+        try:
+            shared_rel = os.path.relpath(p, shared)
+            if shared_rel == "." or not shared_rel.startswith(".."):
+                rel = "" if shared_rel == "." else shared_rel
+                container = "/nas" if not rel else "/nas/" + rel
+        except ValueError:
+            pass
+
+    # For host-local tiers retain a useful relative path, but no container path
+    # unless an explicit container mount contract is added for that tier.
+    if container is None:
+        roots = []
+        try:
+            roots.append(get_fileserver_root())
+        except RuntimeError:
+            pass
+        for root in (layout.get("hot_root"), layout.get("cold_root")):
+            if root and root != shared_root and root not in roots:
+                roots.append(root)
+        for root in roots:
+            rp = os.path.relpath(p, root)
+            if rp == "." or not rp.startswith(".."):
+                rel = "" if rp == "." else rp
+                break
     return {
         "storage_root": storage_root,
         "relative_path": rel,

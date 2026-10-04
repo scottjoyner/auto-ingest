@@ -158,6 +158,24 @@ def test_container_profiles_use_nas_namespace(filename):
         assert path.startswith("/nas"), (filename, path)
 
 
+def test_shared_artifact_ref_uses_single_nas_prefix(tmp_path, monkeypatch):
+    import auto_ingest_config as cfg
+
+    shared, fileserver = _prepare_roots(tmp_path)
+    artifact = shared / "archive" / "dashcam" / "clip.mp4"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"test")
+    config = _write_config(tmp_path, shared=shared, fileserver=fileserver)
+    monkeypatch.setattr(cfg, "_find_config_path", lambda: config)
+    monkeypatch.setattr(cfg.socket, "gethostname", lambda: "x1-370")
+    monkeypatch.delenv("NAS_ROOT", raising=False)
+
+    ref = cfg.build_artifact_ref(str(artifact), storage_root="nas")
+    assert ref["relative_path"] == "archive/dashcam/clip.mp4"
+    assert ref["container_path"] == "/nas/archive/dashcam/clip.mp4"
+    assert "/nas/nas/" not in ref["container_path"]
+
+
 def test_package_shim_exports_shared_resolvers():
     from auto_ingest import _config
 
