@@ -215,6 +215,10 @@ class CopyEvidence:
     ledger_complete: bool = False
     error_summary: Tuple[str, ...] = ()
     last_checkpoint: Optional[str] = None
+    #: Uncoordinated writers the operator explicitly acknowledged standing down
+    #: before this copy ran. Recorded because it is a human decision that no
+    #: command can make on the operator's behalf.
+    acknowledged_uncoordinated_writers: Tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any], limit: int,
@@ -230,10 +234,14 @@ class CopyEvidence:
             ledger_complete=_bool(raw.get("ledger_complete")),
             error_summary=_bounded(raw.get("error_summary"), limit),
             last_checkpoint=_opt_str(raw.get("last_checkpoint")),
+            acknowledged_uncoordinated_writers=_bounded(
+                raw.get("acknowledged_uncoordinated_writers"), limit),
         )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "acknowledged_uncoordinated_writers": list(
+                self.acknowledged_uncoordinated_writers),
             "completed": self.completed.to_dict(),
             "error_summary": list(self.error_summary),
             "interrupted": self.interrupted,

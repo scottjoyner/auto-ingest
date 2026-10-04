@@ -154,13 +154,31 @@ def test_no_udev_or_watcher_triggers_are_added_by_this_slice():
         assert path.suffix not in forbidden_suffixes, path
 
 
-def test_the_only_writes_are_the_two_explicitly_authorized_commands():
-    """`store.py` is the only module that writes, and only behind an `apply` flag."""
+def test_exactly_four_modules_write_and_nothing_else():
+    """store (evidence), executor (bytes), hashing + verify (their ledgers)."""
     writers = {
         path.name for path in _module_paths()
         if "os.replace(" in _source(path) or '"w", encoding' in _source(path)
+        or '"a", encoding' in _source(path) or '"xb"' in _source(path)
     }
-    assert writers == {"store.py"}
+    assert writers == {"store.py", "executor.py", "hashing.py", "verify.py"}, writers
+
+    # hashing and verify append only inside their own bundle's ledgers dir
+    for name in ("hashing.py", "verify.py"):
+        text = _source(CUSTODY_DIR / name)
+        assert "ledger_dir(" in text, name
+        for banned in ("os.remove", "os.rmdir", "shutil", "subprocess"):
+            assert banned not in text, f"{name} references {banned}"
+
+
+def test_the_executor_has_no_bulk_delete_primitive():
+    """It may clean up its own temp file; it must have no way to remove a tree."""
+    executor = _source(CUSTODY_DIR / "executor.py")
+    for banned in ("shutil", "os.rmdir", "os.removedirs", "rmtree",
+                   "os.chmod", "os.truncate"):
+        assert banned not in executor, banned
+    assert 'source.open("rb")' in executor
+    assert "TEMP_DIRNAME" in executor
 
     source = _source(CUSTODY_DIR / "store.py")
     # every write goes through the single atomic helper

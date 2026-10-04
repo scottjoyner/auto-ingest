@@ -12,6 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from custody_helpers import (
     CARD_01_BUNDLE,
     campaign,
@@ -33,6 +34,7 @@ from auto_ingest.custody.mounts import (
     MountObservation,
     observe_campaign,
     observe_mount,
+    observe_storage_identity,
     read_mounts,
 )
 
@@ -122,6 +124,59 @@ def test_observation_compares_against_a_declaration():
     assert rw.agrees_with(True) is False
     assert ro.agrees_with(None) is None       # unknown declaration
     assert gone.agrees_with(True) is None     # unknown observation
+
+
+def test_storage_identity_comes_from_by_uuid_not_blkid(tmp_path):
+    """A real UUID, resolved by reading symlinks - no subprocess, no tool."""
+    by_uuid = tmp_path / "by-uuid"
+    by_uuid.mkdir()
+    device = tmp_path / "dev" / "sdb1"
+    device.parent.mkdir()
+    device.write_bytes(b"")
+    (by_uuid / "ABCD-1234").symlink_to(device)
+
+    observation = MountObservation("/mnt/card", present=True, device=str(device),
+                                  filesystem_type="ext4")
+    identity = observe_storage_identity(observation, by_uuid_dir=by_uuid)
+    assert identity is not None
+    assert identity.filesystem_uuid == "ABCD-1234"
+    assert identity.filesystem_type == "ext4"
+    # size_bytes is left unset: a stat of the mount root is its contents, not
+    # its capacity, so filling it in would be a fabrication
+    assert identity.size_bytes is None
+
+
+def test_a_device_without_a_uuid_reports_none(tmp_path):
+    by_uuid = tmp_path / "by-uuid"
+    by_uuid.mkdir()
+    device = tmp_path / "sdb1"
+    device.write_bytes(b"")
+    observation = MountObservation("/mnt/card", present=True, device=str(device))
+    identity = observe_storage_identity(observation, by_uuid_dir=by_uuid)
+    assert identity is not None
+    assert identity.filesystem_uuid is None
+
+
+def test_an_absent_mount_has_no_identity(tmp_path):
+    absent = MountObservation("/mnt/gone", present=False)
+    assert observe_storage_identity(absent, by_uuid_dir=tmp_path) is None
+
+
+def test_a_missing_by_uuid_directory_is_tolerated(tmp_path):
+    device = tmp_path / "sdb1"
+    device.write_bytes(b"")
+    observation = MountObservation("/mnt/card", present=True, device=str(device))
+    identity = observe_storage_identity(observation, by_uuid_dir=tmp_path / "nope")
+    assert identity is not None and identity.filesystem_uuid is None
+
+
+def test_the_real_sd_card_uuid_is_observable():
+    """Not a fixture-only capability: the real card resolves here."""
+    identity = observe_storage_identity(observe_mount("/media/scott/UNTITLED"))
+    if identity is None:
+        pytest.skip("card not mounted on this host")
+    assert identity.filesystem_uuid
+    assert identity.device
 
 
 def test_observe_campaign_covers_both_ends(tmp_path):
@@ -355,18 +410,47 @@ sys.addaudithook(hook)
 bundle = %(bundle)r
 camp = load_campaign(bundle)
 ev = load_evidence(bundle)
+def _relevant(parts):
+    mounts_report = parts[1]
+    return [mounts_report["source"]["observation"],
+            mounts_report["destination"]["observation"],
+            parts[2], parts[3], parts[4]]
+
 first = [read_mounts(), observe_campaign(camp), capacity_report(camp, ev),
          check_capacity("/tmp", 1), load_status(bundle).to_dict()]
 second = [read_mounts(), observe_campaign(camp), capacity_report(camp, ev),
           check_capacity("/tmp", 1), load_status(bundle).to_dict()]
-print(json.dumps({
-    "events": events,
-    "identical": _mounts(first[0]) == _mounts(second[0])
-                 and first[1]["source"]["observed_read_only"] == second[1]["source"]["observed_read_only"]
-                 and first[2].to_dict() == second[2].to_dict()
-                 and first[3].to_dict() == second[3].to_dict()
-                 and first[4] == second[4],
-}))
+def _as_jsonable(value):
+    # dataclass reprs carry memory addresses, so unwrap before comparing
+    import dataclasses
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return dataclasses.asdict(value)
+    return str(value)
+
+
+def _stable(value):
+    # Free-space readings are environment, not input, so they are excluded.
+    if isinstance(value, dict):
+        return {k: _stable(v) for k, v in value.items()
+                if k not in ("available_bytes", "total_bytes")}
+    if isinstance(value, (list, tuple)):
+        return [_stable(v) for v in value]
+    if hasattr(value, "to_dict"):
+        return _stable(value.to_dict())
+    return value
+
+# The WHOLE mount table is not the determinism property: this host has an
+# autofs CIFS mount with x-systemd.idle-timeout=600, so unrelated mounts can
+# appear or vanish between two reads. What must be stable is the campaign's own
+# mount points, which is what observe_campaign reports.
+diffs = []
+for name, x, y in zip(
+        ["source_observation", "destination_observation", "capacity_report",
+         "check_capacity", "status"], _relevant(first), _relevant(second)):
+    if json.dumps(_stable(x), default=_as_jsonable, sort_keys=True) \
+            != json.dumps(_stable(y), default=_as_jsonable, sort_keys=True):
+        diffs.append(name)
+print(json.dumps({"events": events, "diffs": diffs}))
 """
 
 MUTATING_EVENTS = (
@@ -391,7 +475,7 @@ def test_the_observers_emit_no_mutating_syscall():
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout.strip().splitlines()[-1])
     assert result["events"] == [], result["events"]
-    assert result["identical"] is True
+    assert result["diffs"] == [], result["diffs"]
 
 
 def test_observers_are_clock_free_and_deterministic():
@@ -411,15 +495,19 @@ def test_observers_never_touch_the_source_filesystem():
     from auto_ingest.custody import mounts
 
     tree = ast.parse(inspect.getsource(mounts))
-    opened = []
+    opened = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if name in {"open", "listdir", "iterdir", "walk", "stat", "scandir"}:
-                opened.append(name)
-    # read_mounts opens exactly one thing: procfs.
-    assert set(opened) <= {"open", "stat"}, opened
+            if name in {"open", "listdir", "iterdir", "walk", "stat", "scandir",
+                        "readlink"}:
+                opened.add(name)
+    # Only reads of procfs, by-uuid symlinks, and stat(). Never the card itself.
+    assert opened <= {"open", "stat", "iterdir", "readlink"}, opened
     assert mounts.MOUNTS_PATH == "/proc/mounts"
+    assert mounts.BY_UUID_DIR == "/dev/disk/by-uuid"
+    # nothing enumerates a tree or resolves a realpath outside those two roots
+    assert "os.walk" not in inspect.getsource(mounts)
     for banned in ("os.remove", "os.rename", "os.mkdir", "os.rmdir", "os.link"):
         assert banned not in inspect.getsource(mounts)

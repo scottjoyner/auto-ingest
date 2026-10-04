@@ -43,7 +43,7 @@ def test_parser_exposes_the_documented_subcommands():
     sub = [a for a in parser._subparsers._group_actions if hasattr(a, "choices")][0]
     assert set(sub.choices) == {
         "status", "plan", "verify", "import", "new", "reconcile",
-        "observe-mount", "capacity", "preflight", "hash",
+        "observe-mount", "capacity", "preflight", "hash", "execute",
     }
 
 

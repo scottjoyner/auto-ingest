@@ -409,6 +409,81 @@ Locks are advisory — they coordinate software that agrees to take them. A cras
 executor releases on the way out, and `is_locked()` needs no custody import, so
 the eventual `sync_from_legacy_drop.sh` change can be a single `flock -n` probe.
 
+### Phase D: `custody execute` - the authorized copy
+
+The only command in the package that writes bytes to the destination. Narrow on
+purpose.
+
+```bash
+# show the plan; copy nothing
+auto-ingest custody execute --bundle PATH --source-root DIR --destination DIR \
+  --i-have-stopped-the-sync-service --json
+
+# the authorized run
+auto-ingest custody execute ... --execute --i-have-stopped-the-sync-service --apply
+```
+
+**Two independent gates.** `--execute` is required or nothing is copied, and
+`--i-have-stopped-the-sync-service` must be typed to acknowledge the uncoordinated
+writers. That acknowledgment is *recorded* in
+`copy.acknowledged_uncoordinated_writers` rather than assumed — it is a human
+decision, and no command can make it on an operator's behalf. Exit codes: `0`
+means no blockers (with `--execute` absent, the plan is executable and nothing was
+copied); `3` means refused, and `blockers` says why.
+
+**The plan is derived from the ledgers, in three buckets:**
+
+| bucket | action |
+| --- | --- |
+| already verified at the destination | nothing |
+| present but unattested | `custody verify`, **not** a copy |
+| genuinely absent | copy |
+
+So the 7,000-objects case from §6 cannot turn into 7,000 wasted copies.
+
+**Atomicity is the load-bearing property.** Each object is written to
+`<dest>/.custody-tmp/`, fsynced, then `os.replace`d into place. A killed
+executor therefore leaves a temp file and **never a half-written object under a
+real name** — which is what makes a later `verify` meaningful, and the direct
+opposite of `--ignore-existing`. Verified by `SIGKILL`ing a real 384 MiB copy
+mid-flight: 20 of 24 objects complete, 1 leftover temp, **0 short real objects**.
+
+Other guarantees, each tested:
+
+* **Never overwrites.** An existing destination object is left byte-identical and
+  recorded as `skipped`; verification decides. This is what protects a good copy
+  from being clobbered by a second run.
+* **Never deletes.** No `rmtree`, no `rmdir`, no `os.remove`. An unrelated file
+  the operator put at the destination survives.
+* **Never touches the source.** Opened `rb` and only read; mtime, size and mode
+  are asserted unchanged after a full run.
+* **Never escapes the destination.** A ledger key containing `../` or an absolute
+  path is refused rather than trusted — keys come from a file on disk.
+* **Never copies what is not in the plan.** An unhashed file on the card is not in
+  the ledger, so it is not copied.
+* **The recorded digest is of the bytes actually written**, computed while
+  streaming, so "copied" means "these bytes were produced and hashed".
+
+`copy.result_complete` / `copy.ledger_complete` come from here and nowhere else —
+`custody verify` can prove bytes are correct, but only an executor can attest that
+a *copy happened*. That is precisely why release stayed shut through Phases B
+and B2.
+
+#### The pipeline now closes
+
+```
+hash -> observe-mount -> execute -> verify
+  state: HASH_COMPLETE -> COPY_COMPLETE -> VERIFIED -> SAFE_TO_RELEASE
+  hash verified 5, copy complete, destination verified 5 / 10240 bytes
+  source_release_allowed: true    blockers: none
+```
+
+Two tests pin this end state: the capstone above, and
+`test_a_missing_digest_keeps_release_closed`, which proves the *same* verified
+bytes on a *different* storage identity yield `BLOCKED` with
+`destination_identity_conflict` — proven custody of the wrong volume is not
+custody.
+
 ### Import merges; it never replaces
 
 `custody import` overlays the incoming document **field by field**. What the
@@ -848,6 +923,16 @@ authorizes execution explicitly.
 | a lock is released even when the holder crashes | `test_custody_lock.py::test_lock_releases_on_exception` |
 | a lock held by another process is seen | `test_custody_lock.py::test_a_lock_held_by_another_process_is_detected` |
 | preflight refuses on the uncoordinated writer | `test_custody_lock.py::test_preflight_refuses_on_the_uncoordinated_writer` |
+| nothing is copied without --execute | `test_custody_execute.py::test_without_execute_nothing_is_copied` |
+| the sync acknowledgment is required and recorded | `test_custody_execute.py::test_the_sync_acknowledgment_is_required`, `test_the_acknowledgment_is_recorded_when_given` |
+| a killed copy never leaves a short object | `test_custody_execute.py::test_a_killed_executor_never_leaves_a_short_object` |
+| an existing destination object is never overwritten | `test_custody_execute.py::test_an_existing_destination_object_is_never_overwritten` |
+| present-but-unverified is verified, not re-copied | `test_custody_execute.py::test_present_unverified_objects_are_verified_not_recopied` |
+| a key cannot escape the destination | `test_custody_execute.py::test_a_key_escaping_the_destination_is_refused` |
+| the source is never modified | `test_custody_execute.py::test_the_source_is_never_modified` |
+| nothing is deleted at the destination | `test_custody_execute.py::test_nothing_is_deleted_at_the_destination` |
+| the full pipeline reaches SAFE_TO_RELEASE | `test_custody_execute.py::test_a_fully_executed_and_verified_campaign_is_safe_to_release` |
+| custody of the wrong volume does not release | `test_custody_execute.py::test_a_missing_digest_keeps_release_closed` |
 | a digest-less record is never custody | `test_custody_reconcile.py::test_a_record_without_a_digest_never_counts_as_custody` |
 | reconciliation cannot prove destination identity | `test_custody_reconcile.py::test_reconciliation_alone_cannot_prove_destination_identity` |
 | machine and gate agree on the required scope | `test_custody_state_machine.py::test_machine_and_gate_agree_on_the_required_count` |

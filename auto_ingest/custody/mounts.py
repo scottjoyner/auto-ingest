@@ -24,7 +24,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from .destination import StorageIdentity
+
 MOUNTS_PATH = "/proc/mounts"
+
+#: Symlinks named by filesystem UUID. Read for storage identity; never written.
+BY_UUID_DIR = "/dev/disk/by-uuid"
 
 #: Mount options we surface; everything else on the line is left alone.
 _RELEVANT_OPTIONS = ("ro", "rw", "relatime", "noatime", "nosuid", "nodev", "noexec")
@@ -155,6 +160,59 @@ def observe_mount(
     return MountObservation(mount_point=mount_point, present=False)
 
 
+def uuid_for_device(device: Optional[str], by_uuid_dir: str | Path = BY_UUID_DIR) -> Optional[str]:
+    """Find the filesystem UUID for a block device, without running ``blkid``.
+
+    ``/dev/disk/by-uuid`` is a directory of symlinks named by UUID, pointing at
+    the block device. Reading those symlinks is a few ``readlink`` calls: no
+    subprocess, no privileged tool, no mount inspection beyond what we already
+    read. Returns ``None`` when the device carries no UUID (some filesystems and
+    most network mounts), which is the honest answer.
+    """
+    if not device:
+        return None
+    base = Path(by_uuid_dir)
+    if not base.is_dir():
+        return None
+    try:
+        target = os.path.realpath(str(device))
+    except OSError:  # pragma: no cover
+        return None
+    try:
+        entries = sorted(base.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        try:
+            if os.path.realpath(str(entry)) == target:
+                return entry.name
+        except OSError:  # pragma: no cover
+            continue
+    return None
+
+
+def observe_storage_identity(
+    observation: MountObservation,
+    *,
+    by_uuid_dir: str | Path = BY_UUID_DIR,
+) -> Optional[StorageIdentity]:
+    """Build a :class:`StorageIdentity` from an observed mount, if possible.
+
+    Combines the kernel's own view (device, filesystem type, mount options) with
+    the UUID resolved from ``/dev/disk/by-uuid``. ``size_bytes`` is left unset: a
+    stat of the mount root is the filesystem's *contents*, not its capacity, so
+    filling it in would be a fabrication.
+    """
+    if not observation.present or not observation.device:
+        return None
+    return StorageIdentity(
+        filesystem_uuid=uuid_for_device(observation.device, by_uuid_dir),
+        device=observation.device,
+        filesystem_type=observation.filesystem_type,
+        observed_at=None,
+    )
+
+
 def observe_campaign(
     campaign: Any,
     *,
@@ -179,6 +237,8 @@ def observe_campaign(
         "destination": {
             "declared_mounted": campaign.destination.mounted,
             "host_path": dest_path,
+            "identity": (identity.to_dict()
+                         if (identity := observe_storage_identity(destination)) else None),
             "observation": destination.to_dict(),
             "observed_mounted": destination.present,
         },
@@ -193,25 +253,32 @@ def observe_campaign(
 
 
 def observations_to_evidence(report: Mapping[str, Any]) -> Dict[str, Any]:
-    """The evidence fragment an observed mount should contribute, if any.
+    """The evidence fragment an observed mount should contribute.
 
     Only *observations* are recorded. The declared fields are left untouched, so
     merging this cannot quietly turn an unverified claim into a verified fact -
     which is why ``store.import_evidence`` never auto-applies it.
+
+    The destination identity is the important one: without an observed identity
+    the release gate stays closed on ``destination_identity_unproven``, so this is
+    what turns "the bytes are right" into "the bytes are on the storage we meant".
     """
     destination = report.get("destination") or {}
     fragment: Dict[str, Any] = {}
-    identity = (destination.get("observation") or {}).get("filesystem_type")
+    identity = destination.get("identity")
     if identity:
-        fragment.setdefault("destination", {})["observed_filesystem_type"] = identity
+        fragment["destination"] = {"observed_identity": identity}
     return fragment
 
 
 __all__ = [
+    "BY_UUID_DIR",
     "MOUNTS_PATH",
     "MountObservation",
     "observe_campaign",
     "observe_mount",
+    "observe_storage_identity",
     "observations_to_evidence",
+    "uuid_for_device",
     "read_mounts",
 ]

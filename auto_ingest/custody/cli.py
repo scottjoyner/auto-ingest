@@ -43,9 +43,16 @@ from .capacity import (
     DEFAULT_HEADROOM_MIN_BYTES,
     capacity_report,
 )
+from .executor import (
+    CopyPlan,
+    execute_copy,
+    leftover_temp_files,
+    plan_copy,
+)
+from .executor import to_evidence as execute_evidence
 from .hashing import DEFAULT_ALGORITHM, hash_source, to_evidence
-from .lock import competing_activity, is_locked, uncoordinated_writers
-from .mounts import observe_campaign
+from .lock import campaign_lock, competing_activity, is_locked, uncoordinated_writers
+from .mounts import observations_to_evidence, observe_campaign
 from .policy import CustodyPolicy
 from .report import plan_json, plan_text, status_json, status_text
 from .store import (
@@ -170,6 +177,29 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--algorithm", default=DEFAULT_ALGORITHM)
     ph.add_argument("--apply", action="store_true",
                     help="record the result as campaign evidence")
+
+    pe = common(sub.add_parser(
+        "execute",
+        help="Copy the planned objects to the destination (AUTHORIZED)."),
+        observed=False)
+    pe.add_argument("--source-root", default=None,
+                    help="source root the hash ledger keys are relative to "
+                         "(default: the campaign's mount point)")
+    pe.add_argument("--destination", default=None,
+                    help="destination root (default: the campaign's host path)")
+    pe.add_argument("--execute", action="store_true",
+                    help="REQUIRED: without it nothing is copied (dry run)")
+    pe.add_argument("--limit", type=int, default=None,
+                    help="stop after N objects (a bounded first pass)")
+    pe.add_argument("--apply", action="store_true",
+                    help="record the result as campaign evidence")
+    pe.add_argument("--i-have-stopped-the-sync-service", action="store_true",
+                    help="required acknowledgment: sync-service and ingest.crontab "
+                         "rsync into the same roots without taking the campaign lock")
+    pe.add_argument("--job-dir", default=None,
+                    help="directory of .job files whose presence means work is queued")
+    pe.add_argument("--drop-root", default=None,
+                    help="ingest-worker DROP_ROOT, to check for claimed work")
 
     pn = sub.add_parser("new", help="Create a campaign record for observed card hardware.")
     pn.add_argument("--bundle", required=True, help="campaign bundle directory to create")
@@ -401,11 +431,20 @@ def cmd_observe_mount(args) -> int:
     }
     if args.apply:
         campaign_path = Path(args.bundle) / "campaign.json"
-        _record_observed_read_only(campaign_path, source)
+        _record_observations(campaign_path, source, report["destination"])
         payload["applied"] = True
+        # The gate compares evidence.destination.observed_identity against the
+        # campaign's declared identity, so the observation has to land in
+        # *evidence* too - recording it only on the campaign left the gate with
+        # nothing to compare and it closed forever on identity_unproven.
+        fragment = observations_to_evidence(report)
+        if fragment:
+            applied = import_evidence(args.bundle, fragment, policy, apply=True)
+            payload["evidence_result"] = applied
     if args.json:
         print(json.dumps(payload, sort_keys=True, indent=2, default=str))
     else:
+        dest_identity = report["destination"].get("identity") or {}
         lines = [
             f"campaign_id                {report['campaign_id']}",
             f"source_mount_point         {source['mount_point']}",
@@ -418,6 +457,7 @@ def cmd_observe_mount(args) -> int:
             f"{str(report['destination']['observed_mounted']).lower()}",
             f"destination_filesystem     "
             f"{report['destination']['observation']['filesystem_type']}",
+            f"destination_uuid           {dest_identity.get('filesystem_uuid') or 'UNKNOWN'}",
             f"applied                    {str(payload['applied']).lower()}",
         ]
         if source["observed_read_only"] is False:
@@ -435,12 +475,16 @@ def cmd_observe_mount(args) -> int:
     return EXIT_OK
 
 
-def _record_observed_read_only(campaign_path: Path, source: dict) -> None:
-    """Stamp the observation next to the declaration, never over it.
+def _record_observations(campaign_path: Path, source: dict, destination: dict) -> None:
+    """Stamp observations next to the declarations, never over them.
 
-    The declaration survives untouched, because the two are different claims: one
-    is what the bundle asserts, the other is what the kernel reports. Only a
-    human can resolve a disagreement between them.
+    The declarations survive untouched, because the two are different claims: one
+    is what the bundle asserts, the other is what the kernel reports. Only a human
+    resolves a disagreement between them.
+
+    The destination identity is recorded as evidence rather than as the campaign's
+    expected identity: a mismatch is a fact to surface, not a value to silently
+    overwrite so the gate can pass.
     """
     raw = json.loads(campaign_path.read_text(encoding="utf-8"))
     src = raw.setdefault("source", {})
@@ -448,6 +492,10 @@ def _record_observed_read_only(campaign_path: Path, source: dict) -> None:
     src["read_only_agrees_with_declaration"] = source[
         "read_only_agrees_with_declaration"
     ]
+    identity = destination.get("identity")
+    if identity:
+        fragment = observations_to_evidence({"destination": destination})
+        raw.setdefault("evidence_observations", {}).update(fragment)
     _write_json_atomic(campaign_path, raw)
 
 
@@ -670,6 +718,161 @@ def cmd_hash(args) -> int:
     return EXIT_OK
 
 
+def cmd_execute(args) -> int:
+    """Copy exactly the planned objects. Dry-run unless --execute is given.
+
+    This is the only command in the package that writes bytes to the
+    destination. Two independent gates must both be satisfied:
+
+    1. ``--execute`` - without it nothing is copied, and the plan is only shown;
+    2. ``--i-have-stopped-the-sync-service`` - an explicit, recorded
+       acknowledgment that the uncoordinated writers are stood down.
+
+    Exit codes: 0 means "no blockers" - with ``--execute`` absent that means the
+    plan is executable and nothing was copied; 3 means refused, and the payload's
+    ``blockers`` says why. ``mode`` and ``executed`` distinguish a dry run from a
+    refusal without overloading the exit status.
+
+    The acknowledgment is deliberately not a silent default. `sync-service` and
+    `ingest.crontab:5` rsync `--ignore-existing` into the same roots without
+    taking the campaign lock, so this is a human decision, and it is written into
+    the campaign evidence rather than being assumed.
+    """
+    policy = _policy_from_file(getattr(args, "policy_file", None))
+    if policy is None:
+        policy = load_policy(load_custody_config())
+    campaign_obj = load_campaign(args.bundle)
+    status = load_status(args.bundle, policy)
+    mounts = observe_campaign(campaign_obj)
+
+    source_root = args.source_root or campaign_obj.source.mount_point
+    destination = args.destination or campaign_obj.destination.host_path
+
+    activity = competing_activity(job_dir=args.job_dir,
+                                  drop_root=getattr(args, "drop_root", None))
+    uncoordinated = uncoordinated_writers(activity)
+    plan = CopyPlan()
+    if destination:
+        plan = plan_copy(args.bundle, destination)
+
+    payload = {
+        "campaign_id": campaign_obj.campaign_id,
+        "state": status.derivation.state.value,
+        "source_root": source_root,
+        "destination_root": destination,
+        "plan": plan.to_dict(),
+        "leftover_temp_files": list(leftover_temp_files(destination)) if destination else [],
+        "uncoordinated_writers": list(uncoordinated),
+        "acknowledged": bool(args.i_have_stopped_the_sync_service),
+        "would_copy": list(plan.keys)[:20],
+        "copied": 0,
+        "executed": False,
+        "applied": False,
+    }
+
+    blockers = []
+    if not source_root:
+        blockers.append("source_root_unresolved")
+    if not destination:
+        blockers.append("destination_unresolved")
+    observed_ro = mounts["source"]["observed_read_only"]
+    if observed_ro is not True:
+        blockers.append("source_not_observed_read_only")
+    if campaign_obj.destination.identity is not None and not campaign_obj.destination.mounted:
+        blockers.append("destination_not_mounted")
+    if is_locked(campaign_obj.destination.logical.canonical):
+        blockers.append("destination_locked_by_another_campaign")
+    if uncoordinated and not args.i_have_stopped_the_sync_service:
+        blockers.append("uncoordinated_writers_present")
+    payload["blockers"] = blockers
+
+    if not args.execute:
+        payload["mode"] = "dry_run"
+        _emit_execute(payload, args)
+        return EXIT_GATE_CLOSED if blockers else EXIT_OK
+
+    if blockers:
+        payload["mode"] = "refused"
+        _emit_execute(payload, args)
+        return EXIT_GATE_CLOSED
+
+    lock = campaign_lock(campaign_obj.destination.logical.canonical)
+    if not lock.acquire():
+        payload["blockers"].append("destination_locked_by_another_campaign")
+        payload["mode"] = "refused"
+        _emit_execute(payload, args)
+        return EXIT_GATE_CLOSED
+
+    try:
+        result = execute_copy(args.bundle, source_root, destination, plan.keys,
+                              limit=args.limit)
+    finally:
+        lock.release()
+
+    payload["copy"] = result.to_dict()
+    payload["copied"] = result.copied
+    payload["executed"] = True
+    payload["mode"] = "executed"
+    payload["source_release_allowed"] = False
+    if args.apply:
+        fragment = execute_evidence(result, plan=plan)
+        fragment["copy"]["acknowledged_uncoordinated_writers"] = list(uncoordinated)
+        applied = import_evidence(args.bundle, fragment, policy, apply=True)
+        payload["applied"] = bool(applied.get("applied"))
+        payload["evidence_result"] = applied
+        after = load_status(args.bundle, policy)
+        payload["state_after"] = after.derivation.state.value
+        payload["source_release_allowed_after"] = after.source_release_allowed
+        payload["next_safe_action_after"] = after.next_safe_action
+        payload["next_phase_after"] = after.next_phase
+    _emit_execute(payload, args)
+    if result.failed:
+        return EXIT_GATE_CLOSED
+    return EXIT_OK
+
+
+def _emit_execute(payload: dict, args) -> None:
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, indent=2, default=str))
+        return
+    lines = [
+        f"campaign_id            {payload['campaign_id']}",
+        f"state                  {payload['state']}",
+        f"source_root            {payload['source_root']}",
+        f"destination_root       {payload['destination_root']}",
+        f"mode                   {payload['mode']}",
+        f"total_objects          {payload['plan']['total_objects']}",
+        f"already_verified       {payload['plan']['already_verified']}",
+        f"present_unverified     {payload['plan']['present_unverified']}",
+        f"to_copy                {payload['plan']['to_copy']}",
+        f"acknowledged           {str(payload['acknowledged']).lower()}",
+        f"executed               {str(payload['executed']).lower()}",
+        f"copied                 {payload['copied']}",
+    ]
+    if payload.get("leftover_temp_files"):
+        lines.append("  leftover temp files   "
+                     + ", ".join(payload["leftover_temp_files"][:5]))
+    if payload["blockers"]:
+        lines.append("  BLOCKED               " + ", ".join(payload["blockers"]))
+    copy_result = payload.get("copy")
+    if copy_result:
+        lines += [
+            f"  copied_bytes         {copy_result['copied_bytes']}",
+            f"  skipped_present      {copy_result['skipped_present']}",
+            f"  failed               {copy_result['failed']}",
+            f"  copy_complete        {str(copy_result['complete']).lower()}",
+        ]
+        for err in copy_result["errors"][:5]:
+            lines.append(f"    error              {err}")
+    if payload.get("applied"):
+        lines += [
+            f"state_after            {payload['state_after']}",
+            f"next_safe_action       {payload['next_safe_action_after']}",
+            f"source_release_allowed {str(payload['source_release_allowed_after']).lower()}",
+        ]
+    sys.stdout.write("\n".join(lines) + "\n")
+
+
 def cmd_new(args) -> int:
     """Create a campaign record for observed card hardware. Explicitly authorized."""
     observed = CardIdentity(
@@ -779,6 +982,7 @@ _HANDLERS = {
     "capacity": cmd_capacity,
     "preflight": cmd_preflight,
     "hash": cmd_hash,
+    "execute": cmd_execute,
 }
 
 
