@@ -44,7 +44,15 @@ from .policy import CustodyPolicy
 from .release import Blocker, evaluate_release
 from .states import NEXT_SAFE_ACTION, STATE_PHASE, CampaignState
 
-#: The planner's only capability ceiling. Nothing here may ever raise these.
+#: The planner's own capability ceiling. Nothing here may ever raise these.
+#: Unchanged, and deliberately so: the planner *describes*, so it still cannot
+#: delete. The package does now have a gated, default-off deletion capability, but
+#: it lives in exactly one place - auto_ingest.custody.release_source - and the
+#: plan this module returns emits no action that reaches it. Reporting
+#: `source_deletion_allowed: true` here would claim a capability the planner does
+#: not exercise, and `plan_fingerprint` is a digest of actions this module never
+#: produces. Deletion stays `requires_operator_authorization` + release-gated +
+#: off by default, enforced where it is performed.
 SOURCE_MUTATION_ALLOWED = False
 SOURCE_DELETION_ALLOWED = False
 
