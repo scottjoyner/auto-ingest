@@ -28,7 +28,7 @@ Auto-Ingest is a containerized pipeline that ingests dashcam, audio, and bodycam
                      +------------------+     +-----------------+
 
 Data Flow:
-  Source Files -> Sync -> /nas/fileserver/{audio,dashcam,bodycam}
+  Source Files -> Sync -> /nas/{audio,dashcam,bodycam}
                         -> Ingest -> Neo4j (PhoneLog, DashcamEmbedding, Frame, etc.)
                         -> Content OS (for content creation workflow)
 ```
@@ -60,8 +60,8 @@ Data Flow:
 ### 4. Sync Service (sync-service)
 - **Purpose**: Syncs legacy drop from deathstar into canonical roots
 - **Poll interval**: Every 10 minutes
-- **Source**: `/nas/fileserver/incoming/deathstar/{audio,dashcam,bodycam,transcripts,yolo,metadata}`
-- **Destination**: `/nas/fileserver/{audio,dashcam,bodycam,transcriptions,yolo,metadata}`
+- **Source**: `/nas/incoming/deathstar/{audio,dashcam,bodycam,transcripts,yolo,metadata}`
+- **Destination**: `/nas/{audio,dashcam,bodycam,transcriptions,yolo,metadata}`
 - **Key files**: `deploy/sync_from_legacy_drop.sh`
 
 ### 5. Content Service (content-service)
@@ -129,15 +129,15 @@ Data Flow:
 #!/usr/bin/env bash
 set -euo pipefail
 cd /app
-SCAN_ROOTS="/nas/fileserver/dashcam" DASHCAM_ROOT="/nas/fileserver/dashcam" /usr/bin/env bash run_ingest_all.sh
+SCAN_ROOTS="/nas/dashcam" DASHCAM_ROOT="/nas/dashcam" /usr/bin/env bash run_ingest_all.sh
 ```
 
 ### Job Types
 | Kind | Description | Default SCAN_ROOTS |
 |------|-------------|-------------------|
-| `audio` | Audio transcription ingest | `/nas/S/audio,/nas/fileserver/audio/transcriptions` |
-| `dashcam` | Dashcam video ingest | `/nas/fileserver/dashcam` |
-| `bodycam` | Bodycam video ingest | `/nas/fileserver/bodycam` |
+| `audio` | Audio transcription ingest | `/nas/audio,/nas/audio/transcriptions` |
+| `dashcam` | Dashcam video ingest | `/nas/dashcam` |
+| `bodycam` | Bodycam video ingest | `/nas/bodycam` |
 | `all` | All data types | All SCAN_ROOTS |
 
 ## Deployment
@@ -185,13 +185,13 @@ curl -X POST http://localhost:8766/api/enqueue \
 | DROP_ROOT | /nas/drop | Job queue directory |
 | NEO4J_URI | bolt://localhost:7687 | Neo4j connection |
 | NEO4J_USER | neo4j | Neo4j username |
-| NEO4J_PASSWORD | knowledge_graph_2026 | Neo4j password |
+| NEO4J_PASSWORD | env-managed | Neo4j password; never hardcode in the repository |
 | SCAN_ROOTS | (comma-separated) | Directories to scan |
-| DASHCAM_ROOT | /nas/fileserver/dashcam | Dashcam root |
-| AUDIO_ROOT | /nas/S/audio | Audio root |
-| BODYCAM_ROOT | /nas/fileserver/bodycam | Bodycam root |
-| TRANSCRIPT_ROOT | /nas/fileserver/audio/transcriptions | Transcripts root |
-| LEGACY_DROP_ROOT | /nas/fileserver/incoming/deathstar | Legacy drop source |
+| DASHCAM_ROOT | /nas/dashcam | Dashcam root |
+| AUDIO_ROOT | /nas/audio | Audio root |
+| BODYCAM_ROOT | /nas/bodycam | Bodycam root |
+| TRANSCRIPT_ROOT | /nas/audio/transcriptions | Transcripts root |
+| LEGACY_DROP_ROOT | /nas/incoming/deathstar | Legacy drop source |
 
 ## Troubleshooting
 
@@ -201,7 +201,7 @@ curl -X POST http://localhost:8766/api/enqueue \
 
 2. **libGL errors**: ffmpeg requires libGL1 and libglib2.0-0 (already installed in Dockerfile)
 
-3. **Legacy drop sync fails**: Directory `/nas/fileserver/incoming/deathstar` may not exist — it's now handled gracefully
+3. **Legacy drop sync fails**: Directory `/nas/incoming/deathstar` may not exist — it's now handled gracefully
 
 4. **No jobs processed**: Check `/nas/drop/` permissions and that worker container has the mount
 
