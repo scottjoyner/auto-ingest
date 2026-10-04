@@ -262,11 +262,27 @@ def test_a_killed_executor_never_leaves_a_short_object(tmp_path):
         f"execute_copy({str(bundle)!r}, {str(src)!r}, {str(dest)!r}, {keys!r})",
     ])
     proc = subprocess.Popen([sys.executable, "-c", script])
-    time.sleep(0.7)
+    # Poll for the first completed object instead of sleeping a fixed amount.
+    # A fixed sleep made this test load-dependent: on a busy machine 0.7s was
+    # not enough to finish even one 16 MiB object, `real` came back empty and the
+    # assert below failed for reasons that had nothing to do with the property
+    # under test. Waiting for real progress also guarantees the kill lands
+    # mid-flight, which is the whole point -- otherwise the test is vacuous.
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if [q for q in dest.iterdir() if q.is_file()]:
+            break
+        if proc.poll() is not None:
+            break
+        time.sleep(0.01)
+    killed_mid_flight = proc.poll() is None
     proc.kill()
-    proc.wait(timeout=15)
+    proc.wait(timeout=60)
 
     real = [p for p in dest.iterdir() if p.is_file()]
+    if not killed_mid_flight and len(real) == len(keys):
+        pytest.skip("host finished all objects before the interrupt could land; "
+                    "the atomicity property is unobservable here")
     assert real, "expected some objects to complete before the kill"
     for path in real:
         assert path.stat().st_size == len(payload), (
