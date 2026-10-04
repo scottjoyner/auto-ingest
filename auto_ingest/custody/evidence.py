@@ -14,6 +14,17 @@ Counters are named so their direction is unambiguous:
 ``source_only`` = source objects with no verified destination copy;
 ``destination_only`` = destination objects with no source counterpart in scope;
 ``mismatched`` = objects present on both sides whose digests disagree.
+
+``source_release`` is the one block that is not about proof, and that is the
+point of its name. It records what happened to the objects that *were* on the
+card when ``auto_ingest.custody.release_source`` unlinked them, so "was this
+card already released?" is answerable from the bundle instead of from the audit
+ledger by hand. It carries no field that grants custody: the release gate reads
+it only to refuse, never to allow (see
+:mod:`auto_ingest.custody.release`). It is deliberately NOT folded into
+``inventory`` - the inventory is what the campaign *walked*, a historical
+measurement, and decrementing it after a release would contradict the hash
+evidence beside it and block the campaign for telling the truth.
 """
 
 from __future__ import annotations
@@ -420,6 +431,86 @@ class ErrorEvidence:
 
 
 @dataclass(frozen=True)
+class SourceReleaseEvidence:
+    """What happened to the SOURCE side when the card was released.
+
+    Direction is the whole point of this block. Releasing the source is a fact
+    about objects that used to be on the card; it is **not** destination
+    verification, and it is not progress toward it. So no field here is read by
+    the release gate to grant custody - the gate reads this block only to refuse,
+    which is what makes the observability safe to add.
+
+    Every counter is cumulative, read from the append-only audit ledger rather
+    than from one pass, so re-importing the same facts restates them instead of
+    adding to them. The per-object detail stays in ``ledgers/release.jsonl``; a
+    10,000-object release produces exactly the same report as a 3-object one.
+
+    ``complete`` means "a release finished here and nothing was left behind". It
+    never means "the card is empty" - that is ``released.files``, and conflating
+    the two would let a partial release read as a finished one.
+    """
+
+    released: Counts = field(default_factory=Counts)
+    absent: int = 0
+    failed: int = 0
+    refused: int = 0
+    audit_records: int = 0
+    started: bool = False
+    complete: bool = False
+    error_summary: Tuple[str, ...] = ()
+    last_checkpoint: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any], limit: int,
+                  coerced: Optional[List[str]] = None) -> "SourceReleaseEvidence":
+        raw = raw or {}
+        c = coerced if coerced is not None else []
+        released = Counts.from_dict(raw.get("released"), "source_release.released", c)
+        return cls(
+            released=released,
+            absent=_count(raw.get("absent"), "source_release.absent", c),
+            failed=_count(raw.get("failed"), "source_release.failed", c),
+            refused=_count(raw.get("refused"), "source_release.refused", c),
+            audit_records=_count(raw.get("audit_records"),
+                                 "source_release.audit_records", c),
+            started=_bool(raw.get("started", bool(raw.get("complete"))
+                                  or released.files > 0)),
+            complete=_bool(raw.get("complete")),
+            error_summary=_bounded(raw.get("error_summary")
+                                   or raw.get("error_summary_samples"), limit),
+            last_checkpoint=_opt_str(raw.get("last_checkpoint")),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "absent": self.absent,
+            "audit_records": self.audit_records,
+            "complete": self.complete,
+            "error_summary": list(self.error_summary),
+            "failed": self.failed,
+            "last_checkpoint": self.last_checkpoint,
+            "refused": self.refused,
+            "released": self.released.to_dict(),
+            "started": self.started,
+        }
+
+    @property
+    def attempted(self) -> int:
+        """Objects a release pass reached a decision on, however it decided."""
+        return self.released.files + self.absent + self.failed + self.refused
+
+    @property
+    def clean(self) -> bool:
+        """No release attempt failed or was refused. Mirrors ``reconciliation.clean``."""
+        return not (self.failed or self.refused)
+
+    @property
+    def observed(self) -> bool:
+        """True once anything at all is on record about the source side."""
+        return self.started or self.attempted > 0 or self.audit_records > 0
+
+
+@dataclass(frozen=True)
 class CampaignEvidence:
     """Bounded evidence for one campaign. No verdict, no state, no clocks."""
 
@@ -431,6 +522,9 @@ class CampaignEvidence:
     reconciliation: ReconciliationEvidence = field(default_factory=ReconciliationEvidence)
     worker: WorkerEvidence = field(default_factory=WorkerEvidence)
     errors: ErrorEvidence = field(default_factory=ErrorEvidence)
+    #: What the source side did when the card was released. Observational only -
+    #: see the class docstring and :mod:`auto_ingest.custody.release`.
+    source_release: SourceReleaseEvidence = field(default_factory=SourceReleaseEvidence)
     observed_at: Optional[str] = None
     ignored_declared_fields: Tuple[str, ...] = ()
     coerced_fields: Tuple[str, ...] = ()
@@ -457,6 +551,8 @@ class CampaignEvidence:
                 raw.get("reconciliation") or {}, coerced),
             worker=WorkerEvidence.from_dict(raw.get("worker") or {}),
             errors=ErrorEvidence.from_dict(raw.get("errors") or {}, limit, coerced),
+            source_release=SourceReleaseEvidence.from_dict(
+                raw.get("source_release") or {}, limit, coerced),
             observed_at=_opt_str(raw.get("observed_at")),
             ignored_declared_fields=tuple(
                 k for k in DECLARED_STATE_KEYS
@@ -486,6 +582,7 @@ class CampaignEvidence:
             "inventory": self.inventory.to_dict(),
             "observed_at": self.observed_at,
             "reconciliation": self.reconciliation.to_dict(),
+            "source_release": self.source_release.to_dict(),
             "worker": self.worker.to_dict(),
         }
 
@@ -513,6 +610,16 @@ class CampaignEvidence:
         return self.hashing.verified_files + honoured
 
     @property
+    def source_released(self) -> int:
+        """Source objects this campaign's release destroyed.
+
+        A source-side fact. It is *not* destination verification and must never
+        be added to, or read alongside, ``destination.verified_files`` as though
+        the two measured the same thing.
+        """
+        return self.source_release.released.files
+
+    @property
     def has_copy_ambiguity(self) -> bool:
         """True when the copy ledger cannot say what actually landed.
 
@@ -538,5 +645,6 @@ __all__ = [
     "HashEvidence",
     "InventoryEvidence",
     "ReconciliationEvidence",
+    "SourceReleaseEvidence",
     "WorkerEvidence",
 ]

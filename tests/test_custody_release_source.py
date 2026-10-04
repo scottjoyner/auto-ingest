@@ -59,6 +59,7 @@ from auto_ingest.custody.release_source import (
     exit_code,
     plan_release,
     read_audit,
+    to_evidence,
 )
 from auto_ingest.custody.store import import_evidence, load_campaign, load_evidence, load_status
 
@@ -766,15 +767,31 @@ def test_execution_rewrites_no_evidence_and_forges_no_verdict(tmp_path):
 
     assert (Path(bundle) / "evidence.json").read_bytes() == before
     status = load_status(bundle)
-    # still derived exactly as before: the gate cannot observe that bytes are gone
+    # still derived exactly as before: the derived verdict never depended on the
+    # source being physically present
     assert status.source_release_allowed is True
     assert status.state is CampaignState.SAFE_TO_RELEASE
     assert status.evidence.inventory.discovered_files == COUNT
-    # and there is no helper here that could set one
+    # `to_evidence()` exists and is a pure function of the result: it returns a
+    # fragment for the caller to merge and opens no file, so nothing here can
+    # write a verdict. That applying it is the command layer's job is the whole
+    # of the separation - see tests/test_custody_release_evidence.py.
     import auto_ingest.custody.release_source as module
 
-    assert not hasattr(module, "to_evidence")
+    assert callable(module.to_evidence)
     assert "source_release_allowed" not in audit_path(bundle).read_text()
+
+
+def test_to_evidence_alone_writes_nothing(tmp_path):
+    """The fragment is returned, never persisted: the library side effect is nil."""
+    bundle, src, dest = build_released(tmp_path)
+    result = release(bundle, src, dest, execute=True)
+    before = (Path(bundle) / "evidence.json").read_bytes()
+
+    fragment = to_evidence(result)
+
+    assert fragment["source_release"]["released"]["files"] == COUNT
+    assert (Path(bundle) / "evidence.json").read_bytes() == before
 
 
 def test_zeroing_the_inventory_after_a_release_would_block_the_campaign(tmp_path):

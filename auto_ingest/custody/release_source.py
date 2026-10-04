@@ -70,6 +70,27 @@ What it is forbidden to do
 * derive the release verdict itself, or set ``source_release_allowed``;
 * write a campaign evidence document - see ``LIMITS`` below.
 
+The evidence it contributes
+---------------------------
+
+:func:`to_evidence` is the fragment this pass contributes to the campaign's
+bounded evidence, and it follows the convention ``hashing.to_evidence``,
+``verify.to_evidence`` and ``executor.to_evidence`` established: a module-level
+function, returning a plain dict of blocks, pure in its argument.
+
+Its counters are read from the **append-only audit ledger**, not from this pass.
+That is the same cumulative-not-delta rule the hash and verify producers follow,
+and for the same reason - reporting this pass's delta would write ``0`` over a
+real count on every resume and quietly lose the record that bytes are gone.
+Applying the fragment twice therefore restates the same numbers instead of
+doubling them.
+
+The block it writes is ``source_release``, and its direction is load-bearing:
+releasing the source is a fact about the objects that used to be on the card, not
+about the destination. It never touches ``destination`` or ``reconciliation``,
+because a release is not verification - folding it in would let deleting the card
+read as proof that the destination holds the bytes.
+
 Symlinks
 --------
 
@@ -85,23 +106,27 @@ outside the card is not the card's byte at all.)
 LIMITS - what this module deliberately does not do
 --------------------------------------------------
 
-``CampaignEvidence`` has no vocabulary for "the source was released". Its blocks
-are ``inventory``, ``hash``, ``copy``, ``destination``, ``reconciliation``,
-``worker``, ``errors``. None of them means "these objects no longer exist", and
-the nearest candidate - zeroing ``inventory`` - would make the bundle
-self-contradictory (``discovered_files = 0`` beside ``hash.verified_files = 5``),
-which the state machine quite correctly reports as ``BLOCKED``. So this module
-writes **no** campaign evidence at all, and offers no ``to_evidence()`` helper:
-the audit ledger is the record.
+**It never writes the evidence document.** :func:`to_evidence` returns the
+fragment; applying it is the command layer's job, exactly as it is for
+``custody hash``, ``custody verify`` and ``custody execute``. Nothing here opens
+``evidence.json``, so a library caller that never applies the fragment simply does
+not get the record - which is the honest outcome, not a silent one.
 
-That leaves an honest, stated gap: **the release gate cannot observe that the
-source was deleted.** After a release the bundle still describes the pre-release
-world, and ``source_release_allowed`` stays whatever ``release.py`` derives from
-evidence - this module never touches it. Re-running the release is therefore
-idempotent (every key is now ``absent`` and nothing is unlinked again), but
-"was this card already released?" is answered by the audit ledger, not by
-``evidence.json``. Deriving that would require a new evidence block and a change
-to ``release.py``, neither of which belongs to this slice.
+The nearest thing to a vocabulary for "the source was released" used to be
+zeroing ``inventory``, and that would make the bundle self-contradictory
+(``discovered_files = 0`` beside ``hash.verified_files = 5``), which the state
+machine quite correctly reports as ``BLOCKED``. ``inventory`` is what the
+campaign *walked*, a historical measurement; it does not shrink because files
+were later unlinked. Hence a separate block instead.
+
+That block is observational only. ``release.py`` reads it to refuse and never to
+allow, so recording a release cannot turn a ``BLOCKED`` campaign into a pass.
+Re-running a release stays idempotent (every key is now ``absent`` and nothing is
+unlinked again) and the derived state is unchanged: custody proven is still
+custody proven after the source is gone. **A new derived state is deliberately
+not added for this** - see ``states.CampaignState``, which stays at twelve
+members, and the note in ``tests/test_custody_release_evidence.py`` that pins the
+reason.
 """
 
 from __future__ import annotations
@@ -239,6 +264,63 @@ class ReleasePlan:
 
 
 @dataclass(frozen=True)
+class AuditRead:
+    """Bounded read of the append-only audit ledger. Fails closed on a torn tail."""
+
+    present: bool = False
+    path: str = ""
+    records: int = 0
+    deleted: int = 0
+    #: Cumulative bytes destroyed. A single integer for the whole card: the
+    #: per-object sizes stay in the ledger, which is where the detail belongs.
+    deleted_bytes: int = 0
+    refused: int = 0
+    absent: int = 0
+    failed: int = 0
+    malformed: int = 0
+    truncated: bool = False
+    #: Refusal records that named no object - a whole-run refusal, where the gate
+    #: was closed and not a single candidate was considered. Counted apart from
+    #: :attr:`refused` because "the gate said no" and "this object could not be
+    #: released" are different facts, and only the second one means bytes are
+    #: still on the card for a reason.
+    unattributed: int = 0
+    by_event: Dict[str, int] = field(default_factory=dict)
+
+    @property
+    def coherent(self) -> bool:
+        """False when a producer died mid-append.
+
+        The rows that *did* land look perfectly healthy, so a reader that ignored
+        this would report a confident partial history of an interrupted release.
+        """
+        return self.present and self.malformed == 0 and not self.truncated
+
+    @property
+    def object_refusals(self) -> int:
+        """Refusals that named an object, i.e. objects left on the card on purpose."""
+        return max(self.refused - self.unattributed, 0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "absent": self.absent,
+            "by_event": dict(sorted(self.by_event.items())),
+            "coherent": self.coherent,
+            "deleted": self.deleted,
+            "deleted_bytes": self.deleted_bytes,
+            "failed": self.failed,
+            "malformed_lines": self.malformed,
+            "object_refusals": self.object_refusals,
+            "path": self.path,
+            "present": self.present,
+            "records": self.records,
+            "refused": self.refused,
+            "truncated": self.truncated,
+            "unattributed": self.unattributed,
+        }
+
+
+@dataclass(frozen=True)
 class ReleaseResult:
     """What one release pass did, or what it refused to do.
 
@@ -264,6 +346,12 @@ class ReleaseResult:
     ledger_notes: Tuple[str, ...] = ()
     error_samples: Tuple[str, ...] = ()
     key_samples: Tuple[str, ...] = ()
+    #: The append-only audit re-read *after* this pass. :func:`to_evidence`
+    #: publishes from here rather than from the per-pass counters above, so the
+    #: fragment is cumulative and re-importing it cannot double-count. A proposal
+    #: carries the previous pass's view, which is what makes applying a fragment
+    #: from a dry run idempotent too.
+    audit_summary: AuditRead = field(default_factory=AuditRead)
 
     @property
     def handled(self) -> int:
@@ -285,6 +373,9 @@ class ReleaseResult:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "already_absent": self.already_absent,
+            # The cumulative audit view. Bounded: every event name comes from the
+            # fixed set this module emits, so `by_event` cannot grow with the card.
+            "audit": self.audit_summary.to_dict(),
             "audit_path": self.audit_path,
             "audit_unterminated_repaired": self.audit_unterminated_repaired,
             "blockers": [b.to_dict() for b in self.blockers],
@@ -304,46 +395,6 @@ class ReleaseResult:
             "proposed_bytes": self.proposed_bytes,
             "refused": self.refused,
             "state": self.state,
-        }
-
-
-@dataclass(frozen=True)
-class AuditRead:
-    """Bounded read of the append-only audit ledger. Fails closed on a torn tail."""
-
-    present: bool
-    path: str
-    records: int = 0
-    deleted: int = 0
-    refused: int = 0
-    absent: int = 0
-    failed: int = 0
-    malformed: int = 0
-    truncated: bool = False
-    by_event: Dict[str, int] = field(default_factory=dict)
-
-    @property
-    def coherent(self) -> bool:
-        """False when a producer died mid-append.
-
-        The rows that *did* land look perfectly healthy, so a reader that ignored
-        this would report a confident partial history of an interrupted release.
-        """
-        return self.present and self.malformed == 0 and not self.truncated
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "absent": self.absent,
-            "by_event": dict(sorted(self.by_event.items())),
-            "coherent": self.coherent,
-            "deleted": self.deleted,
-            "failed": self.failed,
-            "malformed_lines": self.malformed,
-            "path": self.path,
-            "present": self.present,
-            "records": self.records,
-            "refused": self.refused,
-            "truncated": self.truncated,
         }
 
 
@@ -721,12 +772,24 @@ def _audit_record(
 
 def read_audit(bundle: str | Path) -> AuditRead:
     """Read the release audit as bounded counts. Read-only; absent is reported."""
-    path = audit_path(bundle)
+    return _read_audit_path(audit_path(bundle))
+
+
+def _read_audit_path(path: str | Path) -> AuditRead:
+    """Aggregate an audit ledger into counts. The bounded counterpart of the record.
+
+    Kept separate from :func:`read_audit` so a caller that already knows the path
+    - the executed pass, immediately after appending its own records - does not
+    have to reconstruct it from the bundle. It is a reader and nothing else: no
+    mode other than ``r``, no repair, no truncation.
+    """
+    p = Path(path)
     by_event: Dict[str, int] = {}
-    records = deleted = refused = absent = failed = malformed = 0
+    records = deleted = deleted_bytes = 0
+    refused = absent = failed = malformed = unattributed = 0
     truncated = False
-    if path.is_file():
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
+    if p.is_file():
+        with p.open("r", encoding="utf-8", errors="replace") as handle:
             for raw_line in handle:
                 if not raw_line.endswith("\n"):
                     truncated = True
@@ -744,26 +807,46 @@ def read_audit(bundle: str | Path) -> AuditRead:
                 records += 1
                 event = str(row.get("event") or "")
                 by_event[event] = by_event.get(event, 0) + 1
+                keyed = bool(str(row.get("key") or "").strip())
                 if event == DELETED:
                     deleted += 1
+                    deleted_bytes += _count_bytes(row.get("size"))
                 elif event == REFUSED:
                     refused += 1
+                    if not keyed:
+                        unattributed += 1
                 elif event == ABSENT:
                     absent += 1
                 elif event == FAILED:
                     failed += 1
     return AuditRead(
-        present=path.is_file(),
-        path=str(path),
+        present=p.is_file(),
+        path=str(p),
         records=records,
         deleted=deleted,
+        deleted_bytes=deleted_bytes,
         refused=refused,
         absent=absent,
         failed=failed,
         malformed=malformed,
         truncated=truncated,
+        unattributed=unattributed,
         by_event=by_event,
     )
+
+
+def _count_bytes(value: Any) -> int:
+    """A record's ``size`` as a non-negative int. Anything else contributes zero.
+
+    A ledger is a file on disk, so its numbers are untrusted like its keys: a
+    missing, negative or non-numeric ``size`` must not make the cumulative byte
+    total go backwards, and must not raise.
+    """
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return size if size > 0 else 0
 
 
 # ---------------------------------------------------------------------------
@@ -793,7 +876,15 @@ def execute_release(
     record. A failure at any step leaves the source object in place and records why.
 
     Idempotent: a second run finds every key already absent, unlinks nothing, and
-    appends an ``absent`` record per object plus a zeroed run summary.
+    appends a zeroed run summary. It does **not** append a per-object ``absent``
+    record, because ``plan_release`` counts an already-gone key as ``already_absent``
+    and never offers it as a candidate - so ``ABSENT`` remains a defined event with
+    no producer. That is a gap in the audit's completeness, not in its safety: the
+    destructive counters it reports are unaffected.
+
+    Every return path carries ``audit_summary``: the append-only ledger re-read
+    after the pass, so :func:`to_evidence` publishes cumulative counts rather
+    than this pass's delta.
     """
     plan = plan_release(
         bundle,
@@ -820,6 +911,9 @@ def execute_release(
         ledger_notes=plan.ledger_notes,
         error_samples=tuple(f"{b.code}:{b.detail}" for b in plan.refusals),
         key_samples=plan.keys[:max_errors],
+        # A proposal writes nothing, so this is the previous pass's view - which
+        # is exactly right: applying a dry run's fragment restates the record.
+        audit_summary=_read_audit_path(audit),
     )
     if not execute:
         return result
@@ -843,7 +937,8 @@ def execute_release(
                 decided_at=decided_at,
                 detail=_blocker_summary(plan.blockers, max_errors),
             ))
-            return replace(result, mode=MODE_REFUSED, audit_unterminated_repaired=repaired)
+            return replace(result, mode=MODE_REFUSED, audit_unterminated_repaired=repaired,
+                           audit_summary=_read_audit_path(audit))
 
         deleted = deleted_bytes = failed = refused = 0
         errors: List[str] = []
@@ -918,7 +1013,62 @@ def execute_release(
             refused=refused + len(plan.refusals),
             audit_unterminated_repaired=repaired,
             error_samples=tuple(errors),
+            # Re-read through a fresh handle: the append handle above is still
+            # open, and the counters must include the records this pass wrote.
+            audit_summary=_read_audit_path(audit),
         )
+
+
+def to_evidence(result: ReleaseResult, *,
+                last_checkpoint: Optional[str] = None,
+                max_samples: int = MAX_SUMMARY_ENTRIES) -> Dict[str, Any]:
+    """The evidence fragments a source-release pass contributes.
+
+    Module-level and pure in its argument, following ``hashing.to_evidence``,
+    ``verify.to_evidence`` and ``executor.to_evidence``: it returns a fragment for
+    the caller to merge, and never writes ``evidence.json`` itself. Applying it is
+    the command layer's job (``custody release-source ... --apply``).
+
+    **Every counter is cumulative, read from the append-only audit ledger.** That
+    is the cumulative-not-delta rule the hash and verify producers learned the hard
+    way - reporting one pass's work writes ``0`` over a real count on every resume.
+    It is also what makes this fragment idempotent: applying it twice restates
+    ``released.files = 3`` rather than inflating it to 6.
+
+    **Direction is load-bearing.** The block is ``source_release``, and nothing
+    here touches ``destination`` or ``reconciliation``. A release is a fact about
+    objects that used to be on the card; recording it as destination verification
+    would mean deleting the card manufactured a pass.
+
+    ``complete`` means "a release finished here and nothing was left behind" -
+    never "the card is empty", and never "the gate said no": a pass that removed 2
+    of 3 objects is ``complete=False`` with ``released.files = 2``, and a
+    whole-run refusal attempted nothing so it is not a finished release either.
+    The gate reads exactly that as a blocker.
+
+    ``last_checkpoint`` is supplied by the caller, never read from a clock, so two
+    runs over identical inputs produce identical evidence.
+    """
+    audit = result.audit_summary
+    refused = audit.object_refusals
+    attempted = audit.deleted + audit.absent + audit.failed + refused
+    return {
+        "source_release": {
+            "absent": audit.absent,
+            "audit_records": audit.records,
+            # "a release finished and nothing was left behind" - not "the card is
+            # empty", and not "the gate said no": a whole-run refusal attempted
+            # nothing, so it is not a finished release either.
+            "complete": audit.coherent and attempted > 0
+                        and not (audit.failed or refused),
+            "error_summary": list(result.error_samples[:max_samples]),
+            "failed": audit.failed,
+            "last_checkpoint": last_checkpoint,
+            "refused": refused,
+            "released": {"bytes": audit.deleted_bytes, "files": audit.deleted},
+            "started": bool(attempted),
+        },
+    }
 
 
 def exit_code(result: ReleaseResult) -> int:
@@ -961,4 +1111,5 @@ __all__ = [
     "exit_code",
     "plan_release",
     "read_audit",
+    "to_evidence",
 ]
