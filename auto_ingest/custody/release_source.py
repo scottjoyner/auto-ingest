@@ -48,17 +48,36 @@ What makes it narrow
   object. A key that cannot be trusted refuses the *whole* run, because a ledger
   containing ``../../etc/passwd`` is evidence of tampering and continuing to
   delete other rows from a tampered ledger is not conservative.
-* **The audit ledger is append-only.** Every deletion, every already-absent
-  object, every failure and every refusal is appended to
-  ``ledgers/release.jsonl``, newline-terminated, ``flush()`` + ``os.fsync()`` per
-  record, exactly as ``hashing.py`` does. It is never rewritten and never
-  truncated - the audit is the only record that bytes are gone, so erasing it
-  would erase the fact. A partial final line means an interrupted run, so the
-  next run terminates that line rather than gluing onto it, and
+* **The audit ledger is append-only, and it is written BEFORE the unlink.** Every
+  deletion, every already-absent object, every failure and every refusal is
+  appended to ``ledgers/release.jsonl``, newline-terminated, ``flush()`` +
+  ``os.fsync()`` per record, exactly as ``hashing.py`` does. It is never rewritten
+  and never truncated - the audit is the only record that bytes are gone, so
+  erasing it would erase the fact. A partial final line means an interrupted run,
+  so the next run terminates that line rather than gluing onto it, and
   ``read_audit()`` reports ``coherent=False`` until it is rebuilt.
+* **The record of an intent to delete is durable before the delete happens.**
+  This is the load-bearing ordering in the module. Unlink-then-record loses the
+  record whenever the append fails - a full volume, a read-only remount, a quota -
+  and then the card holds fewer files than any record admits while
+  ``read_audit()`` still reports ``coherent=True``. So the ``deleted`` row is
+  appended and fsynced *first*, and the unlink only runs once that append
+  succeeded. A pass whose append fails stops there: the object it was about to
+  delete is still on the card, and nothing after it is attempted. The bias this
+  buys is deliberate and one-directional - if the unlink then fails, the ledger
+  holds a ``deleted`` **and** a ``failed`` row for that key, so the audit can
+  over-report a deletion that did not happen, but it can never under-report one
+  that did. For an irreversible ledger, over-reporting is the survivable error.
+* **A release that cannot be recorded is not performed.** Before the loop the
+  pass asks the audit's filesystem whether it plausibly has room for every row
+  the pass could write, and refuses the whole run if it does not; each row is
+  checked again immediately before it is written; and an audit that cannot be
+  opened at all is a refusal rather than an exception. Nothing is deleted on the
+  strength of a record that could not be written.
 * **Evidence is bounded.** Deletion goes into counters and capped samples, never
   one row per file: a 10,000-key card produces the same small report as a
-  3-object one.
+  3-object one. The *ledger* is per-object on purpose - it is the record, not the
+  report - so only ``to_dict()`` and the samples are capped.
 
 What it is forbidden to do
 --------------------------
@@ -66,7 +85,9 @@ What it is forbidden to do
 * delete anything except the exact keys its own plan derived;
 * delete anything when the release gate is closed;
 * delete a directory, a symlink, or anything outside the source root;
+* delete anything from the source root it was also given as the destination root;
 * rewrite, truncate or reorder the audit ledger;
+* unlink before the deletion has been recorded in the audit;
 * derive the release verdict itself, or set ``source_release_allowed``;
 * write a campaign evidence document - see ``LIMITS`` below.
 
@@ -121,12 +142,47 @@ were later unlinked. Hence a separate block instead.
 
 That block is observational only. ``release.py`` reads it to refuse and never to
 allow, so recording a release cannot turn a ``BLOCKED`` campaign into a pass.
-Re-running a release stays idempotent (every key is now ``absent`` and nothing is
-unlinked again) and the derived state is unchanged: custody proven is still
+Re-running a release stays idempotent (every key is now accounted for and nothing
+is unlinked again) and the derived state is unchanged: custody proven is still
 custody proven after the source is gone. **A new derived state is deliberately
 not added for this** - see ``states.CampaignState``, which stays at twelve
-members, and the note in ``tests/test_custody_release_evidence.py`` that pins the
-reason.
+members, and the note in ``tests/test_custody_release_evidence.py`` that pins
+the reason.
+
+ABSENT - released, or lost?
+---------------------------
+
+The audit used to declare an ``absent`` event and never write one, which left a
+hole in the only durable record of a card. For an irreversible deletion ledger
+that hole matters: a key that is in the hash ledger, proven present at the
+destination, and *no longer on the card* has two possible histories - an earlier
+pass released it, or it was removed by something else and never existed again.
+A reader of ``release.jsonl`` could not tell them apart, because the only event
+that would have said so had no producer.
+
+So ``absent`` has one, and its scope is exactly the ambiguous case. A key earns
+an ``absent`` row when it is
+
+* proven in the source hash ledger (``verified``/``hashed``), **and**
+* proven at the destination (``verified``/``verified_at_destination``), **and**
+* gone from the source root, **and**
+* not already accounted for by a ``deleted`` or ``absent`` row.
+
+That last clause is what keeps this honest rather than noisy. A key this module
+deleted already has a ``deleted`` row, so its absence is explained; writing an
+``absent`` row beside it would grow the ledger on every no-op re-run and inflate
+a counter without recording anything new. A key with neither row is the one an
+auditor needs to see, and the ``absent`` row is the difference between "released
+by an earlier pass" and "gone, and nobody here did it".
+
+``already_absent`` on the plan is therefore a **plan-time figure** and ``absent``
+on :class:`AuditRead` is an **audit counter**, and they are allowed to differ:
+the plan counts every already-gone key it classified, the audit counts the ones
+whose absence was not already on the record. ``to_evidence`` reports the audit's
+figure, never the plan's. An ``absent`` finding does not close the release gate
+(``SourceReleaseEvidence.clean`` ignores it) - the bytes are verified at the
+destination, so nothing is at risk; it is a completeness note about the card,
+not a failure.
 """
 
 from __future__ import annotations
@@ -135,7 +191,7 @@ import json
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from .campaign import Campaign
 from .evidence import CampaignEvidence
@@ -170,12 +226,39 @@ AUDIT_MODE = "a"
 DESTINATION_PROVEN_STATUSES = ("verified", "verified_at_destination")
 
 #: Audit events. One record per decision, never a batch summary standing in for
-#: per-object ones.
+#: per-object ones. Every event listed here has a producer in this module;
+#: :data:`AUDIT_EVENTS` is the closed set the reader trusts.
 DELETED = "deleted"
 REFUSED = "refused"
 ABSENT = "absent"
 FAILED = "failed"
 RUN = "run"
+
+#: The closed set of events this module writes. A row naming anything else was put
+#: there by something else, so :func:`_read_audit_path` counts it once as
+#: ``unknown`` instead of letting it become a new key in ``by_event`` - that dict
+#: is part of a report that promises a fixed shape, and an event name is attacker
+#: controlled once a ledger is a file on disk.
+AUDIT_EVENTS = (ABSENT, DELETED, FAILED, REFUSED, RUN)
+
+#: Events that settle a key's fate: once one of these is on the ledger, the object
+#: is accounted for and a later pass has nothing new to record about it. This is
+#: what keeps ``absent`` from re-reporting a key an earlier pass already deleted.
+SETTLING_EVENTS = (ABSENT, DELETED)
+
+#: Bytes held back in the pre-flight for a record whose ``detail`` is not yet
+#: known. Every ``detail`` this module writes is a bounded reason string.
+_DETAIL_RESERVE = 64
+
+#: Bytes assumed for one keyed ``refused`` row, whose key and path come from a
+#: ledger rather than from a derived object, so their length is not known up front.
+_REFUSAL_RESERVE_BYTES = 512
+
+#: Slack on top of the computed append: the run summary, whatever the filesystem
+#: rounds a write up to, and the record a torn tail may need. The pre-flight is a
+#: guard, not a proof - the per-record room check and the stop-on-append-failure
+#: below are what actually bound the damage.
+_AUDIT_SLACK_BYTES = 4096
 
 #: Report modes, mirroring how ``custody execute`` labels a dry run.
 MODE_PROPOSAL = "proposal"
@@ -219,11 +302,31 @@ class ReleasePlan:
     considered: int = 0
     deletable: int = 0
     deletable_bytes: int = 0
+    #: Plan-time figure: keys the ledgers classify and that are already gone from
+    #: the source. Deliberately *not* the same number as
+    #: :attr:`AuditRead.absent`, which counts only the already-gone keys whose
+    #: absence was not already explained by a ``deleted`` or ``absent`` row.
     already_absent: int = 0
     objects: Tuple[SourceObject, ...] = ()
+    #: The same keys as :attr:`absent_objects`, resolved but not present. They are
+    #: not offered as deletion candidates - there is nothing there to unlink - but
+    #: the executed pass still records each one that the audit has not already
+    #: accounted for, so a later reader can tell "released" from "lost".
+    absent_objects: Tuple[SourceObject, ...] = ()
+    #: Keys a whole-run *blocker* named, so a refusal says which objects were
+    #: near-missed rather than only that something was refused. Small by
+    #: construction: the classifier stops at the first key it cannot trust.
+    near_missed: Tuple[str, ...] = ()
     ledger_notes: Tuple[str, ...] = ()
     blockers: Tuple[Blocker, ...] = ()
+    #: Every per-key refusal, uncapped: the audit writes one ``refused`` row each,
+    #: because a report that names 20 of 5000 refusals is a report that says the
+    #: release was clean. ``to_dict()`` and the samples cap it; the ledger does not.
     refusals: Tuple[Blocker, ...] = ()
+    #: The key each entry of :attr:`refusals` is about, index for index. Carried
+    #: separately rather than parsed back out of the blocker's prose: the key is a
+    #: fact, and the audit needs it in the ``key`` field, not in a sentence.
+    refusal_keys: Tuple[str, ...] = ()
     mode: str = MODE_PROPOSAL
 
     @property
@@ -244,8 +347,23 @@ class ReleasePlan:
     def paths(self) -> Tuple[str, ...]:
         return tuple(o.path for o in self.objects)
 
+    @property
+    def absent_keys(self) -> Tuple[str, ...]:
+        return tuple(o.key for o in self.absent_objects)
+
+    @property
+    def refusal_entries(self) -> Tuple[Tuple[str, Blocker], ...]:
+        """``(key, blocker)`` for every per-key refusal, index-aligned.
+
+        A key the caller did not supply pairs with the empty string, which the
+        reader counts as an unattributed refusal rather than dropping.
+        """
+        keys = self.refusal_keys + ("",) * max(len(self.refusals) - len(self.refusal_keys), 0)
+        return tuple(zip(keys, self.refusals))
+
     def to_dict(self, *, max_samples: int = MAX_SUMMARY_ENTRIES) -> Dict[str, Any]:
         return {
+            "absent_key_samples": list(self.absent_keys)[:max_samples],
             "already_absent": self.already_absent,
             "blockers": [b.to_dict() for b in self.blockers],
             "campaign_id": self.campaign_id,
@@ -254,7 +372,9 @@ class ReleasePlan:
             "deletable_bytes": self.deletable_bytes,
             "ledger_notes": list(self.ledger_notes),
             "mode": self.mode,
+            "near_missed_keys": list(self.near_missed)[:max_samples],
             "refusal_codes": [b.code for b in self.refusals][:max_samples],
+            "refused_count": len(self.refusals),
             "release_allowed": self.release_allowed,
             "sample_paths": list(self.paths)[:max_samples],
             "source_root": self.source_root,
@@ -285,6 +405,24 @@ class AuditRead:
     #: released" are different facts, and only the second one means bytes are
     #: still on the card for a reason.
     unattributed: int = 0
+    #: Rows naming an event outside :data:`AUDIT_EVENTS`. Counted rather than
+    #: indexed, so a hand-written ledger cannot widen ``by_event`` - which is part
+    #: of a report that promises a fixed shape.
+    unknown: int = 0
+    #: Whole-run summary rows seen, and the figures from the most recent one. A pass
+    #: that proposed more than it handled did not finish, and the ledger says so
+    #: even when every row it managed to write is a clean deletion.
+    runs: int = 0
+    run_proposed: int = 0
+    run_handled: int = 0
+    #: Keys the ledger has already accounted for: a ``deleted`` or ``absent`` row
+    #: exists for each. Deliberately never serialised - it is one entry per card,
+    #: and this is a bounded report - and never compared, so two reads of the same
+    #: ledger still compare equal. The executed pass uses it to avoid recording a
+    #: fact the ledger already holds.
+    settled_keys: FrozenSet[str] = field(
+        default_factory=frozenset, compare=False, repr=False,
+    )
     by_event: Dict[str, int] = field(default_factory=dict)
 
     @property
@@ -301,6 +439,18 @@ class AuditRead:
         """Refusals that named an object, i.e. objects left on the card on purpose."""
         return max(self.refused - self.unattributed, 0)
 
+    @property
+    def finished(self) -> bool:
+        """False when the last pass proposed more objects than it reached a verdict on.
+
+        The audit cannot see how many objects the pass *would* have deleted, only
+        how many the pass itself claimed to propose - and that claim is on the
+        record, which is the point. A truncated pass therefore stays visible as an
+        unfinished release even though every row it managed to write is a clean
+        deletion.
+        """
+        return self.run_proposed <= self.run_handled
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "absent": self.absent,
@@ -309,14 +459,17 @@ class AuditRead:
             "deleted": self.deleted,
             "deleted_bytes": self.deleted_bytes,
             "failed": self.failed,
+            "finished": self.finished,
             "malformed_lines": self.malformed,
             "object_refusals": self.object_refusals,
             "path": self.path,
             "present": self.present,
             "records": self.records,
             "refused": self.refused,
+            "runs": self.runs,
             "truncated": self.truncated,
             "unattributed": self.unattributed,
+            "unknown_events": self.unknown,
         }
 
 
@@ -342,6 +495,11 @@ class ReleaseResult:
     failed: int = 0
     refused: int = 0
     audit_unterminated_repaired: bool = False
+    #: True when the audit refused a row this pass needed. Nothing is deleted on the
+    #: strength of a record that could not be written, so this means the pass
+    #: stopped short - and it forces ``complete`` False whatever else it managed,
+    #: because a deletion the ledger could not record is not a finished release.
+    audit_append_failed: bool = False
     blockers: Tuple[Blocker, ...] = ()
     ledger_notes: Tuple[str, ...] = ()
     error_samples: Tuple[str, ...] = ()
@@ -364,10 +522,13 @@ class ReleaseResult:
 
         A proposal is complete when it is not blocked: it names exactly the set
         that would go. An executed pass is complete when every proposed object
-        was either removed or refused/failed on with nothing silently skipped.
+        was either removed or refused/failed on with nothing silently skipped -
+        and when the audit took every row the pass tried to give it.
         """
         if self.mode == MODE_PROPOSAL:
             return self.gate_open and not self.blockers
+        if self.audit_append_failed:
+            return False
         return self.failed == 0 and self.refused == 0 and self.handled >= self.proposed
 
     def to_dict(self) -> Dict[str, Any]:
@@ -376,6 +537,7 @@ class ReleaseResult:
             # The cumulative audit view. Bounded: every event name comes from the
             # fixed set this module emits, so `by_event` cannot grow with the card.
             "audit": self.audit_summary.to_dict(),
+            "audit_append_failed": self.audit_append_failed,
             "audit_path": self.audit_path,
             "audit_unterminated_repaired": self.audit_unterminated_repaired,
             "blockers": [b.to_dict() for b in self.blockers],
@@ -442,6 +604,19 @@ def _resolve_under_root(root: str | Path, key: str) -> Optional[Path]:
     return joined
 
 
+def _same_place(left: Path, right: Path) -> bool:
+    """True when two roots are the same directory once symlinks are resolved.
+
+    Used to refuse a "destination" that is the card. ``resolve()`` on a path that
+    does not exist still normalises it, so an operator who has not created the
+    destination yet gets a plain ``False`` rather than an exception.
+    """
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return False
+
+
 def _proven_index(path: Path, statuses: Tuple[str, ...]) -> Dict[str, LedgerRecord]:
     """``key -> the last record written for it``, keeping only proven statuses.
 
@@ -478,15 +653,21 @@ def plan_release(
 ) -> ReleasePlan:
     """Derive the exact set of source objects that may be removed. Read-only.
 
-    Refuses - offering **no** partial set - when the release gate is closed, when
-    either ledger is absent or incoherent, when the hash ledger does not cover the
-    recorded inventory, or when any candidate key cannot be resolved defensively.
+Refuses - offering **no** partial set - when the release gate is closed, when
+either ledger is absent or incoherent, when the hash ledger does not cover the
+recorded inventory, when any candidate key cannot be resolved defensively, or
+when the source root and the destination root are the same place.
 
-    ``recheck`` additionally re-hashes each destination object now instead of
-    trusting the recorded verification. It is off by default because a dry run
-    over a full card would re-read the whole destination; the executed pass always
-    re-verifies per object immediately before unlinking, whether or not this flag
-    was set.
+``recheck`` additionally re-hashes each destination object now instead of
+trusting the recorded verification. It is off by default because a dry run
+over a full card would re-read the whole destination; the executed pass always
+re-verifies per object immediately before unlinking, whether or not this flag
+was set.
+
+``absent_objects`` and ``near_missed`` are findings, not proposals: they name
+what is *not* there to delete, and the executed pass turns them into audit
+rows so a later reader can tell "released by an earlier pass" from "gone, and
+nobody here did it".
     """
     policy = policy or CustodyPolicy()
     root = Path(source_root)
@@ -513,6 +694,22 @@ def plan_release(
     ledgers = ledger_dir(bundle)
     hash_path = ledgers / HASH_LEDGER
     dest_path = ledgers / DESTINATION_LEDGER
+
+    # The one configuration that makes every other guarantee hollow. If the card is
+    # also the destination then "proven present at the destination" is proved by
+    # the very bytes about to be unlinked, the live re-verification hashes the
+    # source against itself, and the gate below passes on the card's own contents.
+    # Nothing in the ledgers can catch it: `custody verify` would have compared
+    # the card to the card. So it is refused here, by path equality after
+    # resolution, which also catches a destination symlinked onto the card.
+    if _same_place(root, dest_root):
+        blockers.append(Blocker(
+            "source_and_destination_are_the_same_root",
+            f"the source root and the destination root are both {root.resolve()}",
+            "point --destination at the custody copy; releasing the card would "
+            "delete the only copy of every byte",
+        ))
+
     for label, summary in (
         ("hash", summarize_ledger(hash_path, max_error_samples=max_samples)),
         ("destination", summarize_ledger(dest_path, max_error_samples=max_samples)),
@@ -550,6 +747,8 @@ def plan_release(
     # safety finding and a coverage shortfall is a completeness one; reporting the
     # escape is what an operator needs first.
     refusals: List[Blocker] = []
+    refusal_keys: List[str] = []
+    near_missed: List[str] = []
     candidates: List[Tuple[str, Path, LedgerRecord]] = []
     considered = 0
     for key in sorted(source_index):
@@ -562,6 +761,7 @@ def plan_release(
             continue
         considered += 1
         if not want.digest or not proof.digest:
+            refusal_keys.append(key)
             refusals.append(Blocker(
                 "destination_proof_carries_no_digest",
                 f"{key}: a record without a digest is never custody",
@@ -569,6 +769,7 @@ def plan_release(
             ))
             continue
         if proof.digest.strip().lower() != want.digest.strip().lower():
+            refusal_keys.append(key)
             refusals.append(Blocker(
                 "destination_digest_disagrees_with_the_source",
                 f"{key}: source {want.digest[:12]} vs destination "
@@ -577,6 +778,7 @@ def plan_release(
             ))
             continue
         if want.size and proof.size and want.size != proof.size:
+            refusal_keys.append(key)
             refusals.append(Blocker(
                 "destination_size_disagrees_with_the_source",
                 f"{key}: source {want.size}B vs destination {proof.size}B",
@@ -585,6 +787,7 @@ def plan_release(
             continue
         target = _resolve_under_root(root, key)
         if target is None:
+            near_missed.append(key)
             blockers.append(Blocker(
                 "source_key_is_not_defensibly_resolvable",
                 f"{key}: the key does not resolve to an object inside the source root "
@@ -593,6 +796,7 @@ def plan_release(
             ))
             break
         if target.is_dir():
+            near_missed.append(key)
             blockers.append(Blocker(
                 "source_object_is_a_directory",
                 f"{key}: a directory can only be removed recursively, and this module "
@@ -612,19 +816,29 @@ def plan_release(
         ))
 
     if blockers:
-        return _blocked_plan(campaign, state, root, allowed, blockers, notes)
+        return _blocked_plan(campaign, state, root, allowed, blockers, notes,
+                             near_missed=near_missed, refusals=refusals,
+                             refusal_keys=refusal_keys)
 
     objects: List[SourceObject] = []
-    already_absent = 0
+    absent: List[SourceObject] = []
     for key, target, want in candidates:
         if not target.exists():
-            # Idempotency: a key proven at the destination whose source object is
-            # already gone was released by an earlier pass.
-            already_absent += 1
+            # Already gone. Idempotency says an earlier pass released it; the audit
+            # may or may not say so, and that is precisely the gap `absent` closes.
+            # Kept as a finding rather than a candidate - there is nothing there to
+            # unlink - so the executed pass can put it on the record.
+            absent.append(SourceObject(
+                key=key,
+                path=str(target),
+                size=want.size,
+                digest=want.digest.strip().lower(),
+            ))
             continue
         if recheck:
             ok, detail = _destination_proves(dest_root, key, want.digest)
             if not ok:
+                refusal_keys.append(key)
                 refusals.append(Blocker(
                     f"destination_live_check_failed:{detail}",
                     f"{key}: the destination object no longer matches the source digest",
@@ -646,11 +860,16 @@ def plan_release(
         considered=considered,
         deletable=len(objects),
         deletable_bytes=sum(o.size for o in objects),
-        already_absent=already_absent,
+        already_absent=len(absent),
         objects=tuple(objects),
+        absent_objects=tuple(absent),
         ledger_notes=tuple(notes),
         blockers=(),
-        refusals=tuple(refusals[:max_samples]),
+        # Uncapped on purpose: every one of these becomes a keyed `refused` row in
+        # the audit, and a ledger that names 20 of 5000 refusals reads as a clean
+        # release. The report caps it instead - see ReleasePlan.to_dict().
+        refusals=tuple(refusals),
+        refusal_keys=tuple(refusal_keys),
         mode=MODE_PROPOSAL,
     )
 
@@ -662,8 +881,18 @@ def _blocked_plan(
     allowed: bool,
     blockers: List[Blocker],
     notes: List[str],
+    *,
+    near_missed: Optional[List[str]] = None,
+    refusals: Optional[List[Blocker]] = None,
+    refusal_keys: Optional[List[str]] = None,
 ) -> ReleasePlan:
-    """A refusal. ``objects`` is empty because a partial proposal is not offered."""
+    """A refusal. ``objects`` is empty because a partial proposal is not offered.
+
+    ``near_missed`` and ``refusals`` are carried through anyway: the run is
+    refused, but the objects it choked on are still named, and the executed pass
+    puts each of them on the record so an auditor can see which objects a whole-run
+    refusal was about rather than only that something was refused.
+    """
     return ReleasePlan(
         campaign_id=campaign.campaign_id,
         state=state.value,
@@ -671,8 +900,11 @@ def _blocked_plan(
         release_allowed=allowed,
         considered=0,
         objects=(),
+        near_missed=tuple(near_missed or ()),
         ledger_notes=tuple(notes),
         blockers=tuple(blockers),
+        refusals=tuple(refusals or ()),
+        refusal_keys=tuple(refusal_keys or ()),
         mode=MODE_PROPOSAL,
     )
 
@@ -729,15 +961,90 @@ def audit_ends_unterminated(path: str | Path) -> bool:
         return False
 
 
+def _dumps(row: Dict[str, Any]) -> str:
+    """One audit row as it is written: compact, sorted keys, no spaces."""
+    return json.dumps(row, sort_keys=True, separators=(",", ":"))
+
+
 def _audit(handle, row: Dict[str, Any]) -> None:
     """Append one record: compact, sorted keys, newline-terminated, fsynced.
 
     The trailing newline is load-bearing, not cosmetic: an unterminated final
     line reads as an interrupted producer and makes :func:`read_audit` incoherent.
     """
-    handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+    handle.write(_dumps(row) + "\n")
     handle.flush()
     os.fsync(handle.fileno())
+
+
+def _append(handle, row: Dict[str, Any]) -> bool:
+    """Append one record, reporting whether the ledger actually took it.
+
+    Never raises. An unwritable audit has to stop the pass, not abort it with an
+    exception that names no key and leaves no ``ReleaseResult`` for the caller to
+    print - which is exactly what the ``raise`` this replaced did.
+
+    A partial append is left where it fell. The torn tail is the honest fingerprint
+    of a producer that died mid-write, and the next run closes the line off and
+    ``read_audit()`` keeps reporting ``coherent=False`` until it is rebuilt.
+    """
+    try:
+        _audit(handle, row)
+    except OSError:
+        return False
+    return True
+
+
+def _record_bytes(row: Dict[str, Any]) -> int:
+    """Bytes :func:`_audit` would spend on ``row``, including the newline."""
+    return len(_dumps(row).encode("utf-8")) + 1
+
+
+def _audit_room(path: Path, needed: int) -> bool:
+    """True when the audit's filesystem plausibly has ``needed`` bytes free.
+
+    Asked about the *directory*, not the audit file, because free space is a
+    property of the filesystem and the file may not exist yet.
+
+    Returns True when the question cannot be answered. A filesystem that will not
+    report its free space is not evidence that it has none, and refusing a release
+    on a guess would be a worse failure than the one this guards against - so the
+    unknown case proceeds, and the per-record check plus the stop-on-append-failure
+    in :func:`execute_release` are what actually bound the damage.
+    """
+    try:
+        stat = os.statvfs(path)
+    except OSError:
+        return True
+    return stat.f_bavail * stat.f_frsize >= needed
+
+
+def _reserve_bytes(plan: ReleasePlan, decided_at: Optional[str]) -> int:
+    """Upper bound on the bytes this pass could append, before it appends any.
+
+    Measured per candidate object rather than guessed per card, because the row
+    size is dominated by the key and path, which come from a ledger and are not
+    known until classification is done. ``_DETAIL_RESERVE`` covers the one field
+    whose value is not yet known; ``_AUDIT_SLACK_BYTES`` covers the run summary and
+    whatever the filesystem rounds a write up to.
+
+    A lower bound here would be the dangerous direction, so this errs high - and it
+    is still only a guard. The per-row check in :func:`execute_release` is the one
+    that runs immediately before each write.
+    """
+    total = _AUDIT_SLACK_BYTES
+    for obj in tuple(plan.objects) + tuple(plan.absent_objects):
+        total += _record_bytes(_audit_record(
+            campaign_id=plan.campaign_id,
+            event=DELETED,
+            decided_at=decided_at,
+            key=obj.key,
+            path=obj.path,
+            size=obj.size,
+            digest=obj.digest,
+            detail="x" * _DETAIL_RESERVE,
+        ))
+    return total + len(plan.refusals) * _REFUSAL_RESERVE_BYTES
 
 
 def _audit_record(
@@ -782,11 +1089,19 @@ def _read_audit_path(path: str | Path) -> AuditRead:
     - the executed pass, immediately after appending its own records - does not
     have to reconstruct it from the bundle. It is a reader and nothing else: no
     mode other than ``r``, no repair, no truncation.
+
+    An event name is data, not structure: a ledger is a file on disk and anyone can
+    append to one. So ``by_event`` counts only :data:`AUDIT_EVENTS` and everything
+    else lands in ``unknown`` as a single integer. Without that, a ledger padded
+    with 67k invented event names would grow a dict that this report promises is a
+    fixed shape - and the report is the thing an operator reads.
     """
     p = Path(path)
     by_event: Dict[str, int] = {}
+    settled: Set[str] = set()
     records = deleted = deleted_bytes = 0
-    refused = absent = failed = malformed = unattributed = 0
+    refused = absent = failed = malformed = unattributed = unknown = 0
+    runs = run_proposed = run_handled = 0
     truncated = False
     if p.is_file():
         with p.open("r", encoding="utf-8", errors="replace") as handle:
@@ -806,19 +1121,33 @@ def _read_audit_path(path: str | Path) -> AuditRead:
                     continue
                 records += 1
                 event = str(row.get("event") or "")
-                by_event[event] = by_event.get(event, 0) + 1
-                keyed = bool(str(row.get("key") or "").strip())
+                key = str(row.get("key") or "").strip()
+                if event in AUDIT_EVENTS:
+                    by_event[event] = by_event.get(event, 0) + 1
+                else:
+                    unknown += 1
                 if event == DELETED:
                     deleted += 1
                     deleted_bytes += _count_bytes(row.get("size"))
                 elif event == REFUSED:
                     refused += 1
-                    if not keyed:
+                    if not key:
                         unattributed += 1
                 elif event == ABSENT:
                     absent += 1
                 elif event == FAILED:
                     failed += 1
+                elif event == RUN:
+                    # Last write wins, like every other ledger read in this module:
+                    # a re-run's summary describes the card as it is now.
+                    runs += 1
+                    run_proposed = _count_bytes(row.get("proposed"))
+                    run_handled = sum(
+                        _count_bytes(row.get(field))
+                        for field in ("absent", "deleted", "failed", "refused")
+                    )
+                if key and event in SETTLING_EVENTS:
+                    settled.add(key)
     return AuditRead(
         present=p.is_file(),
         path=str(p),
@@ -831,22 +1160,28 @@ def _read_audit_path(path: str | Path) -> AuditRead:
         malformed=malformed,
         truncated=truncated,
         unattributed=unattributed,
+        unknown=unknown,
+        runs=runs,
+        run_proposed=run_proposed,
+        run_handled=run_handled,
+        settled_keys=frozenset(settled),
         by_event=by_event,
     )
 
 
 def _count_bytes(value: Any) -> int:
-    """A record's ``size`` as a non-negative int. Anything else contributes zero.
+    """An untrusted number from a ledger row, as a non-negative int.
 
     A ledger is a file on disk, so its numbers are untrusted like its keys: a
-    missing, negative or non-numeric ``size`` must not make the cumulative byte
-    total go backwards, and must not raise.
+    missing, negative or non-numeric value must not make a cumulative total go
+    backwards, must not raise, and - for the ``run`` summary - must not be able to
+    claim a pass handled more than it proposed.
     """
     try:
-        size = int(value)
+        number = int(value)
     except (TypeError, ValueError):
         return 0
-    return size if size > 0 else 0
+    return number if number > 0 else 0
 
 
 # ---------------------------------------------------------------------------
@@ -871,16 +1206,36 @@ def execute_release(
     is created, and the returned result is the proposal. ``execute=True`` is the
     authorized pass, and it is the only path that calls ``Path.unlink``.
 
-    Order inside the pass, per object: confirm the gate said yes, resolve the key
-    defensively, re-verify the destination bytes live, unlink, then fsync the audit
-    record. A failure at any step leaves the source object in place and records why.
+    **The audit row is written and fsynced before the unlink, never after.** Order
+    inside the pass, per object: confirm the gate said yes, resolve the key
+    defensively, re-verify the destination bytes live, append the ``deleted`` row,
+    then unlink. A refusal at the destination leaves the source object in place and
+    records why. An append that fails leaves the source object in place too and
+    stops the pass - which is the whole point: unlink-then-record loses the record
+    exactly when the ledger is unwritable, and then the card holds fewer files than
+    any row admits while ``read_audit()`` still calls the ledger coherent.
 
-    Idempotent: a second run finds every key already absent, unlinks nothing, and
-    appends a zeroed run summary. It does **not** append a per-object ``absent``
-    record, because ``plan_release`` counts an already-gone key as ``already_absent``
-    and never offers it as a candidate - so ``ABSENT`` remains a defined event with
-    no producer. That is a gap in the audit's completeness, not in its safety: the
-    destructive counters it reports are unaffected.
+    The bias that buys is one-directional. An unlink that fails *after* its row
+    landed leaves a ``deleted`` and a ``failed`` row for the same key, so the audit
+    can over-report a deletion that did not happen. It can never under-report one
+    that did.
+
+    Three guards, in order, all of which refuse before touching the card: the audit
+    must be openable, its filesystem must plausibly have room for every row this
+    pass could write, and each row is checked again immediately before it is
+    written. An audit that cannot take a row is a refusal with a reason, not an
+    exception - see :func:`_append`.
+
+    Idempotent. A second run finds every key already accounted for, unlinks nothing,
+    and appends a zeroed run summary. It does **not** re-append an ``absent`` row
+    for a key an earlier pass already recorded: see :data:`SETTLING_EVENTS` and the
+    ABSENT section of the module docstring. An ``absent`` row is written only for a
+    key that is proven in both ledgers, gone from the source, and *not* already
+    explained by the audit - which is the case an auditor cannot otherwise resolve.
+
+    ``limit`` bounds the destructive decisions per pass, not the audit rows: an
+    ``absent`` finding destroys nothing and is recorded whatever the limit, and it
+    is charged to nothing.
 
     Every return path carries ``audit_summary``: the append-only ledger re-read
     after the pass, so :func:`to_evidence` publishes cumulative counts rather
@@ -909,7 +1264,7 @@ def execute_release(
         refused=len(plan.refusals),
         blockers=plan.blockers,
         ledger_notes=plan.ledger_notes,
-        error_samples=tuple(f"{b.code}:{b.detail}" for b in plan.refusals),
+        error_samples=tuple(f"{b.code}:{b.detail}" for b in plan.refusals[:max_errors]),
         key_samples=plan.keys[:max_errors],
         # A proposal writes nothing, so this is the previous pass's view - which
         # is exactly right: applying a dry run's fragment restates the record.
@@ -920,78 +1275,205 @@ def execute_release(
 
     dest_root = Path(destination_root)
     audit.parent.mkdir(parents=True, exist_ok=True)
-    with audit.open(AUDIT_MODE, encoding="utf-8") as handle:
+
+    # Guard 1: is there room for everything this pass could write? Asked before the
+    # card is touched, so a nearly-full volume is refused rather than emptied first.
+    reserve = _reserve_bytes(plan, decided_at)
+    if not _audit_room(audit.parent, reserve):
+        return replace(
+            result,
+            mode=MODE_REFUSED,
+            blockers=plan.blockers + (Blocker(
+                "audit_ledger_lacks_room",
+                f"the pass could append up to {reserve}B and the filesystem holding "
+                f"{audit.parent} cannot promise it",
+                "free space on the campaign volume, or move the bundle, then re-run; "
+                "nothing is deleted on the strength of a record that cannot be written",
+            ),),
+            audit_summary=_read_audit_path(audit),
+        )
+
+    try:
+        handle = audit.open(AUDIT_MODE, encoding="utf-8")
+    except OSError as exc:
+        return replace(
+            result,
+            mode=MODE_REFUSED,
+            blockers=plan.blockers + (Blocker(
+                "audit_ledger_is_unwritable",
+                f"{exc.strerror or exc} ({audit})",
+                "make the bundle's ledgers/ writable and re-run; a release that "
+                "cannot be recorded is not performed",
+            ),),
+            audit_summary=_read_audit_path(audit),
+        )
+
+    with handle:
         repaired = audit_ends_unterminated(audit)
         if repaired:
             # Close off the torn line so the record below stands alone. It is not
             # repaired - guessing where truncated JSON ended would be inventing
             # evidence - and read_audit() still reports the ledger incoherent.
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+            try:
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            except OSError:
+                return replace(
+                    result,
+                    mode=MODE_REFUSED,
+                    blockers=plan.blockers + (Blocker(
+                        "audit_ledger_is_unwritable",
+                        f"the torn tail of {audit} could not be closed off",
+                        "free space on the campaign volume, or move the bundle, "
+                        "then re-run; nothing is deleted",
+                    ),),
+                    audit_summary=_read_audit_path(audit),
+                )
 
         if plan.blockers:
-            _audit(handle, _audit_record(
+            recorded = _append(handle, _audit_record(
                 campaign_id=plan.campaign_id,
                 event=REFUSED,
                 decided_at=decided_at,
                 detail=_blocker_summary(plan.blockers, max_errors),
             ))
-            return replace(result, mode=MODE_REFUSED, audit_unterminated_repaired=repaired,
-                           audit_summary=_read_audit_path(audit))
-
-        deleted = deleted_bytes = failed = refused = 0
-        errors: List[str] = []
-        for obj in plan.objects:
-            if limit is not None and (deleted + failed + refused) >= limit:
-                break
-            ok, detail = _destination_proves(dest_root, obj.key, obj.digest)
-            if not ok:
-                refused += 1
-                if len(errors) < max_errors:
-                    errors.append(f"{obj.key}:{detail}")
-                _audit(handle, _audit_record(
+            # A refusal that names no key tells an auditor nothing about which
+            # objects were near-missed, so each one the plan did identify gets its
+            # own keyed row. `unattributed` is what tells the two apart afterwards.
+            for key in plan.near_missed:
+                if not _append(handle, _audit_record(
                     campaign_id=plan.campaign_id,
                     event=REFUSED,
+                    decided_at=decided_at,
+                    key=key,
+                    detail=_blocker_summary(plan.blockers, max_errors),
+                )):
+                    recorded = False
+            return replace(result, mode=MODE_REFUSED,
+                           audit_unterminated_repaired=repaired,
+                           audit_append_failed=not recorded,
+                           audit_summary=_read_audit_path(audit))
+
+        errors: List[str] = []
+        notes: List[str] = list(result.ledger_notes)
+        broke = False
+
+        # A plan-time refusal is a decision about one object, so it gets a row like
+        # any other. It used to reach only stdout: the audit held no trace of the
+        # key, `to_evidence` reported `refused=0, complete=True`, and
+        # `release.py`'s `source_release_incomplete` never fired - a campaign read
+        # as a clean release while the object sat on the card unexplained.
+        refused = 0
+        for key, blocker in plan.refusal_entries:
+            refused += 1
+            if len(errors) < max_errors:
+                errors.append(f"{blocker.code}:{blocker.detail}")
+            if not _append(handle, _audit_record(
+                campaign_id=plan.campaign_id,
+                event=REFUSED,
+                decided_at=decided_at,
+                key=key,
+                detail=blocker.code,
+            )):
+                broke = True
+                notes.append("audit_append_failed_on_a_plan_refusal")
+                break
+
+        # An already-gone key with no `deleted` and no `absent` row: the one case
+        # the audit could not previously resolve. Only unsettled keys are written,
+        # so a re-run adds nothing and no counter drifts.
+        recorded_absent = 0
+        if not broke:
+            for obj in plan.absent_objects:
+                if obj.key in result.audit_summary.settled_keys:
+                    continue
+                recorded_absent += 1
+                if not _append(handle, _audit_record(
+                    campaign_id=plan.campaign_id,
+                    event=ABSENT,
+                    decided_at=decided_at,
+                    key=obj.key,
+                    path=obj.path,
+                    size=obj.size,
+                    digest=obj.digest,
+                    detail="in_both_ledgers_but_not_on_the_source",
+                )):
+                    broke = True
+                    notes.append("audit_append_failed_on_an_absent_finding")
+                    break
+
+        deleted = deleted_bytes = failed = 0
+        if not broke:
+            for obj in plan.objects:
+                if limit is not None and (deleted + failed + refused) >= limit:
+                    break
+                ok, detail = _destination_proves(dest_root, obj.key, obj.digest)
+                if not ok:
+                    refused += 1
+                    if len(errors) < max_errors:
+                        errors.append(f"{obj.key}:{detail}")
+                    if not _append(handle, _audit_record(
+                        campaign_id=plan.campaign_id,
+                        event=REFUSED,
+                        decided_at=decided_at,
+                        key=obj.key,
+                        path=obj.path,
+                        size=obj.size,
+                        digest=obj.digest,
+                        detail=detail,
+                    )):
+                        broke = True
+                        notes.append(f"audit_append_failed_at={obj.key}")
+                        break
+                    continue
+                row = _audit_record(
+                    campaign_id=plan.campaign_id,
+                    event=DELETED,
                     decided_at=decided_at,
                     key=obj.key,
                     path=obj.path,
                     size=obj.size,
                     digest=obj.digest,
                     detail=detail,
-                ))
-                continue
-            try:
-                Path(obj.path).unlink()
-            except OSError as exc:
-                failed += 1
-                if len(errors) < max_errors:
-                    errors.append(f"{obj.key}:{exc.strerror or exc}")
-                _audit(handle, _audit_record(
-                    campaign_id=plan.campaign_id,
-                    event=FAILED,
-                    decided_at=decided_at,
-                    key=obj.key,
-                    path=obj.path,
-                    size=obj.size,
-                    detail=str(exc),
-                ))
-                continue
-            deleted += 1
-            deleted_bytes += obj.size
-            _audit(handle, _audit_record(
-                campaign_id=plan.campaign_id,
-                event=DELETED,
-                decided_at=decided_at,
-                key=obj.key,
-                path=obj.path,
-                size=obj.size,
-                digest=obj.digest,
-                detail=detail,
-            ))
+                )
+                # Guard 2: the row has to fit before the byte it describes is gone.
+                if not _audit_room(audit.parent, _record_bytes(row)):
+                    broke = True
+                    notes.append(f"audit_append_has_no_room_for={obj.key}")
+                    break
+                # Guard 3, and the load-bearing one: the record lands first. If it
+                # does not, this object is still on the card and nothing after it is
+                # attempted.
+                if not _append(handle, row):
+                    broke = True
+                    notes.append(f"audit_append_failed_at={obj.key}")
+                    break
+                try:
+                    Path(obj.path).unlink()
+                except OSError as exc:
+                    failed += 1
+                    if len(errors) < max_errors:
+                        errors.append(f"{obj.key}:{exc.strerror or exc}")
+                    _append(handle, _audit_record(
+                        campaign_id=plan.campaign_id,
+                        event=FAILED,
+                        decided_at=decided_at,
+                        key=obj.key,
+                        path=obj.path,
+                        size=obj.size,
+                        detail=str(exc),
+                    ))
+                    continue
+                deleted += 1
+                deleted_bytes += obj.size
 
-        # Bounded run summary: counters only, never a row per object.
-        _audit(handle, {
+        # Bounded run summary: counters only, never a row per object. Its `proposed`
+        # is every object this pass reached a verdict on - the proposed deletions
+        # plus the plan-time refusals - so a reader can tell a finished pass from a
+        # truncated one by comparing it against what was actually handled.
+        if not _append(handle, {
+            "absent": recorded_absent,
             "already_absent": plan.already_absent,
             "at": decided_at,
             "campaign_id": plan.campaign_id,
@@ -1001,17 +1483,21 @@ def execute_release(
             "event": RUN,
             "failed": failed,
             "mode": MODE_EXECUTED,
-            "proposed": plan.deletable,
+            "proposed": plan.deletable + len(plan.refusals),
             "refused": refused,
-        })
+        }):
+            broke = True
+            notes.append("audit_append_failed_on_the_run_summary")
         return replace(
             result,
             mode=MODE_EXECUTED,
             deleted=deleted,
             deleted_bytes=deleted_bytes,
             failed=failed,
-            refused=refused + len(plan.refusals),
+            refused=refused,
             audit_unterminated_repaired=repaired,
+            audit_append_failed=broke,
+            ledger_notes=tuple(notes),
             error_samples=tuple(errors),
             # Re-read through a fresh handle: the append handle above is still
             # open, and the counters must include the records this pass wrote.
@@ -1046,6 +1532,11 @@ def to_evidence(result: ReleaseResult, *,
     whole-run refusal attempted nothing so it is not a finished release either.
     The gate reads exactly that as a blocker.
 
+    ``complete`` additionally asks the audit's own last run summary whether it
+    proposed more than it handled (:attr:`AuditRead.finished`). Without that, a
+    pass cut short by a ``--limit`` or by an append failure would still read as a
+    clean release, because every row it managed to write is a clean deletion.
+
     ``last_checkpoint`` is supplied by the caller, never read from a clock, so two
     runs over identical inputs produce identical evidence.
     """
@@ -1059,7 +1550,7 @@ def to_evidence(result: ReleaseResult, *,
             # "a release finished and nothing was left behind" - not "the card is
             # empty", and not "the gate said no": a whole-run refusal attempted
             # nothing, so it is not a finished release either.
-            "complete": audit.coherent and attempted > 0
+            "complete": audit.coherent and audit.finished and attempted > 0
                         and not (audit.failed or refused),
             "error_summary": list(result.error_samples[:max_samples]),
             "failed": audit.failed,
@@ -1088,6 +1579,7 @@ def exit_code(result: ReleaseResult) -> int:
 
 __all__ = [
     "ABSENT",
+    "AUDIT_EVENTS",
     "AUDIT_MODE",
     "DELETED",
     "DESTINATION_PROVEN_STATUSES",
@@ -1101,6 +1593,7 @@ __all__ = [
     "REFUSED",
     "RELEASE_LEDGER",
     "RUN",
+    "SETTLING_EVENTS",
     "AuditRead",
     "ReleasePlan",
     "ReleaseResult",

@@ -14,12 +14,28 @@ The tests therefore pin three things in equal measure:
   than a smaller one;
 * the success - real files gone, real audit records, and a re-run that changes
   nothing.
+
+And, because every defect these tests were added for was found by reading rather
+than by a failing test, they also pin four properties that nothing else checked:
+
+* every event the module declares has a producer, so no event is declared and
+  unreachable (this is what ``ABSENT`` was);
+* ``to_evidence()`` counts ``deleted`` rows out of the ledger and cannot report a
+  release the ledger does not contain - for a clean pass, a pass with refusals,
+  and a re-run;
+* the deletion is recorded **before** it happens, so a ledger that cannot take the
+  row leaves the object on the card rather than losing the record of a deletion
+  that already occurred;
+* a refusal names the objects it was about, and the report stays bounded while
+  the ledger does not.
 """
 from __future__ import annotations
 
 import ast
 import hashlib
 import json
+import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -42,10 +58,12 @@ from auto_ingest.custody.cli import EXIT_GATE_CLOSED as CLI_GATE_CLOSED
 from auto_ingest.custody.cli import EXIT_OK as CLI_OK
 from auto_ingest.custody.cli import EXIT_USAGE as CLI_USAGE
 from auto_ingest.custody.cli import main
+from auto_ingest.custody.evidence import CampaignEvidence
 from auto_ingest.custody.executor import TEMP_DIRNAME
 from auto_ingest.custody.ledger import DESTINATION_LEDGER, HASH_LEDGER, ledger_dir
 from auto_ingest.custody.release import evaluate_release
 from auto_ingest.custody.release_source import (
+    AUDIT_EVENTS,
     EXIT_GATE_CLOSED,
     EXIT_OK,
     EXIT_USAGE,
@@ -67,6 +85,8 @@ pytestmark = pytest.mark.usefixtures("hermetic_mounts")
 
 COUNT = 3
 CARDS = [f"c{i}.mp4" for i in range(COUNT)]
+#: The module-level constants that spell the closed set of audit events.
+NAMED_EVENTS = ("ABSENT", "DELETED", "FAILED", "REFUSED", "RUN")
 
 
 @pytest.fixture(autouse=True)
@@ -136,8 +156,43 @@ def audit_rows(bundle):
             audit_path(bundle).read_text(encoding="utf-8").splitlines()]
 
 
+def deleted_rows(bundle):
+    """The ``deleted`` events physically on the ledger, counted the blunt way."""
+    return [row for row in audit_rows(bundle) if row["event"] == "deleted"]
+
+
+def assert_evidence_agrees_with_the_audit(bundle, result):
+    """The published counts must be the ledger's counts, read back independently.
+
+    ``to_evidence`` publishes from ``result.audit_summary``; this counts the rows on
+    disk instead, so a divergence cannot hide behind the field both read from.
+    """
+    fragment = to_evidence(result)["source_release"]
+    read = read_audit(bundle)
+    on_disk = len(deleted_rows(bundle))
+    assert fragment["released"]["files"] == on_disk == read.deleted
+    assert fragment["released"]["bytes"] == read.deleted_bytes
+    assert fragment["audit_records"] == read.records == len(audit_rows(bundle))
+    return fragment
+
+
 def codes(blockers):
     return [b.code for b in blockers]
+
+
+def as_campaign_evidence(bundle, result):
+    """The campaign's real evidence with only this pass's release block swapped in.
+
+    What ``--apply`` does, done here without writing ``evidence.json`` - writing it
+    is the command layer's job, not this module's. Built on the real evidence rather
+    than a bare document so the gate's verdict reflects this pass and nothing else.
+    """
+    fragment = to_evidence(result)["source_release"]
+    return replace(
+        load_evidence(bundle),
+        source_release=CampaignEvidence.from_dict(
+            {"campaign_id": "x", "source_release": fragment}).source_release,
+    )
 
 
 def append_key(bundle, key, digest, *, size=256, status="verified_at_destination"):
@@ -635,7 +690,10 @@ def test_a_re_run_is_idempotent(tmp_path):
     assert exit_code(again) == EXIT_OK
     assert src_files(src) == []
     assert audit_path(bundle).read_text(encoding="utf-8").startswith(first)
-    assert read_audit(bundle).absent == 0, "absent keys never reached the delete loop"
+    # `absent` stays 0 because every key already has a `deleted` row: its absence
+    # is explained, so recording it again would grow the ledger on every no-op
+    # re-run. The keys that DO need an `absent` row are pinned further down.
+    assert read_audit(bundle).absent == 0
 
 
 def test_a_torn_audit_line_is_closed_off_and_the_damage_stays_visible(tmp_path):
@@ -673,6 +731,489 @@ def test_read_audit_reports_an_absent_ledger_rather_than_inventing_one(tmp_path)
     assert read.records == 0
     assert read.coherent is False
     assert not audit_path(bundle).exists()
+
+
+# ---------------------------------------------------------------------------
+# 6a. ABSENT has a producer: released, or lost?
+# ---------------------------------------------------------------------------
+def test_every_declared_audit_event_has_a_producer_in_this_module():
+    """No declared-but-unreachable event.
+
+    ``ABSENT`` shipped as a constant with a counter on ``AuditRead`` and nothing
+    anywhere that wrote one - ``grep -c "event=ABSENT"`` returned 0 - so the audit
+    could not tell a key an earlier pass released from a key that was simply lost.
+    For an irreversible deletion ledger that is a completeness gap, not a cosmetic
+    one.
+
+    Every event in the closed set must appear at a call site that passes it *as an
+    event*, and nothing outside the set may. Prose does not count, which is why
+    this walks the tree rather than grepping the file: a docstring that names an
+    event would otherwise satisfy the check it exists to fail.
+    """
+    import auto_ingest.custody.release_source as module
+
+    def events_written_by(node):
+        """Event names this function passes to the audit at a call site."""
+        names = set()
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.keyword) and inner.arg == "event":
+                names |= {n.id for n in ast.walk(inner.value) if isinstance(n, ast.Name)}
+            elif isinstance(inner, ast.Dict):
+                for key, value in zip(inner.keys, inner.values):
+                    if isinstance(key, ast.Constant) and key.value == "event":
+                        names |= {n.id for n in ast.walk(value) if isinstance(n, ast.Name)}
+        return names
+
+    # Scoped per function, so a reference that only *models* a row cannot stand in
+    # for a real producer: `_reserve_bytes` builds a maximum-sized row to measure it
+    # and appends nothing, and counting it would let `execute_release` lose its
+    # `DELETED` call site with this test still green.
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    producers = {node.name: events_written_by(node) for node in tree.body
+                 if isinstance(node, ast.FunctionDef)}
+    assert "_reserve_bytes" in producers
+    del producers["_reserve_bytes"]
+
+    produced = set().union(*producers.values())
+    # `_audit_record` forwards its own `event` parameter into the row; that slot is
+    # not a producer, it is the plumbing.
+    produced.discard("event")
+    assert produced == set(NAMED_EVENTS)
+    assert "ABSENT" in produced
+    # ...and the closed set is exactly what those constants spell, so the reader's
+    # bounded `by_event` cannot drift away from what the producer writes.
+    assert {getattr(module, name) for name in NAMED_EVENTS} == set(AUDIT_EVENTS)
+
+
+def test_a_key_that_vanished_on_its_own_is_recorded_as_absent(tmp_path):
+    """The ambiguity ``absent`` exists to resolve, and it is now resolvable.
+
+    The key is proven in the hash ledger and proven at the destination, and it is
+    not on the card. Two histories fit that: a pass released it, or it was removed
+    by something else and never came back. Only a row on the ledger separates them,
+    and before this there was none to write.
+    """
+    bundle, src, dest = build_released(tmp_path)
+    (src / "c1.mp4").unlink()                      # removed by something, not by us
+
+    result = release(bundle, src, dest, execute=True)
+
+    assert result.deleted == COUNT - 1
+    assert result.already_absent == 1
+    absent = [row for row in audit_rows(bundle) if row["event"] == "absent"]
+    assert [row["key"] for row in absent] == ["c1.mp4"]
+    assert absent[0]["size"] == 256 and absent[0]["digest"]
+    assert read_audit(bundle).absent == 1
+
+
+def test_a_key_an_earlier_pass_deleted_is_not_also_recorded_as_absent(tmp_path):
+    """``absent`` is a fact about a key, not an observation on every pass.
+
+    Without this the counter would grow on every no-op re-run and the ledger would
+    fill with rows recording nothing new.
+    """
+    bundle, src, dest = build_released(tmp_path)
+    release(bundle, src, dest, execute=True)
+    before = audit_path(bundle).read_text(encoding="utf-8")
+
+    for _ in range(3):
+        again = release(bundle, src, dest, execute=True)
+        assert again.already_absent == COUNT
+        assert again.audit_summary.absent == 0
+
+    assert read_audit(bundle).absent == 0
+    # ...and everything a re-run appended was its own bounded run summary: one per
+    # pass, and not one of them per key.
+    runs = [row for row in audit_rows(bundle) if row["event"] == "run"]
+    assert len(runs) == 4, "the first pass plus three re-runs"
+    assert len(audit_rows(bundle)) == len(deleted_rows(bundle)) + len(runs)
+    assert audit_path(bundle).read_text(encoding="utf-8").startswith(before)
+
+
+def test_re_running_never_moves_any_audit_counter(tmp_path):
+    """No counter drifts: the destructive and the observational ones alike."""
+    bundle, src, dest = build_released(tmp_path)
+    release(bundle, src, dest, execute=True)
+
+    seen = set()
+    for _ in range(3):
+        read = read_audit(bundle)
+        seen.add((read.deleted, read.absent, read.refused, read.failed,
+                  read.deleted_bytes, read.object_refusals))
+        release(bundle, src, dest, execute=True)
+
+    assert seen == {(COUNT, 0, 0, 0, COUNT * 256, 0)}
+
+
+def test_an_absent_finding_is_a_completeness_note_not_a_failure(tmp_path):
+    """The bytes are verified at the destination; only the card's copy is gone.
+
+    So this must not close the release gate - a key reported missing from the card
+    is not a custody problem, and blocking on it would make a release impossible to
+    ever record. ``SourceReleaseEvidence.clean`` ignores ``absent``, and this pins
+    that it keeps ignoring it.
+    """
+    bundle, src, dest = build_released(tmp_path)
+    (src / "c1.mp4").unlink()
+
+    result = release(bundle, src, dest, execute=True)
+    evidence = as_campaign_evidence(bundle, result)
+
+    assert evidence.source_release.absent == 1
+    assert evidence.source_release.clean is True
+    # ...and the real gate still opens, because nothing is at risk: the bytes are
+    # verified at the destination, only the card's copy of them is gone.
+    decision = evaluate_release(load_campaign(bundle), evidence)
+    assert decision.allowed is True, [b.code for b in decision.blockers]
+
+
+# ---------------------------------------------------------------------------
+# 6b. the published counts are the ledger's counts
+# ---------------------------------------------------------------------------
+def test_the_evidence_counts_a_clean_pass_exactly_as_the_ledger_does(tmp_path):
+    bundle, src, dest = build_released(tmp_path)
+
+    result = release(bundle, src, dest, execute=True)
+    fragment = assert_evidence_agrees_with_the_audit(bundle, result)
+
+    assert fragment["released"] == {"bytes": COUNT * 256, "files": COUNT}
+    assert fragment["complete"] is True
+    assert fragment["started"] is True
+
+
+def test_the_evidence_counts_a_pass_with_refusals_exactly_as_the_ledger_does(tmp_path):
+    """Both shapes of refusal, and the one that used to be invisible.
+
+    A plan-time refusal (a destination proof that disagrees with the source) used to
+    reach only stdout. The ledger held no trace of the key, ``to_evidence``
+    published ``refused=0, complete=True``, and ``release.py``'s
+    ``source_release_incomplete`` never fired - so a campaign read as a clean
+    release while the object sat on the card unexplained.
+    """
+    bundle, src, dest = build_released(tmp_path)
+    rewrite_destination_rows(bundle, lambda rows: [{**rows[0], "digest": "f" * 64},
+                                                    *rows[1:]])
+
+    result = release(bundle, src, dest, execute=True)
+    fragment = assert_evidence_agrees_with_the_audit(bundle, result)
+
+    assert result.deleted == COUNT - 1
+    assert result.refused == 1
+    assert (src / "c0.mp4").exists(), "the refused object is still on the card"
+    assert fragment["refused"] == 1
+    assert fragment["complete"] is False, "the evidence must not call this clean"
+    assert "c0.mp4" in audit_path(bundle).read_text()
+    # ...so the real gate closes on it, and names the refusal as its reason. Before
+    # this the refusal reached only stdout, the block said `refused=0`, and
+    # `source_release_incomplete` never fired.
+    evidence = as_campaign_evidence(bundle, result)
+    decision = evaluate_release(load_campaign(bundle), evidence)
+    assert decision.allowed is False
+    assert "source_release_incomplete" in [b.code for b in decision.blockers]
+
+
+def test_the_evidence_counts_a_pass_with_a_live_refusal_exactly_as_the_ledger_does(tmp_path):
+    """The other shape: the destination rotted between verification and the unlink."""
+    bundle, src, dest = build_released(tmp_path)
+    (dest / "c1.mp4").write_bytes(b"rotted" * 16)
+
+    result = release(bundle, src, dest, execute=True)
+    fragment = assert_evidence_agrees_with_the_audit(bundle, result)
+
+    assert result.refused == 1
+    assert fragment["refused"] == 1
+    assert fragment["complete"] is False
+    assert (src / "c1.mp4").exists()
+
+
+def test_the_evidence_counts_a_re_run_exactly_as_the_ledger_does(tmp_path):
+    """Cumulative, not this pass's delta - restated, never doubled."""
+    bundle, src, dest = build_released(tmp_path)
+    release(bundle, src, dest, execute=True)
+
+    again = release(bundle, src, dest, execute=True)
+    fragment = assert_evidence_agrees_with_the_audit(bundle, again)
+
+    assert again.deleted == 0
+    assert fragment["released"] == {"bytes": COUNT * 256, "files": COUNT}
+    assert fragment["complete"] is True
+
+
+def test_an_invented_event_name_cannot_grow_the_bounded_report(tmp_path):
+    """``by_event`` is part of a report that promises a fixed shape.
+
+    A ledger is a file on disk and anyone can append one. Every unknown event used
+    to become a *key* in ``by_event``, so a ledger padded with invented names grew
+    the operator-facing report without bound. It is now one integer.
+    """
+    bundle, src, dest = build_released(tmp_path)
+    release(bundle, src, dest, execute=True)
+    with audit_path(bundle).open("a", encoding="utf-8") as handle:
+        for i in range(50):
+            handle.write(json.dumps({"event": f"invented-{i}"}) + "\n")
+
+    read = read_audit(bundle)
+
+    assert read.unknown == 50
+    assert set(read.by_event) <= set(AUDIT_EVENTS)
+    assert not [k for k in read.by_event if k.startswith("invented")]
+    assert len(json.dumps(read.to_dict())) < 600
+
+
+# ---------------------------------------------------------------------------
+# 6c. the record is durable BEFORE the byte is destroyed
+# ---------------------------------------------------------------------------
+def test_a_deletion_is_recorded_before_it_happens_not_after(tmp_path, monkeypatch):
+    """The ordering is this module's load-bearing safety property.
+
+    Unlink-then-record loses the record exactly when the ledger cannot take it - a
+    full volume, a read-only remount, an exhausted quota - and then the card holds
+    fewer files than any row admits while ``read_audit()`` still calls the ledger
+    coherent. The proof is a *failed* unlink: if the row were written afterwards it
+    could not exist, so finding one here pins the order.
+    """
+    bundle, src, dest = build_released(tmp_path)
+
+    def refuse(self, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    result = release(bundle, src, dest, execute=True)
+
+    assert result.deleted == 0
+    assert result.failed == COUNT
+    assert src_files(src) == CARDS, "nothing was destroyed"
+    read = read_audit(bundle)
+    assert read.deleted == COUNT, "each intent landed before its unlink ran"
+    assert read.failed == COUNT, "and each failure was recorded after"
+    # The audit over-reports a deletion that did not happen, which is the survivable
+    # direction: the gate closes rather than opening on a lie.
+    assert result.complete is False
+    assert exit_code(result) == EXIT_GATE_CLOSED
+    assert to_evidence(result)["source_release"]["complete"] is False
+
+
+def test_a_ledger_that_stops_taking_rows_leaves_the_card_alone(tmp_path, monkeypatch):
+    """Fail safe, not delete-then-lose-the-record. This is the headline fix.
+
+    Before the reorder the ``OSError`` escaped ``execute_release`` *after* the unlink
+    had already run: the object was gone from the card, no row mentioned it,
+    ``read_audit()`` reported ``coherent=True``, and the caller got a traceback
+    instead of a report. Now the row is written first, so a failed write means the
+    object was never touched.
+    """
+    import auto_ingest.custody.release_source as module
+
+    bundle, src, dest = build_released(tmp_path)
+    real_audit, calls = module._audit, {"n": 0}
+
+    def full(handle, row):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError(28, "No space left on device")
+        return real_audit(handle, row)
+
+    monkeypatch.setattr(module, "_audit", full)
+    result = release(bundle, src, dest, execute=True)     # a result, not an exception
+
+    assert result.mode == MODE_EXECUTED
+    assert result.audit_append_failed is True
+    assert result.complete is False
+    assert exit_code(result) == EXIT_GATE_CLOSED
+    assert "c1.mp4" in [n for n in result.ledger_notes if n.startswith("audit_append")][0]
+    # The object whose record could not be written is STILL ON THE CARD, and
+    # nothing after it was attempted.
+    assert src_files(src) == ["c1.mp4", "c2.mp4"]
+    assert (src / "c1.mp4").exists()
+    assert sorted(row["key"] for row in deleted_rows(bundle)) == ["c0.mp4"]
+    assert_evidence_agrees_with_the_audit(bundle, result)
+
+
+def test_an_audit_that_cannot_be_opened_refuses_instead_of_raising(tmp_path, monkeypatch):
+    """A release that cannot be recorded is not performed.
+
+    Nothing is deleted here either - the failure is caught before the loop - but the
+    difference that matters is the return: a ``ReleaseResult`` with a blocker and an
+    exit code, rather than an ``OSError`` out of a library call.
+    """
+    bundle, src, dest = build_released(tmp_path)
+    real_open = Path.open
+
+    def refuse_append(self, mode="r", *args, **kwargs):
+        if mode == "a":
+            raise PermissionError(13, "Permission denied")
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", refuse_append)
+    result = release(bundle, src, dest, execute=True)
+
+    assert result.mode == MODE_REFUSED
+    assert result.deleted == 0
+    assert src_files(src) == CARDS
+    assert "audit_ledger_is_unwritable" in codes(result.blockers)
+    assert exit_code(result) == EXIT_GATE_CLOSED
+
+
+def test_a_full_volume_refuses_the_run_before_touching_the_card(tmp_path, monkeypatch):
+    """No room for the records means no deletions, decided up front.
+
+    The per-record check is what actually bounds the damage; this is the pre-flight,
+    and its job is to turn a nearly-full volume into a refusal rather than emptying
+    half the card before the writes start failing.
+    """
+    bundle, src, dest = build_released(tmp_path)
+
+    class Full:
+        f_bavail = 0
+        f_frsize = 4096
+
+    monkeypatch.setattr(os, "statvfs", lambda path: Full())
+    result = release(bundle, src, dest, execute=True)
+
+    assert result.mode == MODE_REFUSED
+    assert result.deleted == 0
+    assert src_files(src) == CARDS
+    assert "audit_ledger_lacks_room" in codes(result.blockers)
+    assert not audit_path(bundle).exists(), "a refusal it cannot record invents nothing"
+
+
+def test_the_card_cannot_be_its_own_destination_proof(tmp_path):
+    """Refused before any ledger work: this configuration voids every other guarantee.
+
+    If the source root is also the destination then "proven present at the
+    destination" is proved by the very bytes about to be unlinked, the live
+    re-verification hashes the card against itself, and the gate passes on the card's
+    own contents. Nothing in the ledgers can catch it - ``custody verify`` would have
+    compared the card to the card - so it is refused by resolved-path equality, which
+    also catches a destination symlinked onto the card.
+    """
+    bundle, src, dest = build_released(tmp_path)
+
+    proposal = plan(bundle, src, src)
+    assert proposal.objects == ()
+    assert "source_and_destination_are_the_same_root" in codes(proposal.blockers)
+
+    result = release(bundle, src, src, execute=True)
+    assert result.mode == MODE_REFUSED
+    assert result.deleted == 0
+    assert src_files(src) == CARDS
+    assert "source_and_destination_are_the_same_root" in audit_path(bundle).read_text()
+
+
+# ---------------------------------------------------------------------------
+# 6d. a refusal names what it was about
+# ---------------------------------------------------------------------------
+def test_a_wholesale_refusal_names_the_object_it_choked_on(tmp_path):
+    """A ledger row with no key says "refused" and leaves the real question open:
+    *which* objects were near-missed? The keyed row answers it, and it is what
+    ``unattributed`` now exists to distinguish.
+    """
+    bundle, src, dest = build_released(tmp_path)
+    append_key(bundle, "../escape.mp4", "a" * 64)
+
+    result = release(bundle, src, dest, execute=True)
+
+    assert result.mode == MODE_REFUSED
+    assert result.deleted == 0
+    assert src_files(src) == CARDS
+    read = read_audit(bundle)
+    assert read.unattributed == 1, "the run-level row is still there"
+    assert read.object_refusals == 1, "and the offending key is named beside it"
+    keyed = [row for row in audit_rows(bundle) if row["event"] == "refused" and row["key"]]
+    assert [row["key"] for row in keyed] == ["../escape.mp4"]
+    assert "source_key_is_not_defensibly_resolvable" in codes(result.blockers)
+    # the appended key also broke the inventory cross-check, and both are reported
+    assert len(result.blockers) == 2
+    # An unexplained object on the card keeps the gate closed rather than being
+    # recorded as a clean release.
+    assert to_evidence(result)["source_release"]["complete"] is False
+    assert to_evidence(result)["source_release"]["refused"] == 1
+
+
+def test_a_refusal_that_considered_nothing_names_no_object(tmp_path):
+    """The deliberate half of the rule, and the reason it is a rule.
+
+    A closed gate never looked at a single candidate: every object is still present
+    and releasable. Counting that as an object refusal would poison the campaign for
+    ever, and the next successful pass could not clear it. So this stays run-level
+    and stays ``unattributed``.
+    """
+    bundle, src, dest = build_released(tmp_path)
+    import_evidence(bundle, {"reconciliation": {"source_only": 1}}, apply=True)
+
+    result = release(bundle, src, dest, execute=True)
+
+    assert result.mode == MODE_REFUSED
+    read = read_audit(bundle)
+    assert read.refused == 1
+    assert read.unattributed == 1
+    assert read.object_refusals == 0
+    assert to_evidence(result)["source_release"]["refused"] == 0
+    assert to_evidence(result)["source_release"]["released"] == {"bytes": 0, "files": 0}
+
+
+def test_the_refusal_ledger_is_per_object_and_the_report_is_not(tmp_path):
+    """The ledger names every refusal; the report stays a fixed size.
+
+    The tempting alternative - cap the ledger at ``MAX_SUMMARY_ENTRIES`` - is exactly
+    the defect this module exists to prevent: a summary naming 20 of 5000 refusals
+    reads as a release that was clean. So the *ledger* is uncapped and ``to_dict()``
+    is what caps.
+    """
+    bundle, src, dest = build_released(tmp_path)
+    rows = rewrite_destination_rows(bundle, lambda rs: [
+        {**row, "digest": "f" * 64} for row in rs
+    ])
+    assert len(rows) == COUNT
+
+    result = release(bundle, src, dest, execute=True)
+    read = read_audit(bundle)
+
+    assert result.refused == COUNT
+    assert read.object_refusals == COUNT, "every refusal is on the record"
+    assert len(result.error_samples) <= 20 and len(result.to_dict()["audit"]) < 600
+    assert to_evidence(result)["source_release"]["refused"] == COUNT
+
+
+# ---------------------------------------------------------------------------
+# 6e. `limit` and re-runs
+# ---------------------------------------------------------------------------
+def test_a_limit_bounds_the_pass_and_the_audit_says_it_did_not_finish(tmp_path):
+    """``limit`` is per pass, and a truncated pass never reads as a finished one.
+
+    Every row a truncated pass writes is a clean deletion, so without the run
+    summary's own ``proposed``/``handled`` comparison the evidence would call it
+    complete.
+    """
+    bundle, src, dest = build_released(tmp_path)
+
+    limited = release(bundle, src, dest, execute=True, limit=1)
+    fragment = assert_evidence_agrees_with_the_audit(bundle, limited)
+
+    assert limited.deleted == 1
+    assert limited.complete is False
+    assert fragment["complete"] is False
+    assert fragment["released"]["files"] == 1
+    assert read_audit(bundle).finished is False
+
+    rest = release(bundle, src, dest, execute=True)          # no limit: finish it
+    finished = assert_evidence_agrees_with_the_audit(bundle, rest)
+
+    assert rest.deleted == COUNT - 1
+    assert rest.complete is True
+    assert finished["complete"] is True
+    assert finished["released"]["files"] == COUNT, "cumulative across the two passes"
+
+
+def test_a_limit_of_zero_deletes_nothing(tmp_path):
+    bundle, src, dest = build_released(tmp_path)
+
+    result = release(bundle, src, dest, execute=True, limit=0)
+
+    assert result.deleted == 0
+    assert result.complete is False
+    assert src_files(src) == CARDS
+    assert deleted_rows(bundle) == []
 
 
 def test_the_instant_is_supplied_not_invented(tmp_path):
