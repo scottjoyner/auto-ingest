@@ -22,6 +22,7 @@ from custody_helpers import (
 )
 
 from auto_ingest.custody import (
+    CampaignEvidence,
     CampaignState,
     StorageIdentity,
     derive_state,
@@ -267,7 +268,6 @@ def test_verification_complete_with_nothing_verified_blocks():
     definition the state machine uses.
     """
     import custody_helpers as H
-    from auto_ingest.custody import CampaignEvidence, StorageIdentity
 
     identity = StorageIdentity(filesystem_uuid="D", device="/dev/f0",
                                filesystem_type="ext4")
