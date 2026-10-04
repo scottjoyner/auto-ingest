@@ -18,7 +18,7 @@ machine_paths:
   x1-370:
     fileserver_root: /media/scott/SSD_4TB/fileserver
     shared_root: /nas
-    neo4j_uri: bolt://100.64.43.123:7687
+    neo4j_uri: bolt://127.0.0.1:7688
     neo4j_user: neo4j
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: x1-370
@@ -35,6 +35,19 @@ machine_paths:
     hostname_pattern: ""
     hot_ssd_root: /media/scott/SSD_4TB/audio
     nas_mirror_root: /nas
+
+  # Beelink transition guard. Its current /nas is still the physical
+  # Btrfs pool root, not the same logical namespace clients see. Keep new
+  # shared-root work fail-closed there until the planned mount cutover.
+  beelink-transition:
+    hostname_pattern: BEELINK-RYZEN-7-MINI-PC
+    shared_root: null
+    fileserver_root: null
+    hot_ssd_root: null
+    nas_mirror_root: null
+    neo4j_uri: bolt://100.64.43.123:7687
+    neo4j_user: neo4j
+    neo4j_password: ${NEO4J_PASSWORD}
 
   # deathstar-XPS-8920 — local first-cache plus /nas shared storage
   deathstar:

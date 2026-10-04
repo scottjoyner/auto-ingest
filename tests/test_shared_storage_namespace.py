@@ -121,6 +121,29 @@ def test_repository_profiles_pin_fleet_shared_root_to_nas():
     assert cfg["machine_paths"]["x1-370"]["fileserver_root"] != "/nas"
     assert cfg["machine_paths"]["deathstar"]["fileserver_root"] != "/nas"
 
+    # x1 talks directly to the published Docker port. Remote profiles use the
+    # Tailscale TCP forward, which terminates at x1:7688.
+    assert cfg["machine_paths"]["x1-370"]["neo4j_uri"] == "bolt://127.0.0.1:7688"
+    assert cfg["machine_paths"]["any"]["neo4j_uri"] == "bolt://100.64.43.123:7687"
+    assert cfg["machine_paths"]["deathstar"]["neo4j_uri"] == "bolt://100.64.43.123:7687"
+
+
+def test_beelink_transition_profile_fails_closed_for_shared_root(monkeypatch):
+    import auto_ingest_config as cfg
+
+    monkeypatch.setattr(cfg.socket, "gethostname", lambda: "BEELINK-RYZEN-7-MINI-PC")
+    for name in ("NAS_ROOT", "COLD_STORAGE_ROOT", "FILESERVER_ROOT", "HOT_STORAGE_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+
+    layout = cfg.get_storage_layout()
+    assert layout["shared_root"] == ""
+    assert layout["cold_root"] == ""
+    assert layout["fileserver_root"] == ""
+    assert layout["hot_root"] == ""
+
+    with pytest.raises(RuntimeError, match="Shared NAS root is not configured"):
+        cfg.get_shared_root()
+
 
 def test_repository_custody_and_knowledge_paths_use_namespace_contract():
     cfg = yaml.safe_load((REPO_ROOT / "config.yaml").read_text())

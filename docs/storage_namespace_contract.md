@@ -196,20 +196,96 @@ not independently prove byte presence or custody.
 Before adding new storage labels, audit the live graph for existing file/media,
 source, manifest, path, device, and artifact concepts.
 
-## Current graph-audit blocker
+## Live graph audit — 2026-10-04
 
-A read-only live graph audit attempted during this slice found runtime/config
-drift on x1:
+The endpoint topology is now proven:
 
-- committed auto-ingest config resolves x1 Neo4j to `127.0.0.1:7687`;
-- the healthy Docker Neo4j service is currently published on host port `7688`;
-- the configured auto-ingest credential does not authenticate to that live
-  endpoint.
+```text
+x1 host-native clients
+  -> bolt://127.0.0.1:7688
+  -> canonical neo4j container
 
-No secret was extracted or exposed to bypass this.
+fleet / remote clients
+  -> bolt://100.64.43.123:7687
+  -> Tailscale TCP forward
+  -> localhost:7688
+  -> canonical neo4j container
+```
 
-Resolve the Neo4j endpoint/auth contract as a separate bounded change before
-using live schema results to design the storage projection.
+A separate `syntaxlab` Neo4j container exists on the default Docker bridge. It
+is not the canonical knowledge graph and must not be used as a storage-catalog
+target.
+
+The canonical `neo4j` database currently exposes 106 labels. Storage/content
+concepts relevant to this design include:
+
+| Label | Count | Current meaning / useful properties |
+|---|---:|---|
+| `Media` | 41,040 | content assets; `media_id`, `path`, size/type, timestamp, GPS, embeddings |
+| `Dataset` | 3,321 | research/evaluation datasets, linked to `Paper` with `EVALUATES_ON` |
+| `DriveVolume` | 70 | physical/logical drive observations: host, device, fstype, mountpoint, size |
+| `MountPoint` | 31 | fleet mount observations, linked from `HardwareProfile` with `HAS_MOUNT` |
+| `DiskVolume` | 19 | capacity/utilization snapshots and mount/path fields |
+| `DiskMount` | 12 | mount/capacity snapshots |
+| `Transcription` | 125 | transcript artifacts with source-media/source-file references |
+| `Device` | 2 | current recovery/import device records |
+| `ModelArtifact` | 1 | model artifact identity/capability metadata |
+
+Important negative findings:
+
+- `IngestJob` is implemented in auto-ingest code but is not materialized in this
+  live database yet;
+- `VaultDocument` is implemented by the knowledge-map projection code but is
+  not materialized in this live database yet;
+- there is no existing collection label whose semantics match the fleet
+  `/nas` catalog.
+
+Do **not** reuse `Dataset` for storage collections. Its live meaning is already
+research/benchmark data and changing that semantic would make graph queries
+ambiguous.
+
+The minimum additive projection should therefore be a narrow
+`:StorageCollection` node keyed by the stable collection ID from
+`60-Mappings/nas-collections.yaml`. Initially it should carry only catalog
+metadata such as:
+
+```text
+collection_id
+canonical_path
+current_path
+domain
+lane
+tier
+availability
+durability
+authority
+mutability
+write_priority
+promotion_gate
+catalog_hash
+knowledge_refs
+```
+
+That node is an index/navigation object, not byte-custody evidence. Do not create
+per-file collection relationships in the first projection. Existing `Media`
+nodes already carry paths and can be joined or migrated later through bounded,
+indexed work once canonical-path provenance is proven.
+
+Physical storage topology should continue to use the existing
+`MountPoint`/`DriveVolume`/`DiskVolume` concepts rather than creating
+duplicate volume labels.
+
+### Remaining credential drift
+
+The canonical graph, phonelog, and the active AssistX API/worker currently use
+one consistent runtime credential, but it differs from auto-ingest's historical
+default. Credential restoration is an operational auth change, separate from
+this storage-schema work. The secure remote execution layer refused to perform
+that password mutation automatically, so this branch does not alter live
+credentials.
+
+The storage resolver can still encode the proven endpoint routing independently
+of that credential decision.
 
 ## Branch reconciliation notes
 
@@ -226,13 +302,16 @@ not provide.
 
 ## Validation
 
-On the convergence branch:
+On `feature/nas-contract-20261004`:
 
-- focused namespace/config/custody suite: 202 passed;
-- live x1 resolver check proved shared `/nas` + local SSD processing split;
-- full repository suite: 792 passed, 6 skipped, 4 failed;
-- the same four failures reproduce on current main in
-  `auto_ingest/tests/test_ml_pure.py`, so this slice adds zero new failures.
+- focused storage-catalog/namespace/config/custody suite: **157 passed**;
+- the real knowledge catalog validates as **10 collections** without touching
+  Neo4j or walking `/nas`;
+- Ruff passes for the new catalog module and its contract tests;
+- full repository suite: **804 passed, 6 skipped, 4 failed**;
+- the same four failures are the existing
+  `auto_ingest/tests/test_ml_pure.py` baseline failures, so this slice adds
+  zero functional regressions.
 
 The four baseline failures are outside this storage slice and should not be
 silently repaired here.

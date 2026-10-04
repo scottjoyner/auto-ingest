@@ -8,7 +8,7 @@ machine_paths:
     # Local processing/cache root. Shared durable data is addressed via shared_root.
     fileserver_root: /media/scott/SSD_4TB/fileserver
     shared_root: /nas
-    neo4j_uri: bolt://127.0.0.1:7687
+    neo4j_uri: bolt://127.0.0.1:7688
     neo4j_user: neo4j
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: x1-370
@@ -35,21 +35,36 @@ machine_paths:
     # Local processing/cache root. Shared durable data is addressed via shared_root.
     fileserver_root: /media/scott/SSD_4TB/fileserver
     shared_root: /nas
-    neo4j_uri: bolt://127.0.0.1:7687
+    neo4j_uri: bolt://100.64.43.123:7687
     neo4j_user: neo4j
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: ""
     hot_ssd_root: /media/scott/SSD_4TB/audio
     nas_mirror_root: /nas
 
+  # Beelink physically owns the Btrfs pool, but its current /nas is the
+  # physical pool root while clients see Beelink /nas/fileserver at /nas.
+  # Match it explicitly so it does NOT fall through to the generic /nas profile.
+  # New shared-root work stays fail-closed until the physical pool is moved to
+  # /srv/nas-pool and Beelink /nas becomes the canonical fleet namespace.
+  beelink-transition:
+    hostname_pattern: BEELINK-RYZEN-7-MINI-PC
+    shared_root: null
+    fileserver_root: null
+    hot_ssd_root: null
+    nas_mirror_root: null
+    neo4j_uri: bolt://100.64.43.123:7687
+    neo4j_user: neo4j
+    neo4j_password: ${NEO4J_PASSWORD}
+
   # deathstar-XPS-8920 — local 8TB HDD first-cache/processing layer plus /nas shared storage.
   # Process from /mnt/8TB_2025 when possible, then promote/mirror to the shared namespace.
-  # DR lane: hosts the merged canonical graph locally (bolt://127.0.0.1:7687).
+  # Canonical graph is reached through x1's tailnet listener on port 7687.
   deathstar:
     # Local first-cache/processing root. Shared durable data is addressed via shared_root.
     fileserver_root: /mnt/8TB_2025/fileserver
     shared_root: /nas
-    neo4j_uri: bolt://127.0.0.1:7687
+    neo4j_uri: bolt://100.64.43.123:7687
     neo4j_user: neo4j
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: deathstar
