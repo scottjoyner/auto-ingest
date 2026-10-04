@@ -47,12 +47,58 @@ So this module **detects** the problem and reports it. What it must never do:
   for *comparison* only, so existing fixture campaigns and existing ledgers,
   which use exact-case keys, keep reading unchanged.
 
-Normalisation uses :meth:`str.casefold`, never :meth:`str.lower`. That is not
-stylistic: ``"Straße".lower()`` is ``"straße"``, so a ``.lower()`` comparison
-misses a real ``straße.mp4`` / ``STRASSE.mp4`` collision on a case-insensitive
-filesystem, while ``casefold`` maps both to ``"strasse"`` and finds it.
-``casefold`` is also the operation that scales: it folds ligatures and the
-dotted capital I, both of which a ``.lower()``-based guess would miss.
+Which fold, and why the old one was wrong
+-----------------------------------------
+
+An earlier version of this module normalised with :meth:`str.casefold` and argued
+for it on the strength of ``ß``. That argument was half right and it picked the
+wrong fold, because *case-insensitive* is not the same operation as *case-folded*.
+
+**The destination compares names with a per-character uppercase (upcase) table**:
+a fixed one-to-one lookup from code point to code point, exactly what NTFS keeps
+in ``$UpCase`` and what the case-insensitive drivers use. Case *folding* is a
+different operation with blind spots in the **opposite** direction, so neither
+fold alone is sufficient and this module keeps both (:func:`fold_forms`):
+
+* :meth:`str.casefold` **misses** what the upcase table equates. ``'I'.upper()`` and
+  ``'ı'.upper()`` are both ``U+0049``, so on exFAT/NTFS ``ILKAY.mp4`` and
+  ``ılkay.mp4`` (U+0131, dotless i) are **one filename** - one overwrites the
+  other - while ``'I'.casefold() == 'i'`` and ``'ı'.casefold() == 'ı'``. A
+  casefold-only check called two different objects distinct, hashed both, and
+  queued a copy onto the name already on the card. :func:`simple_upcase` is the
+  primary fold because it models that table.
+* :meth:`str.casefold` **catches** what the upcase table does not. ``'ß'.upper()``
+  is ``'SS'``, but an upcase table maps the single character ``ß`` to ``ß``; the
+  filesystem compares per character, so ``ß`` and ``ss`` are two different files
+  there. casefold maps both to ``ss`` and reports a collision vfat would not.
+
+So a collision is reported when the two keys match under **either** fold. The
+second fold's extra reports are false positives, and that is the intended
+direction, because the two errors are not the same size:
+
+    **over-reporting costs an operator five minutes of renaming;
+    under-reporting costs them the card.**
+
+This code decides whether a human may erase one, so it errs toward reporting.
+
+What the model still gets wrong
+-------------------------------
+
+*It is a model.* No upcase table is available here, so the comparisons are
+Unicode's simple uppercase mappings plus the shipped full-uppercase for every
+character where the two agree. Stated precisely:
+
+* **Turkish locales.** Windows upcases ``i`` to ``U+0130 İ`` in a Turkish
+  locale, which would make ``i.mp4`` and ``İ.mp4`` one name. Neither fold here
+  equates them, because the tables are locale-invariant. That pair is a real,
+  documented blind spot, and it is the one blind spot in the Turkish range.
+* **No normalisation.** NFC and NFD spellings of one name are distinct code-point
+  sequences and are reported as distinct, which is correct for exFAT and wrong for
+  APFS. It needs a normalisation pass of its own, not a guess inside a case fold.
+* **One code point in, one out.** Every character folds to exactly one character,
+  verified across all of Unicode, because that is what a one-to-one table does.
+* **Unknown tables are unknowable.** A future exFAT revision, or a filesystem
+  whose table is not Unicode-derived, is not covered by anything written here.
 """
 
 from __future__ import annotations
@@ -127,6 +173,42 @@ PATH_LIMIT_BYTES = 4096
 VFAT_ILLEGAL_CHARS = frozenset('"*:/<>?\\|\x00') | {chr(c) for c in range(1, 0x20)}
 
 
+def _build_simple_upcase_expansion() -> Dict[str, str]:
+    """The 27 characters whose SIMPLE uppercase is a single *other* character.
+
+    :meth:`str.upper` is Unicode's *full* uppercase mapping, which applies
+    ``SpecialCasing.txt`` on top of the simple mapping and therefore expands 102
+    characters. An upcase table has one slot per code point, so it can only ever do
+    the simple mapping, and for the 75 of those 102 with an empty simple-uppercase
+    field the simple mapping is the identity - the character maps to itself. Only
+    the 27 below have a different one-character answer.
+
+    All 27 are the polytonic Greek small letters with ypogegrammeni whose
+    precomposed capital-with-prosgegrammeni exists, and they come in regular
+    blocks of eight at a fixed ``+0x08`` offset plus three singles: ``1FB3 -> 1FBC``,
+    ``1FC3 -> 1FCC``, ``1FF3 -> 1FFC``. Generated rather than written out so the
+    regularity is visible and a block cannot drift.
+
+    Derived from ``UnicodeData.txt`` field 12 (the *simple* uppercase mapping) and
+    checked against it character for character. Note what it deliberately does NOT
+    do: it does not map ``1F80`` to plain ``Α``. It maps it to ``1F88``, because
+    that is what the Unicode table says and therefore what a Unicode-derived upcase
+    table does - so ``ᾀ`` and ``Α`` really are two names on the card.
+    """
+    table: Dict[str, str] = {}
+    for start in (0x1F80, 0x1F90, 0x1FA0):
+        for offset in range(8):
+            table[chr(start + offset)] = chr(start + 0x08 + offset)
+    for small, capital in ((0x1FB3, 0x1FBC), (0x1FC3, 0x1FCC), (0x1FF3, 0x1FFC)):
+        table[chr(small)] = chr(capital)
+    return table
+
+
+#: Simple-uppercase overrides for characters whose full uppercase expands. Read-only.
+#: See :func:`_build_simple_upcase_expansion` and :func:`simple_upcase`.
+SIMPLE_UPPERCASE_EXPANSION: Dict[str, str] = _build_simple_upcase_expansion()
+
+
 @dataclass(frozen=True)
 class NameProblem:
     """One key that cannot be told apart from, or stored by, the destination.
@@ -153,20 +235,96 @@ class NameProblem:
         return f"{self.kind}: {self.detail}"
 
 
-def fold_key(key: str) -> str:
-    """The comparison form of a custody key: case-folded, per path component.
+def simple_upcase(text: str) -> str:
+    """Uppercase ``text`` the way a one-to-one upcase table does: no expansion.
 
-    Case folding is applied to each component separately because it is each
-    component the filesystem compares, and the separators are already structural.
-    :meth:`str.casefold` rather than :meth:`str.lower`: only casefold treats
-    ``ß`` as ``ss`` (and folds ligatures, and the Turkish dotted capital I), which
-    is precisely the class of name a ``.lower()`` comparison silently misses.
+    One character in, one character out, always. :meth:`str.upper` is the *full*
+    mapping and it expands - ``ß`` becomes ``SS``, ``ﬁ`` becomes ``FI``, the
+    polytonic Greek small letters with ypogegrammeni become a capital plus
+    ``U+0399`` - none of which a per-character table can do, because a table has
+    exactly one slot per code point. Full expansion here would invent collisions
+    the destination does not have.
+
+    Only 102 characters expand at all. For 75 of them Unicode's *simple* uppercase
+    is the character unchanged - ``ß``, ``ﬁ``, ``ﬄ``, ``ŉ``, the Armenian
+    ligatures, ``ǰ``, ``ẖ`` - which is what
+    :data:`SIMPLE_UPPERCASE_EXPANSION`'s absence of them means. The other 27 are
+    the polytonic Greek letters whose precomposed capital exists, and they are
+    listed there. Every one of the 102 is covered.
+
+    The fast path is not a guess: no character's uppercase is *shorter* than itself,
+    so a whole string whose uppercased length equals its own length had every
+    character mapped one-to-one, and the expansion table cannot apply to it.
+    """
+    upcased = text.upper()
+    if len(upcased) == len(text):
+        return upcased
+    return "".join(_simple_upcase_char(ch) for ch in text)
+
+
+def _simple_upcase_char(ch: str) -> str:
+    """The one-character simple uppercase of ``ch``. Private; see :func:`simple_upcase`."""
+    upcased = ch.upper()
+    if len(upcased) == 1:
+        return upcased
+    return SIMPLE_UPPERCASE_EXPANSION.get(ch, ch)
+
+
+def fold_key(key: str) -> str:
+    """The comparison form of a custody key: simple upcased, per path component.
+
+    Uppercasing is applied to each component separately because it is each
+    component the destination compares, and the separators are already structural.
+
+    :func:`simple_upcase` rather than :meth:`str.casefold`: the destination resolves
+    a name through a one-to-one upcase table, and that table sends ``I`` and ``ı``
+    (U+0131) to the same code point. casefold keeps them apart, so a casefold-only
+    comparison called one filename two objects. :meth:`str.lower` is wrong in the
+    other direction again and is never used.
+
+    This is the *primary* comparison form and the one recorded as ``folded``. It is
+    not the whole test - :func:`fold_forms` adds :meth:`str.casefold`, which catches
+    ``ß``/``ss`` and ``ﬁ``/``fi`` that no upcase table equates.
 
     The result is for COMPARISON ONLY. Stored keys - in the ledgers and in
     evidence - stay byte-accurate to the filename, because a custody key is what
     re-opens the object on the card.
     """
-    return "/".join(part.casefold() for part in key.split("/"))
+    return "/".join(simple_upcase(part) for part in key.split("/"))
+
+
+def fold_forms(key: str) -> Tuple[str, ...]:
+    """Every form under which two keys are called the same name. One, or two.
+
+    The upcase form first (:func:`fold_key`), then :meth:`str.casefold` - omitted
+    when the two already agree, which is every ASCII key, so the common case costs
+    one form and one string.
+
+    Two folds rather than one because neither is the destination's behaviour on its
+    own, and a collision is declared when **either** form matches. That is
+    deliberately one-sided: the extra reports are false positives a human resolves
+    in five minutes by renaming, while a missed report is a file overwritten on the
+    card that no one ever sees again. See the module docstring for which pairs each
+    fold catches and which it misses.
+    """
+    upcased = fold_key(key)
+    folded = "/".join(part.casefold() for part in key.split("/"))
+    return (upcased,) if upcased == folded else (upcased, folded)
+
+
+def _fold_index(keys: Iterable[str]) -> Dict[str, List[str]]:
+    """Group ``keys`` by every fold form they share. Form -> the keys holding it.
+
+    The index both comparison checks need, and the reason they cannot simply look
+    one form up: a key appears once per form it has, so a collision under the
+    second fold is found by an entry under the second form. A key whose two forms
+    coincide appears once.
+    """
+    index: Dict[str, List[str]] = {}
+    for key in sorted(set(keys)):
+        for form in fold_forms(key):
+            index.setdefault(form, []).append(key)
+    return index
 
 
 def filename_problem(key: str) -> Optional[str]:
@@ -224,9 +382,9 @@ def detect_name_problems(
     objects this pass happens to hash - a collision is a property of the names
     present on the card, not of one file, so a ``--limit`` probe still reports it.
 
-    * Two **source** keys whose :func:`fold_key` matches: on the card they are
-      one file. Every member of the group is reported, because naming only one of
-      them would be choosing which object silently disappears.
+    * Two **source** keys that share a :func:`fold_forms` form: at the destination
+      they are one file. Every member of every group is reported, because naming
+      only one of them would be choosing which object silently disappears.
     * One **source** key folding onto a name already at the **destination** -
       but only when the spelling *differs*. This is the dangerous one: the copy
       would land on a name that already exists under a different spelling, which
@@ -235,46 +393,67 @@ def detect_name_problems(
       already in custody under its own name - so it is not a collision and must
       never be reported as one.
 
+    A collision is a match under **either** fold form (:func:`fold_forms`), so
+    ``I``/``ı`` - one filename to the destination's upcase table - is found even
+    though casefold keeps them apart, and ``ß``/``ss`` is reported even though the
+    destination's table keeps them apart. The second of those is a false positive
+    and is meant to be: see the module docstring on why over-reporting is the safe
+    direction. Because a key holds one row per kind regardless of how many groups
+    it sits in, one key found by two folds still gets one row listing both partners.
+
+    ``others`` names the keys that share a form with this one and is NOT made
+    transitive. The join of two equivalence relations need not be transitive - if
+    ``b`` shares the upcase form with ``a`` and the casefold form with ``c``, then
+    ``a`` and ``c`` are two genuinely different files at the destination, and
+    calling them a collision would invent a problem out of a name the operator never
+    has to touch. ``b``'s row already names both.
+
     Deterministic in the sorted key order, so two runs over an unchanged source
     produce identical ledgers and identical reports.
     """
     ordered = sorted(set(keys))
-    destination_index: Dict[str, List[str]] = {}
-    for key in sorted(set(destination_keys)):
-        destination_index.setdefault(fold_key(key), []).append(key)
+    destination_index = _fold_index(destination_keys)
+    source_index = _fold_index(ordered)
 
-    by_fold: Dict[str, List[str]] = {}
-    for key in ordered:
-        by_fold.setdefault(fold_key(key), []).append(key)
-
-    problems: List[NameProblem] = []
-    for folded in sorted(by_fold):
-        group = by_fold[folded]
+    # Every key's direct partners under either form, gathered before any row is
+    # written so one key in two groups still yields a single row naming both.
+    partners: Dict[str, Set[str]] = {key: set() for key in ordered}
+    for group in source_index.values():
         if len(group) > 1:
             for key in group:
-                others = tuple(other for other in group if other != key)
-                listed = ", ".join(repr(other) for other in others)
-                problems.append(NameProblem(
-                    kind=CASE_COLLISION,
-                    key=key,
-                    folded=folded,
-                    others=others,
-                    detail=(f"{key!r} is the same file as {listed} on a "
-                            f"case-insensitive filesystem"),
-                ))
-        for key in destination_index.get(folded, ()):
-            for source in group:
-                if source == key:
-                    # Already in custody under its own name. Not a collision.
-                    continue
-                problems.append(NameProblem(
-                    kind=DESTINATION_CASE_COLLISION,
-                    key=source,
-                    folded=folded,
-                    others=(key,),
-                    detail=(f"{source!r} is already present at the destination as "
-                            f"{key!r}; copying it would hit the existing file"),
-                ))
+                partners[key].update(other for other in group if other != key)
+
+    problems: List[NameProblem] = []
+    for key in ordered:
+        # Computed once and reused: it is both the `folded` field and the lookup
+        # key for the destination check, and a full card is 67,000 of these.
+        forms = fold_forms(key)
+        others = tuple(sorted(partners[key]))
+        if others:
+            listed = ", ".join(repr(other) for other in others)
+            problems.append(NameProblem(
+                kind=CASE_COLLISION,
+                key=key,
+                folded=forms[0],
+                others=others,
+                detail=(f"{key!r} is the same file as {listed} on a "
+                        f"case-insensitive filesystem"),
+            ))
+        at_destination: Set[str] = set()
+        for form in forms:
+            at_destination.update(destination_index.get(form, ()))
+        for existing in sorted(at_destination):
+            if existing == key:
+                # Already in custody under its own name. Not a collision.
+                continue
+            problems.append(NameProblem(
+                kind=DESTINATION_CASE_COLLISION,
+                key=key,
+                folded=forms[0],
+                others=(existing,),
+                detail=(f"{key!r} is already present at the destination as "
+                        f"{existing!r}; copying it would hit the existing file"),
+            ))
     for key in ordered:
         reason = filename_problem(key)
         if reason is not None:
@@ -780,6 +959,7 @@ __all__ = [
     "HASHED_STATUS",
     "NAME_COMPONENT_LIMIT_BYTES",
     "PATH_LIMIT_BYTES",
+    "SIMPLE_UPPERCASE_EXPANSION",
     "UNREPRESENTABLE_NAME",
     "UNREPRESENTABLE_NAME_PREFIX",
     "VFAT_ILLEGAL_CHARS",
@@ -791,8 +971,10 @@ __all__ = [
     "digest_file",
     "ends_unterminated",
     "filename_problem",
+    "fold_forms",
     "fold_key",
     "hash_source",
     "recorded_problem_keys",
+    "simple_upcase",
     "to_evidence",
 ]

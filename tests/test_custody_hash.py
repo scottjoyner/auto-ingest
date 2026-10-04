@@ -36,14 +36,17 @@ from auto_ingest.custody.hashing import (
     DESTINATION_CASE_COLLISION,
     HASHED_STATUS,
     NAME_COMPONENT_LIMIT_BYTES,
+    SIMPLE_UPPERCASE_EXPANSION,
     UNREPRESENTABLE_NAME,
     HashProgress,
     already_hashed,
     detect_name_problems,
     digest_file,
     filename_problem,
+    fold_forms,
     fold_key,
     hash_source,
+    simple_upcase,
     to_evidence,
 )
 from auto_ingest.custody.ledger import ledger_dir, reconcile_ledgers, summarize_ledger
@@ -514,7 +517,10 @@ def test_two_keys_differing_only_in_case_are_a_collision_and_both_are_kept(tmp_p
     rows = collision_rows(tmp_path / "bundle")
     assert [row["key"] for row in rows] == ["CLIP_000.mp4", "clip_000.mp4"]
     assert {row["status"] for row in rows} == {CASE_COLLISION}
-    assert rows[0]["folded"] == rows[1]["folded"] == "clip_000.mp4"
+    # `folded` is the comparison form - the destination's UPCASE form, so it is
+    # upper. It is a field on the row, never a rewrite of the key beside it, which
+    # is why the key assertions above are unchanged by it.
+    assert rows[0]["folded"] == rows[1]["folded"] == "CLIP_000.MP4"
     # the sample line names both sides, so an operator sees which two
     assert "clip_000.mp4" in result.name_problems[0]
     assert "CLIP_000.mp4" in result.name_problems[0]
@@ -617,61 +623,226 @@ def test_the_destination_ledger_is_used_when_no_listing_is_passed(tmp_path):
            "'CLIP_0.MP4'" in result.name_problems[0]
 
 
-def test_casefold_finds_the_collision_that_lower_would_miss():
-    """`lower()` is the latent bug: it cannot fold `ß` to `ss`.
+def test_the_upcase_table_folds_dotless_i_which_casefold_does_not(tmp_path):
+    """The headline: `I` and dotless `ı` are ONE filename on exFAT, and casefold missed it.
 
-    On a case-insensitive filesystem `straße.mp4` and `STRASSE.mp4` are one file,
-    and `"Straße".lower()` leaves the ß untouched - so a lower()-based check calls
-    that pair distinct and schedules a copy onto the existing name.
+    U+0049 and U+0131 both upcase to U+0049, so the destination's one-to-one upcase
+    table makes `ILKAY.mp4` and `ılkay.mp4` a single name - the second copy lands on
+    the first and one object is gone. `str.casefold` keeps them apart ('i' vs 'ı'),
+    which is how this pair reached the planner as two distinct objects with a copy
+    queued onto a name the destination already holds.
+
+    Detection is not deduplication: both objects are still hashed, both are still
+    recorded under their exact spellings, no winner is chosen, and the campaign is
+    blocked for a human to resolve.
     """
-    assert "Straße".lower() != "STRASSE".lower()   # the weaker operation is wrong
-    assert fold_key("Straße.mp4") == fold_key("STRASSE.mp4") == "strasse.mp4"
-
-    problems = detect_name_problems(["Straße.mp4", "STRASSE.mp4"])
-    assert [p.kind for p in problems] == [CASE_COLLISION, CASE_COLLISION]
-    assert [p.key for p in problems] == ["STRASSE.mp4", "Straße.mp4"]
-
-
-def test_casefold_folds_the_sharp_s_and_the_dotted_capital_i_as_unicode_specifies():
-    """Real Unicode cases, asserted against actual output rather than intent."""
-    # sharp s -> ss (casefold only; `.lower()` leaves it alone, see above)
-    assert fold_key("Faßband.MP4") == "fassband.mp4"
-    # Turkish dotted capital I folds to i + COMBINING DOT ABOVE - two code points
-    assert fold_key("İLKAY.mp4") == "i̇lkay.mp4"
-    assert len(fold_key("İLKAY.mp4")) == len("ilkay.mp4") + 1
-    # ...which is exactly why it is a *different* name from plain `ILKAY`
-    assert fold_key("İLKAY.mp4") != fold_key("ILKAY.mp4")
-    assert fold_key("ILKAY.mp4") == "ilkay.mp4"
-
-    # ...and that dotted capital + already-decomposed lowercase are one name
-    problems = detect_name_problems(["İLKAY.mp4", "i̇lkay.mp4"])
-    assert [p.kind for p in problems] == [CASE_COLLISION, CASE_COLLISION]
-    assert [p.key for p in problems] == ["i̇lkay.mp4", "İLKAY.mp4"]
-
-
-def test_dotless_i_is_a_known_under_detection_and_is_pinned_as_such(tmp_path):
-    """Documented boundary: casefold is not the filesystem's own upcase table.
-
-    vfat/exFAT resolve a name through the Win32 upcase table, where `I` and `ı`
-    (dotless i) are the same letter, so on the real card `ILKAY.mp4` and
-    `ılkay.mp4` ARE one file. Unicode casefold keeps them apart. That gap is real
-    and this test pins the actual behaviour instead of pretending it is closed;
-    closing it needs the filesystem's upcase table, which is a separate change.
-    """
-    assert "I".casefold() == "i"
-    assert "ı".casefold() == "ı"
-    assert fold_key("ILKAY.mp4") != fold_key("ılkay.mp4")
+    capital_i, dotless_i = "I", "ı"
+    assert capital_i.upper() == dotless_i.upper()      # the on-disk mechanism
+    assert capital_i.casefold() != dotless_i.casefold()   # the fold that missed it
+    assert simple_upcase(capital_i) == simple_upcase(dotless_i) == "I"
 
     keys = {}
-    for spelling in ("ILKAY.mp4", "ılkay.mp4"):
+    for spelling in (f"{capital_i}LKAY.mp4", f"{dotless_i}lkay.mp4"):
         path = tmp_path / "card" / spelling
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"x")
+        path.write_bytes(spelling.encode("utf-8") * 8)
         keys[spelling] = path
+
     result = hash_source(tmp_path / "bundle", keys)
-    assert result.collisions == 0
-    # both are still hashed and recorded, so the gap cannot lose an object
-    assert set(already_hashed(ledger_dir(tmp_path / "bundle") / "hash.jsonl")) == set(keys)
+
+    assert result.collisions == 2, "one collision row per colliding key, not one per pair"
+    assert result.name_problem_count == 2
+    rows = collision_rows(tmp_path / "bundle")
+    assert sorted(r["key"] for r in rows) == sorted(keys)
+    assert {r["status"] for r in rows} == {CASE_COLLISION}
+    # `folded` is the upcase form both names share - the one the destination compares.
+    assert {r["folded"] for r in rows} == {"ILKAY.MP4"}
+    # both sides named in the sample, so an operator sees which two to choose between
+    assert f"{capital_i}LKAY.mp4" in result.name_problems[0]
+    assert f"{dotless_i}lkay.mp4" in result.name_problems[0]
+
+    # BOTH objects survive, byte-accurately, with their own digests: no winner,
+    # no skip, no rename. This is the invariant a dedupe would have broken.
+    hashed = already_hashed(ledger_dir(tmp_path / "bundle") / "hash.jsonl")
+    assert set(hashed) == set(keys)
+    digests = {r["key"]: r["digest"] for r in
+               [json.loads(line) for line in
+                (ledger_dir(tmp_path / "bundle") / "hash.jsonl").read_text().splitlines()]}
+    assert len(set(digests.values())) == 2, "two distinct objects, not one name twice"
+
+
+def test_dotted_capital_i_and_plain_i_are_two_names_and_are_not_reported():
+    """The other direction: not every near-pair is a collision, and this one is not.
+
+    U+0130 `İ` has an empty simple-uppercase field, so an upcase table sends it to
+    itself, while `i` goes to U+0049 `I`. Two different code points are two different
+    filenames on exFAT, and casefold keeps them apart too (`i`+U+0307 vs `i`), so
+    neither fold reports it. Reporting it would be the false positive this design
+    accepts elsewhere, but there is no reason to accept it here: it would block a
+    campaign that has nothing wrong with it.
+
+    The one place this fold is wrong is the Turkish locale, where Windows upcases
+    `i` to `İ` and these two names DO collide. That is documented in the module
+    docstring; the tables here are locale-invariant because a locale is not a
+    property of a filesystem.
+    """
+    dotted, plain = "\u0130", "i"
+    assert simple_upcase(dotted) == dotted != simple_upcase(plain)
+    assert fold_key(f"{dotted}LKAY.mp4") != fold_key("ilkay.mp4")
+    assert detect_name_problems([f"{dotted}LKAY.mp4", "ilkay.mp4"]) == []
+
+
+def test_dotted_capital_i_still_collides_with_its_own_decomposed_lowercase():
+    """The casefold fold earns its place: `İ` casefolds to `i` + U+0307.
+
+    No upcase table can express that - a per-character table has no slot for a
+    two-character sequence - so this pair is invisible to the primary fold and is
+    found by the second one. Both rows appear, and both keys stay in the ledger.
+    """
+    dotted, decomposed = "\u0130", "i\u0307"
+    assert simple_upcase(dotted) != simple_upcase(decomposed)   # upcase cannot see it
+    assert dotted.casefold() == decomposed.casefold()           # casefold can
+
+    problems = detect_name_problems([f"{dotted}LKAY.mp4", f"{decomposed}lkay.mp4"])
+    assert [p.kind for p in problems] == [CASE_COLLISION, CASE_COLLISION]
+    assert [p.key for p in problems] == [f"{decomposed}lkay.mp4", f"{dotted}LKAY.mp4"]
+
+
+@pytest.mark.parametrize("left, right", [
+    ("Straße.mp4", "STRASSE.mp4"),   # sharp s
+    ("Faßband.MP4", "FASSBAND.mp4"),
+    ("ﬁle.mp4", "FILE.mp4"),           # fi ligature
+])
+def test_names_the_upcase_table_keeps_apart_are_still_reported(left, right):
+    """Reported anyway. This is the deliberate false positive, and here is its cost.
+
+    `ß`.upper() is `SS` and `ﬁ`.upper() is `FI`, but a one-to-one table has a single
+    slot per code point, so it maps `ß` to `ß` and the destination holds `ß.mp4`
+    and `SS.mp4` as two separate files. casefold folds both to `ss`/`fi`, so this
+    detector reports a collision the destination does not have.
+
+    Kept on purpose: the cost is an operator renaming a file that did not strictly
+    need renaming, and the alternative error is a file overwritten with nothing
+    showing it happened. One costs five minutes; the other costs a card.
+    """
+    assert simple_upcase(left) != simple_upcase(right)   # the table keeps them apart
+    problems = detect_name_problems([left, right])
+    assert [p.kind for p in problems] == [CASE_COLLISION, CASE_COLLISION]
+    assert sorted(p.key for p in problems) == sorted([left, right])
+
+
+def test_long_s_is_equated_by_both_folds():
+    """The converse data point: some pair agrees under both folds.
+
+    `ſ` is U+017F LATIN SMALL LETTER LONG S. Unicode's *simple* uppercase maps it to
+    U+0053 `S` - a one-character mapping, so an upcase table does the same thing -
+    and casefold maps it to `s` as well. Nothing about this pair is a judgement
+    call; it is what both operations independently say, and what the destination
+    does.
+    """
+    assert simple_upcase("ſ") == simple_upcase("S") == "S"
+    assert "S".casefold() == "ſ".casefold() == "s"
+    problems = detect_name_problems(["S.mp4", "ſ.mp4"])
+    assert [p.kind for p in problems] == [CASE_COLLISION, CASE_COLLISION]
+    assert sorted(p.key for p in problems) == ["S.mp4", "ſ.mp4"]
+
+
+def test_the_original_ascii_case_collision_still_collides():
+    """The behaviour that was already right must stay right: `Photo.MP4`/`photo.mp4`."""
+    assert fold_key("Photo.MP4") == fold_key("photo.mp4") == "PHOTO.MP4"
+    problems = detect_name_problems(["Photo.MP4", "photo.mp4"])
+    assert [p.kind for p in problems] == [CASE_COLLISION, CASE_COLLISION]
+    assert [p.key for p in problems] == ["Photo.MP4", "photo.mp4"]
+    assert detect_name_problems(["A.mp4", "a.mp4"])[0].kind == CASE_COLLISION
+
+
+def test_ascii_names_are_detected_exactly_as_the_old_casefold_only_rule_detected_them():
+    """No behaviour change for the common case, and that is provable rather than hoped.
+
+    For an ASCII name the upcase form is `key.upper()` and the casefold form is
+    `key.lower()`, and on ASCII "equal when uppercased" and "equal when lowercased"
+    are the SAME relation - upper/lower are mutually inverse on ASCII letters. So
+    adding the upcase fold cannot add an ASCII collision, and casefold was already
+    there, so it cannot lose one either. Checked exhaustively rather than asserted.
+    """
+    import itertools
+
+    alphabet = "aA0_.-"
+    names = ["".join(chars) for chars in itertools.product(alphabet, repeat=3)]
+
+    def old_rule(x: str, y: str) -> bool:
+        return x.casefold() == y.casefold()      # what this module used to do
+
+    def new_rule(x: str, y: str) -> bool:
+        return bool(set(fold_forms(x)) & set(fold_forms(y)))
+
+    disagreements = [(x, y) for x, y in itertools.product(names, repeat=2)
+                     if old_rule(x, y) != new_rule(x, y)]
+    assert disagreements == []
+    # ...and the forms themselves are plain upper/lower on ASCII
+    assert fold_forms("A/b_0.MP4") == ("A/B_0.MP4", "a/b_0.mp4")
+    assert fold_forms("123") == ("123",)      # no case at all: one form, not two
+
+
+def test_names_that_really_are_distinct_are_not_reported():
+    """The guard on the other side: over-detection must not turn every card into a blocker.
+
+    Detection decides whether a human may erase a card, so it is deliberately
+    eager - but a detector that flags everything is a detector nobody reads. These
+    keys share no fold form under either fold and must come back clean.
+    """
+    keys = ["clip_0.mp4", "clip_1.mp4", "2026/04/12/2026_0412_100205_F.MP4",
+            "dcim/movie/100DSCQ.MP4", "İLKAY.mp4", "ß.mp4", "ﬁ.mp4",
+            "ILKAY.mp4", "MVC1.MP4"]
+    assert detect_name_problems(keys) == []
+    # a near miss is still a miss: one character apart is two names
+    assert detect_name_problems(["clip_0.mp4", "clip_0x.mp4"]) == []
+    # ...and the ASCII pair above is still found, so this list is not just "empty in"
+    assert detect_name_problems(["clip_0.mp4", "CLIP_0.mp4"])[0].kind == CASE_COLLISION
+
+
+def test_simple_upcase_is_one_character_in_and_one_character_out_for_all_of_unicode():
+    """The property the whole model rests on, checked against every code point.
+
+    An upcase table has exactly one slot per code point, so the fold must never grow
+    or shrink a name. Python's `str.upper` does grow it (102 characters expand, e.g.
+    `ß` to `SS`), which is why the full mapping cannot be used directly.
+    """
+    expansions = 0
+    for point in range(0x110000):
+        ch = chr(point)
+        folded = simple_upcase(ch)
+        assert len(folded) == 1, f"U+{point:04X} did not fold 1:1"
+        expansions += len(ch.upper()) != 1
+    assert expansions == 102, "the expanding set moved; re-derive the table"
+
+
+def test_the_expansion_table_is_the_polytonic_greek_set_and_nothing_else():
+    """Pinned so a wrong entry cannot hide in here.
+
+    A simple uppercase that differs from the full one exists for exactly 27
+    characters: the polytonic Greek small letters whose precomposed
+    capital-with-prosgegrammeni exists, in three regular blocks of eight at a fixed
+    `+0x08` offset plus three singles. Every other expanding character has an empty
+    simple-uppercase field and so maps to ITSELF - which is why `ß` is not folded to
+    `SS` here, and why `ᾀ` (U+1F80) maps to `ᾈ` (U+1F88) and not to plain `Α`.
+    """
+    assert len(SIMPLE_UPPERCASE_EXPANSION) == 27
+    for start in ("\u1f80", "\u1f90", "\u1fa0"):
+        for offset in range(8):
+            assert SIMPLE_UPPERCASE_EXPANSION[chr(ord(start) + offset)] == \
+                chr(ord(start) + 0x08 + offset)
+    assert SIMPLE_UPPERCASE_EXPANSION["\u1fb3"] == "\u1fbc"
+    assert SIMPLE_UPPERCASE_EXPANSION["\u1fc3"] == "\u1fcc"
+    assert SIMPLE_UPPERCASE_EXPANSION["\u1ff3"] == "\u1ffc"
+
+    # ß, ﬁ, ﬄ, ŉ, ǰ and the Armenian ligatures have NO entry: they map to themselves
+    for ch in ("ß", "ﬁ", "ﬄ", "ŉ", "ǰ", "և"):
+        assert ch not in SIMPLE_UPPERCASE_EXPANSION
+        assert simple_upcase(ch) == ch
+    assert simple_upcase("ß") == "ß" != "SS"
+    # ...and the plain-capital reading of the Greek set would have been wrong
+    assert simple_upcase("\u1f80") == "\u1f88" != "\u0391"
 
 
 def test_an_over_long_name_is_flagged_at_hash_time(tmp_path):
@@ -892,18 +1063,19 @@ def test_existing_exact_case_keys_are_untouched_and_still_distinct():
     """Backwards compatibility: existing campaigns and ledgers use exact-case keys.
 
     Normalisation is for COMPARISON. It rewrites nothing: the ledger key stays the
-    filename, and a key whose case is already lowercase folds to itself, so every
-    pre-existing ledger reads exactly as it did.
+    filename, so every pre-existing ledger reads exactly as it did. Note the
+    comparison form of a lower-case key is now its UPPER case - that field changed
+    with the fold, and nothing else did, because nothing ever read it back.
     """
     existing = ["clip_0.mp4", "clip_1.mp4", "dcim/movie/2026_0412_100205_f.mp4",
                 "2026_0412_100205_f", "2026/04/12/2026_0412_100205_f.mp4"]
-    for key in existing:
-        assert fold_key(key) == key
     assert detect_name_problems(existing) == []
+    for key in existing:
+        assert fold_key(key) == key.upper()
 
     # a key with upper case still folds for comparison, and is still stored as-is
     assert fold_key("2026/04/12/2026_0412_100205_F.MP4") == \
-        "2026/04/12/2026_0412_100205_f.mp4"
+        "2026/04/12/2026_0412_100205_F.MP4"
     assert detect_name_problems(["2026/04/12/2026_0412_100205_F.MP4"]) == []
 
 
