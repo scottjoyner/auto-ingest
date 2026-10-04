@@ -37,6 +37,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CLI = REPO_ROOT / "bin" / "auto-ingest"
 
 
+
+# The source end of a campaign is a fact this module controls, not a fact
+# about whether the developer's card happens to be plugged in.
+pytestmark = pytest.mark.usefixtures("hermetic_mounts")
 def make_card(root: Path, count: int = 4, size: int = 128) -> "dict[str, Path]":
     root.mkdir(parents=True, exist_ok=True)
     keys = {}

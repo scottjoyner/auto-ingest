@@ -19,6 +19,7 @@ from custody_helpers import (
     destination,
     evidence,
     fully_copied_campaign,
+    patch_mount_table,
     strict_policy,
     write_bundle,
 )
@@ -49,6 +50,10 @@ tmpfs /media/scott/ODD\\040NAME tmpfs ro,relatime 0 0
 """.lstrip()
 
 
+
+# The source end of a campaign is a fact this module controls, not a fact
+# about whether the developer's card happens to be plugged in.
+pytestmark = pytest.mark.usefixtures("hermetic_mounts")
 def fake_mounts(tmp_path: Path, text: str = PROC_MOUNTS) -> Path:
     path = tmp_path / "mounts"
     path.write_text(text, encoding="utf-8")
@@ -214,15 +219,55 @@ def test_a_declaration_alone_passes_the_gate_but_observation_refuses(tmp_path):
     assert observed["source"]["read_only_agrees_with_declaration"] is False
 
 
-def test_cli_observe_mount_reads_the_real_kernel(tmp_path, capsys):
-    """Exercised against /proc/mounts, which on this host reports the card ro."""
+def test_cli_observe_mount_reads_the_real_kernel(tmp_path, capsys, real_mounts):
+    """The one test that genuinely reads /proc/mounts.
+
+    This asserts against what the kernel actually says rather than against this
+    host's card, so it is meaningful everywhere: on a machine with the card
+    plugged in it confirms the ro observation end to end, and on a machine
+    without one it confirms the CLI reports absence honestly instead of
+    inventing a source. The previous version hardcoded `present is True`, which
+    meant it could only ever pass on a developer machine with the card mounted -
+    it was a test of the peripherals, not of the code.
+    """
     bundle = write_bundle(tmp_path / "b", campaign(), evidence())
     code = main(["observe-mount", "--bundle", str(bundle), "--json"])
     payload = json.loads(capsys.readouterr().out)
-    assert payload["source"]["observation"]["present"] is True
-    assert payload["source"]["observed_read_only"] is True
+
+    really_present = "/media/scott/UNTITLED" in Path("/proc/mounts").read_text()
+    assert payload["source"]["observation"]["present"] is really_present
+    if really_present:
+        # Card is here: the ro observation must survive the round trip.
+        assert payload["source"]["observed_read_only"] is True
+        assert payload["declared_read_only_trusted"] is False
+        assert code == EXIT_OK
+    else:
+        # No card: the CLI must say so rather than reporting a source it cannot
+        # see. This is the CI path, and it used to be an outright failure.
+        # observed_read_only is None here, not False: "not observed" and
+        # "observed writable" are different facts and must not be conflated.
+        assert payload["source"]["observed_read_only"] is not True
+
+
+def test_an_absent_card_is_reported_as_absent_not_assumed(tmp_path, capsys,
+                                                          monkeypatch):
+    """The CI condition, made hermetic: no card anywhere in the mount table.
+
+    An empty table stands in for a runner with no SD card. The CLI must report
+    the source absent and must not claim to have observed it read-only - the
+    whole point of the observation is that it refuses to guess.
+    """
+    empty = tmp_path / "mounts"
+    empty.write_text("", encoding="utf-8")
+    patch_mount_table(monkeypatch, empty)
+    bundle = write_bundle(tmp_path / "b", campaign(), evidence())
+    code = main(["observe-mount", "--bundle", str(bundle), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source"]["observation"]["present"] is False
+    assert payload["source"]["observed_read_only"] is not True
     assert payload["declared_read_only_trusted"] is False
-    assert code == EXIT_OK
+    # An absent source is a gate-closed condition, not a success.
+    assert code == EXIT_GATE_CLOSED
 
 
 def test_a_writable_card_contradicts_a_read_only_declaration(tmp_path):

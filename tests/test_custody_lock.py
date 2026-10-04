@@ -35,6 +35,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CLI = REPO_ROOT / "bin" / "auto-ingest"
 
 
+
+# The source end of a campaign is a fact this module controls, not a fact
+# about whether the developer's card happens to be plugged in.
+pytestmark = pytest.mark.usefixtures("hermetic_mounts")
 @pytest.fixture(autouse=True)
 def isolated_lock_root(tmp_path, monkeypatch):
     """Never touch the real /tmp lock dir from a test."""

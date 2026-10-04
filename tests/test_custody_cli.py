@@ -28,7 +28,9 @@ from auto_ingest.custody.cli import (
 )
 from auto_ingest.custody.store import STATUS_SCHEMA, load_status
 
-
+# The source end of a campaign is a fact this module controls, not a fact
+# about whether the developer's card happens to be plugged in.
+pytestmark = pytest.mark.usefixtures("hermetic_mounts")
 def run(argv, capsys):
     code = main(argv)
     captured = capsys.readouterr()

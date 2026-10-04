@@ -31,7 +31,9 @@ from auto_ingest.custody.ledger import (
 )
 from auto_ingest.custody.store import load_status, reconcile_preview
 
-
+# The source end of a campaign is a fact this module controls, not a fact
+# about whether the developer's card happens to be plugged in.
+pytestmark = pytest.mark.usefixtures("hermetic_mounts")
 def write_ledger(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")

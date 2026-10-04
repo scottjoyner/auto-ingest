@@ -31,6 +31,10 @@ NEW_ARGS = [
 ]
 
 
+
+# The source end of a campaign is a fact this module controls, not a fact
+# about whether the developer's card happens to be plugged in.
+pytestmark = pytest.mark.usefixtures("hermetic_mounts")
 def new(bundle, *extra, json_mode=True):
     argv = ["new", "--bundle", str(bundle), *NEW_ARGS, *extra]
     if json_mode:

@@ -222,3 +222,50 @@ def write_bundle(root, campaign_obj: Campaign, evidence_obj: CampaignEvidence) -
         json.dumps(evidence_obj.to_dict(), sort_keys=True, indent=2), encoding="utf-8"
     )
     return root
+
+
+# ---------------------------------------------------------------------------
+# Hermetic mount observation
+# ---------------------------------------------------------------------------
+# The CLI reads /proc/mounts, so any test asserting on source_present or
+# source_read_only_observed was implicitly asserting that *this developer's SD
+# card is currently plugged in and mounted read-only*. That passed here and
+# failed on CI, where no card exists - and it meant the suite could not tell a
+# real regression from a missing peripheral.
+#
+# These helpers point the CLI at a synthetic mount table instead, so the source
+# end is a fact the test controls.
+
+def synthetic_mounts(path, *, source_ro: bool = True, source_present: bool = True,
+                     dest_present: bool = True):
+    """Write a /proc/mounts-shaped file and return its path.
+
+    Shape matters: read_mounts parses the real six-field format, so a plausible
+    stand-in keeps the parser under test too.
+    """
+    path = Path(path)
+    lines = []
+    if source_present:
+        opts = "ro,relatime" if source_ro else "rw,relatime"
+        lines.append(f"/dev/sdb1 /media/scott/UNTITLED vfat {opts} 0 0")
+    if dest_present:
+        lines.append("/dev/sdb2 /mnt/custody/destination vfat rw,relatime 0 0")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def patch_mount_table(monkeypatch, mounts_path):
+    """Make the CLI's observe_campaign() read `mounts_path`, not /proc/mounts.
+
+    Wraps the real function rather than replacing it, so the observation logic
+    itself is still under test - only its input changes.
+    """
+    import auto_ingest.custody.cli as cli
+
+    real = cli.observe_campaign
+
+    def _observed(camp, **kw):
+        kw.setdefault("mounts_path", mounts_path)
+        return real(camp, **kw)
+
+    monkeypatch.setattr(cli, "observe_campaign", _observed)

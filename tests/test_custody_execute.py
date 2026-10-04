@@ -43,6 +43,10 @@ CLI = REPO_ROOT / "bin" / "auto-ingest"
 ACK = "--i-have-stopped-the-sync-service"
 
 
+
+# The source end of a campaign is a fact this module controls, not a fact
+# about whether the developer's card happens to be plugged in.
+pytestmark = pytest.mark.usefixtures("hermetic_mounts")
 @pytest.fixture(autouse=True)
 def isolated_locks(tmp_path, monkeypatch):
     monkeypatch.setenv("CUSTODY_LOCK_ROOT", str(tmp_path / "locks"))
