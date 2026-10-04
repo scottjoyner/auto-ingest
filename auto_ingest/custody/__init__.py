@@ -29,11 +29,13 @@ It provides:
     copy, delete or execute anything.
 
 ``cli``
-    ``auto-ingest custody status|plan|verify|import`` - read-only by default.
+    The custody CLI exposes read-only observation/planning plus explicitly
+    authorized campaign creation/evidence/copy operations. ``inspect-device``
+    discovers source hardware without changing mount state.
 
-Nothing in this package mounts, unmounts, deletes or copies media, and nothing
-it does depends on a legacy autonomous watcher (see
-docs/sd-card-campaign-custody.md for the disposition of those).
+The package never mounts, unmounts, remounts, formats, or deletes source media.
+Copy execution remains an explicit authorized custody operation; read commands
+do not trigger legacy autonomous watchers.
 """
 
 from .campaign import (
@@ -44,6 +46,7 @@ from .campaign import (
     derive_campaign_id,
     resolve_campaign,
 )
+from .device import DeviceInspection, DeviceInspectionError, inspect_device
 from .destination import (
     DestinationMatch,
     DestinationRef,
@@ -100,6 +103,8 @@ __all__ = [
     "CustodyPolicy",
     "Derivation",
     "DestinationEvidence",
+    "DeviceInspection",
+    "DeviceInspectionError",
     "DestinationMatch",
     "DestinationRef",
     "ErrorEvidence",
@@ -121,6 +126,7 @@ __all__ = [
     "evaluate_release",
     "find_contradictions",
     "import_evidence",
+    "inspect_device",
     "load_campaign",
     "load_custody_config",
     "load_evidence",

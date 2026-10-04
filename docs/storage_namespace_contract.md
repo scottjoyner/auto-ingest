@@ -234,9 +234,10 @@ August mainline and overlaps many files changed by the custody work. Reuse its
 fail-closed resolver and test ideas selectively.
 
 The older `dashcam-card-custody` branch adds a standalone copy/hash/verify tool.
-Its behavior now overlaps heavily with the merged custody package. Treat it as
-prior art until a narrow gap analysis proves functionality that the package does
-not provide.
+Its copy/hash/verify engine is superseded by the merged custody package and should
+not be merged as a second ingest path. Its useful pre-campaign device-inspection
+idea was lifted into `auto-ingest custody inspect-device` as a read-only command;
+its automatic mounting behavior was deliberately not carried forward.
 
 ## Validation
 
@@ -244,6 +245,8 @@ On the convergence branch:
 
 - focused namespace/config/custody suite: 213 passed before the provenance fix;
 - current config/shared-namespace regression suite: 45 passed after provenance and Neo4j endpoint fixes;
+- complete custody + storage/config regression after adding read-only `inspect-device`: 489 passed;
+- live `inspect-device` on x1 root storage returned PASS and correctly observed the ext4 mount as read-write, with no state change;
 - live x1 resolver check proved shared `/nas` + local SSD processing split;
 - xwing, destroyer, and raspberrypi all reached the Tailscale Bolt endpoint on port 7687;
 - full repository suite: 792 passed, 6 skipped, 4 failed;

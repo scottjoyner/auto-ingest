@@ -9,6 +9,7 @@
     auto-ingest custody observe-mount --bundle PATH [--json] [--apply]
     auto-ingest custody capacity --bundle PATH [--json]
     auto-ingest custody preflight --bundle PATH [--json] [--job-dir PATH]
+    auto-ingest custody inspect-device /dev/sdX [--json]
 
 Every command is read-only by default. The only writes in this package are
 ``import --apply`` and ``new --apply``, both explicit. ``--execute`` is accepted
@@ -50,6 +51,7 @@ from .executor import (
     plan_copy,
 )
 from .executor import to_evidence as execute_evidence
+from .device import DeviceInspectionError, inspect_device
 from .hashing import DEFAULT_ALGORITHM, hash_source, to_evidence
 from .lock import (
     campaign_lock,
@@ -99,6 +101,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sub = parser.add_subparsers(dest="custody_cmd", required=True)
+
+    pid = sub.add_parser(
+        "inspect-device",
+        help="Inspect physical source identity and mount state (read-only).",
+    )
+    pid.add_argument("device", help="block device or partition, e.g. /dev/sdb or /dev/sdb1")
+    pid.add_argument("--json", action="store_true", help="emit JSON instead of text")
 
     def common(p: argparse.ArgumentParser, *, gate: bool = True,
                observed: bool = True) -> argparse.ArgumentParser:
@@ -264,6 +273,38 @@ def _status(args) -> CampaignStatus:
     if policy is None:
         policy = load_policy(load_custody_config())
     return load_status(args.bundle, policy, observed_card=_observed(args))
+
+
+def cmd_inspect_device(args) -> int:
+    """Observe source hardware without changing mount or filesystem state."""
+    result = inspect_device(args.device)
+    payload = result.to_dict()
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, indent=2, default=str))
+    else:
+        identity = payload["identity"]
+        mount = payload["mount"]
+        lines = [
+            f"status                  {payload['status']}",
+            f"requested_device        {payload['requested_device']}",
+            f"selected_device         {payload['selected_device'] or 'AMBIGUOUS'}",
+            f"filesystem_uuid         {identity.get('filesystem_uuid') or 'UNKNOWN'}",
+            f"serial                  {identity.get('serial') or 'UNKNOWN'}",
+            f"label                   {identity.get('label') or 'UNKNOWN'}",
+            f"filesystem_type         {identity.get('filesystem_type') or 'UNKNOWN'}",
+            f"mount_point             {mount.get('mount_point') or 'NOT_MOUNTED'}",
+            f"observed_read_only      {mount.get('read_only')}",
+            f"ready_for_campaign      {str(payload['ready_for_campaign']).lower()}",
+        ]
+        if payload.get("reason"):
+            lines.append(f"reason                  {payload['reason']}")
+        if len(payload["partitions"]) > 1:
+            lines.append("partitions              " + ", ".join(
+                str(part.get("path") or part.get("name") or "?")
+                for part in payload["partitions"]
+            ))
+        sys.stdout.write("\n".join(lines) + "\n")
+    return EXIT_OK if result.status == "PASS" else EXIT_GATE_CLOSED
 
 
 def cmd_status(args) -> int:
@@ -1005,6 +1046,7 @@ def cmd_reconcile(args) -> int:
 
 
 _HANDLERS = {
+    "inspect-device": cmd_inspect_device,
     "status": cmd_status,
     "plan": cmd_plan,
     "verify": cmd_verify,
@@ -1025,6 +1067,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     handler = _HANDLERS[args.custody_cmd]
     try:
         return handler(args)
+    except DeviceInspectionError as exc:
+        print(f"custody: device inspection failed: {exc}", file=sys.stderr)
+        return EXIT_USAGE
     except CampaignCreationError as exc:
         print(f"custody: refusing to create campaign: {exc}", file=sys.stderr)
         return EXIT_GATE_CLOSED

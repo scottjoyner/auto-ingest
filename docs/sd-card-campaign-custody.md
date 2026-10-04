@@ -215,6 +215,7 @@ blockers** — the single condition protecting the source was a claim in a file.
 observers now supply the missing facts.
 
 ```bash
+auto-ingest custody inspect-device /dev/sdX [--json]                 # no mount changes
 auto-ingest custody observe-mount --bundle PATH [--json] [--apply]
 auto-ingest custody capacity      --bundle PATH [--json]
 auto-ingest custody preflight     --bundle PATH [--json] [--job-dir PATH]
@@ -224,6 +225,7 @@ auto-ingest custody verify     --bundle PATH [--destination DIR] [--recheck] [--
 
 | command | reads | answers |
 | --- | --- | --- |
+| `inspect-device` | `lsblk`, `udevadm`, `/proc/mounts` | what device/partition/UUID/serial/mount state is physically present before campaign creation? |
 | `observe-mount` | `/proc/mounts` | is the source **actually** `ro`? does the declaration agree? |
 | `capacity` | `statvfs` | is there room for the **outstanding** bytes, plus headroom? |
 | `preflight` | all of the above + the release gate | could an executor run at all, and if not, which check failed? |
@@ -768,6 +770,7 @@ All read-only by default. `--require-release` exits 3 when the gate is closed,
 which makes the commands usable as a CI/Hermes gate.
 
 ```bash
+auto-ingest custody inspect-device /dev/sdX --json                # source identity, no mount changes
 auto-ingest custody observe-mount --bundle /path/to/campaign      # what the kernel says
 auto-ingest custody capacity      --bundle /path/to/campaign      # will it fit?
 auto-ingest custody preflight     --bundle /path/to/campaign      # could an executor run?
@@ -837,7 +840,8 @@ than guessed — which blocks release, not onboarding.
 ## 10. Operator loop
 
 ```
-observe physical source        # lsblk / blkid, read-only; mount read-only
+custody inspect-device /dev/sdX # lsblk/udev/procfs only; never mounts
+  → operator mounts source read-only if needed
   → custody new --apply        # mint campaign identity from observed hardware
   → update/import evidence     # auto-ingest custody import ... --apply
   → custody status             # what state is this card in?

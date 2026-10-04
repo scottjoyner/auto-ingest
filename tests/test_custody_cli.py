@@ -46,6 +46,7 @@ def test_parser_exposes_the_documented_subcommands():
     assert set(sub.choices) == {
         "status", "plan", "verify", "import", "new", "reconcile",
         "observe-mount", "capacity", "preflight", "hash", "execute",
+        "inspect-device",
     }
 
 
