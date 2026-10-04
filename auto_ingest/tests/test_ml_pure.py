@@ -111,12 +111,15 @@ def test_link_global_speakers_pure():
     assert L.load_audio_cache(tmp, refresh=True) == {}
 
     # --- parse_args: --exclude-non-speech / --no-exclude-non-speech ---
-    args = L.parse_args(["prog", "--exclude-non-speech"])
+    # argv excludes the program name, matching the repo-wide convention
+    # (auto_ingest/outbox.py:212, auto_ingest/shorts/cli.py:716 both hand argv
+    # straight to argparse.parse_args).
+    args = L.parse_args(["--exclude-non-speech"])
     assert args.exclude_non_speech is True
-    args = L.parse_args(["prog", "--no-exclude-non-speech"])
+    args = L.parse_args(["--no-exclude-non-speech"])
     assert args.exclude_non_speech is False
     # defaults round-trip
-    args = L.parse_args(["prog"])
+    args = L.parse_args([])
     assert args.min_seg == L.DEFAULT_MIN_SEG
     assert args.thresh == L.DEFAULT_THRESH
 
@@ -149,11 +152,43 @@ def test_transcripts_pure():
     assert T._parse_any_iso_or_epoch(None) is None
 
     # --- canonicalize_key / file_key_from_name: sidecar stripping ---
-    assert T.file_key_from_name("2025_0202_171732_medium_transcription.txt") == "2025_0202_171732"
+    # Two corrections to what this block used to assert (both were failing
+    # before, and the first one masked the second because pytest stops at the
+    # first failed assert in a test body):
+    #
+    # 1. file_key_from_name() is a *stem reducer*, not a key producer. The run
+    #    it strips is the whisper model id, and the pattern's character class
+    #    (transcripts.py:245) spans "_", "-" and "." on purpose so multi-word
+    #    model ids ("Systran_faster_whisper_large-v3", "distil-large-v3.0")
+    #    collapse too. On a dashcam key the greedy leftmost match therefore also
+    #    eats "0202_171732_medium" and leaves "2025". The authoritative key is
+    #    re-derived by canonicalize_key(), which is exactly what
+    #    discover_keys() does with this return value (transcripts.py:742):
+    #    key = canonicalize_key(file_key_from_name(basename), full_path).
+    #    canonicalize_key() searches the FULL path -- basename included -- for
+    #    the timestamp, so the key survives. Assert that composition (the
+    #    invariant the pipeline relies on) plus the reducer's real output.
+    assert T.file_key_from_name("2025_0202_171732_medium_transcription.txt") == "2025"
+    assert T.canonicalize_key(
+        T.file_key_from_name("2025_0202_171732_medium_transcription.txt"),
+        "/dashcam/2025/02/02/20250202_171732/2025_0202_171732_medium_transcription.txt",
+    ) == "2025_0202_221732"
     assert T.file_key_from_name("x_speakers.rttm") == "x"
     assert T.file_key_from_name("x_metadata.csv") == "x"
-    key = T.canonicalize_key("2025_0202_171732", "whatever")
-    assert key == "2025_0202_171732"
+
+    # 2. canonicalize_key() canonicalises to UTC by design -- keys are parsed as
+    #    LOCAL_TZ wall-clock (transcripts.py:66, default America/New_York) and
+    #    converted with _to_utc(), because every Neo4j timestamp in the graph is
+    #    UTC (cf. yolo_embeddings.parse_key_datetime, which builds its datetime
+    #    with tzinfo=timezone.utc). 17:17:32 EST on 2025-02-02 is 22:17:32 UTC, so
+    #    asserting the local string back is asserting the bug. LOCAL_TZ is read
+    #    per call inside _to_localized(), so pin it to keep this deterministic
+    #    regardless of the machine's TZ.
+    with mock.patch.object(T, "LOCAL_TZ", "America/New_York"):
+        key = T.canonicalize_key("2025_0202_171732", "whatever")
+        assert key == "2025_0202_221732"
+    # a stem with no timestamp in it is left alone (no date to normalise)
+    assert T.canonicalize_key("clip", "whatever") == "clip"
 
     # --- overlap: pure interval math ---
     assert T.overlap(0, 10, 5, 20) == 5.0
@@ -175,7 +210,16 @@ def test_transcripts_pure():
     assert stats["neg_dur"] == 1
     assert stats["nonfinite"] == 1
     assert stats["empty_txt"] == 1
-    assert stats["kept"] == 2  # only the two valid ones
+    # kept == 3, not 2: this is a repair-and-report pass, not a filter. Only
+    # nonfinite timings are dropped (`continue`); a negative duration is clamped
+    # (end = start) and empty text is counted in the stats its only caller logs
+    # (transcripts.py:1189-1190). Asserting "only the two valid ones" was
+    # describing a filter the function does not implement.
+    assert stats["kept"] == 3
+    assert len(fixed) == 3
+    assert (fixed[0]["start"], fixed[0]["end"]) == (1.0, 1.0)  # neg dur clamped, not dropped
+    assert fixed[1]["text"] == ""  # empty text kept, counted
+    assert (fixed[2]["start"], fixed[2]["end"], fixed[2]["text"]) == (0.0, 1.0, "ok")
 
     # --- load_rttm: pure RTTM parsing ---
     import tempfile
@@ -270,7 +314,13 @@ def test_yolo_embeddings_pure():
     keep = {"car", "truck"}
     id_map = {2: "car", 7: "truck"}
     assert Y.keep_detection({"name": "car"}, keep, id_map) is True
-    assert Y.keep_detection({"name": "motorcycle"}, keep, id_map) is True  # -> motorbike
+    # keep_detection() rewrites the raw COCO name 'motorcycle' to the id_map
+    # spelling 'motorbike' (yolo_embeddings.py:405-406), so the alias only fires
+    # when 'motorbike' is in the keep set -- VEHICLE_NAMES/DEFAULT_CLASS_ID_MAP
+    # spell it that way (yolo_embeddings.py:33-35). With neither spelling in the
+    # set, False is the correct answer, not True.
+    assert Y.keep_detection({"name": "motorcycle"}, keep, id_map) is False
+    assert Y.keep_detection({"name": "motorcycle"}, keep | {"motorbike"}, id_map) is True
     assert Y.keep_detection({"name": "cat"}, keep, id_map) is False
     assert Y.keep_detection({"class": 7}, keep, id_map) is True
 

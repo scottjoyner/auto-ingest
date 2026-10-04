@@ -241,8 +241,16 @@ def _norm_stem(key: str) -> str:
     for m in SIDECAR_MARKERS:
         s = re.sub(fr"{re.escape(m)}($|_)", "_", s)
     s = re.sub(r"_+$", "", s)
-    # dashcam R-suffix normalize
-    s = re.sub(r"_R$", "", s)
+    # dashcam camera-suffix normalize: _F, _R and _FR all strip. _FR needs its
+    # own alternative: in "..._FR" the R is not preceded by "_", so a
+    # "_(F|R)$" alternation cannot reach it and leaves "..._FR" completely
+    # intact -- as did the old "_R$". Only "FR" as a unit strips it. Listing FR
+    # first matches clip_base_key's ordering.
+    # clip_base_key() in auto_ingest/dashcam/yolo_embeddings.py owns this
+    # convention and this pattern must stay identical to it; that module is not
+    # importable from here (it drags in moviepy/neo4j), so the two are pinned
+    # together by assertion in auto_ingest/tests/test_dashcam_keys.py instead.
+    s = re.sub(r"_(FR|F|R)$", "", s)
     return s
 
 def _is_audio_path(p: Path) -> bool:
@@ -1777,7 +1785,10 @@ class Args:
     exclude_non_speech: bool
 
 
-def parse_args():
+def parse_args(argv: Optional[List[str]] = None):
+    """Build Args from the CLI. `argv` is injectable so tests can parse a
+    synthetic command line without patching sys.argv (production calls this
+    with no argument and keeps reading sys.argv)."""
     import argparse
     p = argparse.ArgumentParser(description="Link local Speaker nodes to GlobalSpeaker identities (Segment-based, FAISS global prefilter, caches, quarantine, incremental update).")
     p.add_argument("--min-seg", type=float, default=DEFAULT_MIN_SEG)
@@ -1873,7 +1884,7 @@ def parse_args():
     p.add_argument("--no-exclude-non-speech", dest="exclude_non_speech", action="store_false",
                  help="Disable the non-speech Segment.segment_type exclusion gate.")
 
-    return Args(**vars(p.parse_args()))
+    return Args(**vars(p.parse_args(argv)))
 
 
 def _persist_state(state_file: str, done: Set[str]) -> None:
