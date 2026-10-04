@@ -941,6 +941,7 @@ authorizes execution explicitly.
 | a lock is released even when the holder crashes | `test_custody_lock.py::test_lock_releases_on_exception` |
 | a lock held by another process is seen | `test_custody_lock.py::test_a_lock_held_by_another_process_is_detected` |
 | live sync stands down for a campaign | `test_custody_lock.py::test_the_sync_script_stands_down_when_a_campaign_is_active` |
+| supervisor won't retire a day on a zero exit alone | `test_ingest_supervisor_verification.py::test_a_silent_no_op_day_stays_pending` |
 | the probe is verified from the script, not asserted | `test_custody_lock.py::test_the_live_sync_script_consults_the_campaign_marker` |
 | reverting the probe fails preflight closed | `test_custody_lock.py::test_preflight_refuses_when_the_live_probe_is_missing` |
 | a stale marker is never left behind | `test_custody_lock.py::test_the_marker_appears_and_is_cleared_around_execution` |
