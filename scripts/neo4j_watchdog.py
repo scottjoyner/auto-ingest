@@ -37,9 +37,17 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import time
 import urllib.request
+from pathlib import Path
 from typing import Optional, Tuple
+
+# Cron invokes this as `python3 scripts/neo4j_watchdog.py`, which puts scripts/
+# on sys.path and not the repo root - so the shared helper below needs the root.
+REPO = Path(__file__).resolve().parent.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 
 log = logging.getLogger("neo4j.watchdog")
 
@@ -109,13 +117,18 @@ def _load_last_action() -> dict:
 
 
 def _save_last_action(action: str, detail: str) -> None:
-    """Persist the last heal attempt atomically-ish. Never raises."""
+    """Persist the last heal attempt atomically. Never raises.
+
+    A fixed ``.tmp`` suffix was the bug here: the watchdog loop and an operator
+    (or a second container) both open that one path, so the second replace
+    consumes the temp the first was about to install - one update vanishes
+    without a trace and the loser may take an ENOENT. write_json_atomic names the
+    temp per process and per call, so neither can happen.
+    """
     payload = {"action": action, "detail": detail, "ts": int(time.time())}
     try:
-        tmp = f"{STATE_FILE}.tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh)
-        os.replace(tmp, STATE_FILE)
+        from auto_ingest.util.atomic import write_json_atomic
+        write_json_atomic(STATE_FILE, payload)
     except Exception as e:  # pragma: no cover - fs dependent
         log.warning("could not persist heal state: %s", e)
 

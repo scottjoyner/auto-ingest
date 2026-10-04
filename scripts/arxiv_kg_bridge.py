@@ -131,16 +131,31 @@ def cosine(a, b):
 
 
 def load_seen():
-    if CURSOR_FILE.exists():
-        try:
-            return set(json.loads(CURSOR_FILE.read_text()).get("seen", []))
-        except Exception:
-            return set()
-    return set()
+    """Return the set of already-ingested arxiv_ids.
+
+    An absent cursor is the normal first-run case and stays silent. A *corrupt*
+    cursor also returns an empty set - re-ingesting is wasteful but not wrong,
+    and the bridge must keep running so an operator can fix it - but it now says
+    so on stderr, naming the file. Silently forgetting the cursor was the real
+    defect: the run looked clean and quietly re-did every paper.
+    """
+    if not CURSOR_FILE.exists():
+        return set()
+    try:
+        return set(json.loads(CURSOR_FILE.read_text()).get("seen", []))
+    except Exception as e:  # noqa: BLE001
+        log(f"WARNING: corrupt cursor {CURSOR_FILE} ({type(e).__name__}: {str(e)[:90]})"
+            " — treating as empty, so EVERY paper will be re-ingested; delete the"
+            " file to reset deliberately or restore it from a backup")
+        return set()
 
 
 def save_seen(seen):
-    CURSOR_FILE.write_text(json.dumps({"seen": sorted(seen)}))
+    # write_text() truncates in place, so a crash mid-write left invalid JSON and
+    # load_seen() turned that into an empty set: a cursor that loses its data on
+    # a crash is worse than no cursor, because nothing looked wrong.
+    from auto_ingest.util.atomic import write_json_atomic
+    write_json_atomic(CURSOR_FILE, {"seen": sorted(seen)})
 
 
 def ingest(papers, dry_run=False):
