@@ -6,9 +6,9 @@ submodule/path) this module re-exports the real ``assistx.contracts``
 Otherwise it falls back to the local mirror class below so standalone ingest
 runs keep working without the canonical package.
 
-Canonical source of truth:
-  /media/scott/SSD_4TB/hermes-home/home_scott_git_auto-assist/src/assistx/contracts/
-See docs/LLD_UNIFIED_FLEET.md §1 and §3.4 (auto-ingest emits
+Canonical source of truth: the installed ``assistx`` package,
+``assistx.contracts.event_envelope``. See docs/LLD_UNIFIED_FLEET.md §1 and §3.4
+(auto-ingest emits
 ``ingest.evidence.linked`` etc).
 """
 

@@ -27,17 +27,23 @@ from pathlib import Path
 import numpy as np
 from scipy.io import wavfile
 from scipy.signal import resample
-from auto_ingest_config import get_neo4j_password
+from auto_ingest_config import (
+    get_audio_root,
+    get_dashcam_root,
+    get_fileserver_root,
+    get_neo4j_config,
+)
 
 # --- Config ---
-DEFAULT_USB_PATH = "/media/scott/USB DISK"
-DEFAULT_AUDIO_ROOT = "/media/scott/SSD_4TB/audio"
+DEFAULT_USB_PATH = os.environ.get("USB_PATH", "")
+DEFAULT_AUDIO_ROOT = os.environ.get("AUDIO_ROOT", "")
 WHISPER_MODEL = "base"
 WHISPER_DOWNLOAD_ROOT = "/tmp/whisper_models"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-NEO4J_URI = "bolt://100.64.43.123:7687"
-NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = get_neo4j_password()
+_NEO4J = get_neo4j_config()
+NEO4J_URI = _NEO4J["uri"]
+NEO4J_USER = _NEO4J["user"]
+NEO4J_PASSWORD = _NEO4J["password"]
 
 
 def load_datetime_correction(usb_path):
@@ -232,8 +238,8 @@ def run_ingest(audio_root, limit=None, force=False, dry_run=False):
 
     env = os.environ.copy()
     env["AUDIO_ROOT"] = audio_root
-    env["FILESERVER_ROOT"] = "/media/scott/SSD_4TB/fileserver"
-    env["DASHCAM_ROOT"] = "/media/scott/SSD_4TB/fileserver/dashcam"
+    env["FILESERVER_ROOT"] = get_fileserver_root()
+    env["DASHCAM_ROOT"] = get_dashcam_root()
     env["NEO4J_URI"] = NEO4J_URI
     env["NEO4J_USER"] = NEO4J_USER
     env["NEO4J_PASSWORD"] = NEO4J_PASSWORD
@@ -242,7 +248,7 @@ def run_ingest(audio_root, limit=None, force=False, dry_run=False):
 
     cmd = [
         sys.executable,
-        "/media/scott/data/git/auto-ingest/ingest_transcriptsv5_3.py",
+        str(Path(__file__).resolve().parent / "ingest_transcriptsv5_3.py"),
         "--log-level", "INFO",
         "--force",
     ]
@@ -252,7 +258,7 @@ def run_ingest(audio_root, limit=None, force=False, dry_run=False):
         cmd.append("--dry-run")
 
     print(f"\nRunning ingest: {' '.join(cmd)}")
-    result = subprocess.run(cmd, env=env, cwd="/media/scott/data/git/auto-ingest")
+    result = subprocess.run(cmd, env=env, cwd=str(Path(__file__).resolve().parent))
     return result.returncode
 
 
@@ -268,6 +274,14 @@ def main():
     parser.add_argument("--limit", type=int, default=None, help="Limit number of files to process")
     parser.add_argument("--force", action="store_true", help="Force re-ingest")
     args = parser.parse_args()
+
+    if not args.usb_path:
+        parser.error("--usb-path is required (or set USB_PATH)")
+    if not args.audio_root:
+        try:
+            args.audio_root = get_audio_root()
+        except RuntimeError as exc:
+            parser.error(str(exc))
 
     usb_record_path = os.path.join(args.usb_path, "RECORD")
     if not os.path.isdir(usb_record_path):

@@ -16,6 +16,7 @@ import os
 import re
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 from scipy.io import wavfile
@@ -23,9 +24,12 @@ from scipy.signal import resample
 
 WHISPER_MODEL = "base"
 WHISPER_DOWNLOAD_ROOT = "/tmp/whisper_models"
-AUDIO_ROOT = "/media/scott/SSD_4TB/audio"
-CORRECTION_FILE = "/media/scott/USB DISK/DATETIME_CORRECTION.json"
-PROGRESS_FILE = "/media/scott/data/git/auto-ingest/transcribe_progress.json"
+REPO_ROOT = Path(__file__).resolve().parent
+AUDIO_ROOT = os.environ.get("AUDIO_ROOT", "")
+CORRECTION_FILE = os.environ.get("USB_CORRECTION_FILE", "")
+PROGRESS_FILE = os.environ.get(
+    "USB_PROGRESS_FILE", str(REPO_ROOT / "transcribe_progress.json")
+)
 
 
 def get_usb_wav_files():
@@ -107,10 +111,28 @@ def transcribe_wav(wav_path, output_dir, base_name, model):
 
 
 def main():
+    global AUDIO_ROOT, CORRECTION_FILE, PROGRESS_FILE
+
     parser = argparse.ArgumentParser(description="Batch transcribe WAV files from USB device")
     parser.add_argument("--batch-size", type=int, default=10, help="Number of files to process before saving progress")
     parser.add_argument("--start-from", type=int, default=0, help="Start from this file index")
+    parser.add_argument("--audio-root", default=AUDIO_ROOT, help="local/hot audio processing root")
+    parser.add_argument("--correction-file", default=CORRECTION_FILE, help="DATETIME_CORRECTION.json path")
+    parser.add_argument("--progress-file", default=PROGRESS_FILE, help="resumable progress JSON path")
     args = parser.parse_args()
+
+    if not args.audio_root:
+        from auto_ingest_config import get_audio_root
+        try:
+            args.audio_root = get_audio_root()
+        except RuntimeError as exc:
+            parser.error(str(exc))
+    if not args.correction_file:
+        parser.error("--correction-file is required (or set USB_CORRECTION_FILE)")
+
+    AUDIO_ROOT = args.audio_root
+    CORRECTION_FILE = args.correction_file
+    PROGRESS_FILE = args.progress_file
 
     print("Loading progress...")
     progress = load_progress()

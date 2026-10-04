@@ -3,7 +3,7 @@
 # runs enrich_scott_unify.py (rebuilds :PlaceHour) and verifies past-week location data.
 # Run detached: nohup bash finish_location_backfill.sh > logs/backfill_watcher.log 2>&1 &
 set -u
-CD="/media/scott/SSD_4TB/hermes-home/auto-ingest"
+CD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG="$CD/logs/backfill_watcher.log"
 PW="${NEO4J_PASSWORD:?Set NEO4J_PASSWORD or source the runtime environment before running this watcher}"
 CY="docker exec neo4j cypher-shell -u neo4j -p $PW"

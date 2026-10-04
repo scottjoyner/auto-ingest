@@ -18,11 +18,12 @@ Or as a CLI: prints the chosen URL (or nothing) for shell scripts.
 import json
 import os
 import sys
+from pathlib import Path
 import urllib.request
 
 REGISTRY = os.environ.get(
     "EMBEDDING_REGISTRY",
-    "/media/scott/SSD_4TB/hermes-home/auto-ingest/embedding_endpoints.json",
+    str(Path(__file__).resolve().parent.parent / "embedding_endpoints.json"),
 )
 # Env override takes precedence over the whole registry (single-endpoint mode).
 ENV_URL = os.environ.get("EMBEDDING_URL")

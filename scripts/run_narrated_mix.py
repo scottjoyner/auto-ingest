@@ -1,7 +1,8 @@
 """Narrated mix driver (iteration-aware).
 
 Plans montage + highlights + discussion(s) across several seeds/topics, renders
-all with owner-voice TTS into NAS5, deduped (by clip_key) + manifest-upserted.
+all with owner-voice TTS into the shared /nas namespace, deduped (by clip_key)
++ manifest-upserted.
 
 Run via:
     .venv/bin/python scripts/run_narrated_mix.py \
@@ -25,18 +26,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from auto_ingest.shorts import backdrop, curator, planner, render  # noqa: E402
 from auto_ingest.shorts.models import Plan  # noqa: E402
+from auto_ingest_config import get_neo4j_config, get_shared_path  # noqa: E402
 
-NAMESPACE = "/media/scott/NAS5/fileserver/dashcam_timelapse/_mix_run/narrated"
-PLANS_DIR = Path("/media/scott/SSD_4TB/hermes-home/auto-ingest/plans_narrated")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+NAMESPACE = os.environ.get("NARRATED_NAMESPACE", "")
+PLANS_DIR = Path(os.environ.get("PLANS_DIR", str(REPO_ROOT / "plans_narrated")))
 TTS_ENV = {"COQUI_TOS_AGREED": "1"}
 
 
 def _driver():
     from neo4j import GraphDatabase
 
-    from auto_ingest_config import get_neo4j_password
-    d = GraphDatabase.driver("bolt://localhost:7687",
-                             auth=("neo4j", get_neo4j_password()))
+    cfg = get_neo4j_config()
+    d = GraphDatabase.driver(
+        cfg["uri"], auth=(cfg["user"], cfg["password"])
+    )
     return d
 
 
@@ -145,6 +149,14 @@ def main(argv=None) -> int:
                     help="Ignore cached plan JSONs and re-plan from the graph")
     ap.add_argument("--namespace", default=NAMESPACE)
     args = ap.parse_args(argv)
+
+    if not args.namespace:
+        try:
+            args.namespace = get_shared_path(
+                "dashcam_timelapse", "_mix_run", "narrated"
+            )
+        except RuntimeError as exc:
+            ap.error(str(exc))
 
     PLANS_DIR.mkdir(parents=True, exist_ok=True)
     out_root = Path(args.namespace)
