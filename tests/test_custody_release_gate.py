@@ -22,11 +22,13 @@ from custody_helpers import (
 )
 
 from auto_ingest.custody import (
+    CampaignEvidence,
     CampaignState,
     StorageIdentity,
     derive_state,
     evaluate_release,
 )
+from auto_ingest.custody.policy import CustodyPolicy
 from auto_ingest.custody.release import CONDITION_ORDER
 
 
@@ -254,3 +256,45 @@ def test_errors_blocker_count_matches_unresolved():
     assert "unresolved_errors" in codes(decision)
     blocker = next(b for b in decision.blockers if b.code == "unresolved_errors")
     assert blocker.detail == "unresolved=4"
+
+
+def test_verification_complete_with_nothing_verified_blocks():
+    """`verification_complete` is a claim, not evidence.
+
+    An imported evidence document can assert the flag while carrying
+    verified_files=0. That combination passed the gate, so a campaign could be
+    declared releasable with custody proven for nothing - and the operator erases
+    the card. The count must be cross-checked against the same required-scope
+    definition the state machine uses.
+    """
+    import custody_helpers as H
+
+    identity = StorageIdentity(filesystem_uuid="D", device="/dev/f0",
+                               filesystem_type="ext4")
+    camp = H.campaign(dest=H.destination(host_path="/nas/x", mounted=True,
+                                         identity=identity))
+    _, ev = H.fully_copied_campaign(total_files=3, total_bytes=600, verified_files=0)
+    raw = ev.to_dict()
+    raw["destination"].update({
+        "verification_complete": True,
+        "verification_started": True,
+        "verified_files": 0,
+        "verified_bytes": 0,
+        "observed_identity": identity.to_dict(),
+    })
+    raw["reconciliation"] = {"clean": True, "source_only": 0, "destination_only": 0,
+                             "mismatched": 0, "unresolved": 0}
+    result = evaluate_release(camp, CampaignEvidence.from_dict(raw), CustodyPolicy())
+
+    assert result.allowed is False
+    assert "destination_verification_short" in {b.code for b in result.blockers}
+
+
+def test_a_fully_verified_campaign_still_passes():
+    """The new condition must not fire on the honest path."""
+    import custody_helpers as H
+
+    _, ev = H.fully_copied_campaign(total_files=3, total_bytes=600)
+    camp, _ = H.fully_copied_campaign(total_files=3, total_bytes=600)
+    result = evaluate_release(camp, ev, CustodyPolicy())
+    assert "destination_verification_short" not in {b.code for b in result.blockers}

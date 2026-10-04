@@ -9,13 +9,17 @@ What it is allowed to do
 * read every source object (``rb``, streaming);
 * create **new** files under the destination root, by writing a temporary file
   and atomically renaming it into place;
-* append records to ``copy.jsonl`` and update campaign evidence.
+* append records to ``copy.jsonl`` and update campaign evidence;
+* refresh the mtime of an **already present** campaign-active marker as the copy
+  progresses, so the marker's TTL cannot expire a healthy campaign.
 
 What it is forbidden to do
 --------------------------
 * write, rename, delete or truncate anything on the **source**;
 * delete or overwrite anything already at the destination;
-* copy an object that is not in the plan it was given.
+* copy an object that is not in the plan it was given;
+* create the campaign-active marker - taking the lock is ``cli``'s job, and a
+  refresh must never be able to start a campaign that nobody authorized.
 
 Atomicity is the load-bearing property. A copy goes to
 ``<dest>/.custody-tmp/<key>``, is fsynced, and is then ``os.replace``d into its
@@ -37,6 +41,7 @@ actually streamed, so "copied" means "these bytes were produced and hashed", not
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -49,12 +54,21 @@ from .ledger import (
     ledger_dir,
     read_records,
 )
+from .lock import lock_root, touch_active
 from .policy import MAX_SUMMARY_ENTRIES
 
 #: Where in-flight bytes live, relative to the destination root. A dot-directory
 #: so it is never confused for campaign content, and so ``custody verify`` can
 #: tell a temp file from a real object.
 TEMP_DIRNAME = ".custody-tmp"
+
+#: Seconds between marker refreshes while copying. The marker's TTL is what stops
+#: a SIGKILLed campaign from standing writers down forever, and ingest_claim - the
+#: convention this marker follows - has no heartbeat primitive. Without a refresh
+#: here a multi-hour campaign would be reaped mid-copy and let a second writer in.
+#: Time-based rather than per-object because a single 4GB video can take longer
+#: than the whole interval.
+MARKER_REFRESH_SEC = 30.0
 
 COPIED = "copied"
 SKIPPED = "skipped"
@@ -288,12 +302,24 @@ def execute_copy(
         handle.flush()
         os.fsync(handle.fileno())
 
+    lock_home = lock_root()
+    last_refresh = time.monotonic()
+
+    def refresh_marker() -> None:
+        nonlocal last_refresh
+        now = time.monotonic()
+        if now - last_refresh < MARKER_REFRESH_SEC:
+            return
+        touch_active(lock_home)
+        last_refresh = now
+
     with ledger.open("a", encoding="utf-8") as handle:
         if keys and _ends_unterminated(ledger):
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         for key in keys:
+            refresh_marker()
             if limit is not None and copied + skipped + failed >= limit:
                 break
             target = _safe_join(dest_root, key)
@@ -389,6 +415,7 @@ def to_evidence(result: CopyProgress, plan: Optional[CopyPlan] = None,
 __all__ = [
     "COPIED",
     "FAILED",
+    "MARKER_REFRESH_SEC",
     "SKIPPED",
     "TEMP_DIRNAME",
     "CopyPlan",

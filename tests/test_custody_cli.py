@@ -46,6 +46,7 @@ def test_parser_exposes_the_documented_subcommands():
     assert set(sub.choices) == {
         "status", "plan", "verify", "import", "new", "reconcile",
         "observe-mount", "capacity", "preflight", "hash", "execute",
+        "release-source",
     }
 
 
@@ -54,6 +55,12 @@ def test_status_defaults_are_read_only():
     assert args.json is False
     assert args.require_release is False
     assert not hasattr(args, "apply")
+
+
+def test_release_source_is_off_without_the_flag():
+    """The one irreversible command must default to describing, not doing."""
+    args = build_parser().parse_args(["release-source", "--bundle", "x"])
+    assert args.execute is False
 
 
 def test_import_does_not_apply_without_the_flag():

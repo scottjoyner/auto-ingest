@@ -391,6 +391,68 @@ def test_to_evidence_reports_totals_not_deltas():
 
 
 # ---------------------------------------------------------------------------
+# the marker heartbeat: a fixed TTL must not reap a healthy campaign
+# ---------------------------------------------------------------------------
+def _copy_everything(bundle, src, dest):
+    return execute_copy(bundle, src, dest, plan_copy(bundle, dest).keys)
+
+
+def test_the_copy_refreshes_the_marker_so_a_long_campaign_stays_fresh(
+        tmp_path, monkeypatch):
+    """~90GB over USB runs for hours, and ingest_claim has no heartbeat.
+
+    Without a refresh mid-copy, the TTL that rescues a SIGKILLed campaign would
+    instead expire a live one and let a second writer in.
+    """
+    import auto_ingest.custody.executor as executor_mod
+    from auto_ingest.custody.lock import (
+        active_marker,
+        active_marker_ttl,
+        marker_is_stale,
+        set_active,
+    )
+
+    bundle, src, dest = build(tmp_path, count=4)
+    marker = set_active()
+    an_hour_ago = time.time() - 3600
+    os.utime(marker, (an_hour_ago, an_hour_ago))
+    monkeypatch.setenv("CUSTODY_MARKER_TTL_SEC", "600")
+    monkeypatch.setattr(executor_mod, "MARKER_REFRESH_SEC", 0.0)
+    # reapable before the copy: this is exactly what a second writer is waiting for
+    assert marker_is_stale(active_marker(), active_marker_ttl()) is True
+
+    assert _copy_everything(bundle, src, dest).copied == 4
+
+    assert marker_is_stale(active_marker(), active_marker_ttl()) is False
+
+
+def test_a_copy_succeeds_when_the_marker_cannot_be_refreshed(tmp_path, monkeypatch):
+    """A refresh is bookkeeping; it must never fail an otherwise good copy."""
+    import auto_ingest.custody.executor as executor_mod
+
+    bundle, src, dest = build(tmp_path, count=2)
+    not_a_directory = tmp_path / "blocker"
+    not_a_directory.write_text("", encoding="utf-8")
+    monkeypatch.setenv("CUSTODY_LOCK_ROOT", str(not_a_directory))
+    monkeypatch.setattr(executor_mod, "MARKER_REFRESH_SEC", 0.0)
+
+    assert _copy_everything(bundle, src, dest).copied == 2
+    assert sorted(p.name for p in dest.iterdir() if p.is_file()) == ["c0.mp4", "c1.mp4"]
+
+
+def test_a_copy_never_creates_a_marker_it_did_not_take(tmp_path, monkeypatch):
+    """Taking the lock is the CLI's job; the executor may only refresh one."""
+    import auto_ingest.custody.executor as executor_mod
+    from auto_ingest.custody.lock import active_marker
+
+    bundle, src, dest = build(tmp_path, count=2)
+    monkeypatch.setattr(executor_mod, "MARKER_REFRESH_SEC", 0.0)
+
+    assert _copy_everything(bundle, src, dest).copied == 2
+    assert not active_marker().exists()
+
+
+# ---------------------------------------------------------------------------
 # the real CLI
 # ---------------------------------------------------------------------------
 def test_the_real_cli_copies_nothing_without_execute(tmp_path):

@@ -17,6 +17,34 @@ stopped worker implies. It is the single boolean produced here, and it is only
 
 Every condition is evaluated on every call - the gate never short-circuits -
 so the returned blocker list is a complete, deterministic explanation.
+
+How the release *record* enters the gate
+----------------------------------------
+
+``evidence.source_release`` records what happened to the objects that used to be
+on the card. It is read here, and it is read in one direction only:
+
+* **It can never open the gate.** Not one of its fields is a custody condition.
+  ``destination.verified_files`` still means "proven present and correct at the
+  destination"; ``source_release.released.files`` means "no longer on the card".
+  Those are different facts about different objects in opposite directions, and a
+  release that could stand in for verification would let deleting the card
+  manufacture a pass - the exact inversion this subsystem exists to prevent.
+* **It can only close it.** Two conditions are added, both fail-closed:
+
+  ``source_release_exceeds_inventory``
+      more objects destroyed than the card was ever recorded to hold. Impossible
+      arithmetic, so the evidence is wrong somewhere.
+
+  ``source_release_incomplete``
+      a release attempt failed or was refused on a specific object. Bytes are
+      gone, the pass did not finish, and a human has to look at the audit.
+* **It is never silent.** A recorded release is reported as a warning, so a
+  campaign whose source is already gone says so instead of looking untouched.
+
+So a campaign carrying release evidence and no verification is exactly as
+blocked as it was before the evidence existed - which is the property that makes
+recording the release safe at all.
 """
 
 from __future__ import annotations
@@ -72,12 +100,15 @@ CONDITION_ORDER: Tuple[str, ...] = (
     "copy_result_complete",
     "copy_ledger_complete",
     "destination_verification_complete",
+    "destination_verification_covers_required",
     "mismatch_count_zero",
     "missing_destination_zero",
     "unresolved_errors_zero",
     "plan_scope_covers_required_objects",
     "operator_witness_recorded",
     "destination_scope_strict",
+    "source_release_consistent",
+    "source_release_clean",
 )
 
 
@@ -94,6 +125,7 @@ def evaluate_release(
     cpy = evidence.copy
     dst = evidence.destination
     rec = evidence.reconciliation
+    rel = evidence.source_release
 
     blockers = []
     warnings = []
@@ -174,6 +206,22 @@ def evaluate_release(
             "run full destination verification",
         ))
 
+    # `verification_complete` is a claim ABOUT the verification having finished;
+    # it is not evidence that anything was proven. An imported document can assert
+    # the flag while carrying verified_files=0, and that combination passed this
+    # gate - so a campaign could be declared releasable with custody proven for
+    # nothing at all. Cross-check the count against the same required-scope
+    # definition the machine uses, so a bare flag cannot stand in for the work.
+    required_objects = policy.required_objects(inv.discovered_files, hsh.verified_files)
+    if dst.verification_complete and dst.verified_files < required_objects:
+        blockers.append(Blocker(
+            "destination_verification_short",
+            f"verified={dst.verified_files} required={required_objects}"
+            f" scope={policy.required_scope}",
+            "verification claims complete but proves fewer objects than this "
+            "policy requires; re-run verification over the full scope",
+        ))
+
     if rec.mismatched:
         blockers.append(Blocker(
             "mismatch_present",
@@ -195,6 +243,23 @@ def evaluate_release(
             ))
         else:
             warnings.append(f"destination_only={rec.destination_only} (advisory)")
+
+    # The source-release record is observational: nothing above reads it to allow
+    # anything. These two checks can only close the gate, never open it.
+    if rel.released.files > max(inv.discovered_files, 0):
+        blockers.append(Blocker(
+            "source_release_exceeds_inventory",
+            f"released={rel.released.files} inventory={inv.discovered_files}",
+            "the release record destroys more objects than the card was ever "
+            "recorded to hold; the evidence is inconsistent, so rebuild it",
+        ))
+    if not rel.clean:
+        blockers.append(Blocker(
+            "source_release_incomplete",
+            f"failed={rel.failed} refused={rel.refused} released={rel.released.files}",
+            "a release pass did not remove everything it proposed; read "
+            "ledgers/release.jsonl before trusting this campaign",
+        ))
 
     if evidence.errors.unresolved:
         blockers.append(Blocker(
@@ -221,6 +286,19 @@ def evaluate_release(
 
     if dst.unverified_present_files:
         warnings.append(f"unverified_objects_present_at_destination={dst.unverified_present_files}")
+
+    if rel.observed:
+        # Named, never silent. A campaign whose source is already gone must not
+        # look untouched, and this must never read as extra destination
+        # verification - so it says what was released, from where, and nothing
+        # about the destination.
+        warnings.append(
+            f"source_release_recorded: released={rel.released.files} "
+            f"released_bytes={rel.released.bytes} absent={rel.absent} "
+            f"failed={rel.failed} refused={rel.refused} "
+            f"audit_records={rel.audit_records} "
+            f"(a source-side record; it is NOT destination verification)"
+        )
 
     out_of_scope = inv.discovered_files - required
     if out_of_scope > 0:

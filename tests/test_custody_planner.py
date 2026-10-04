@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import inspect
 import json
+from dataclasses import replace
 
 from custody_helpers import (
     campaign,
     copying,
     destination,
     destination_evidence,
+    errors,
     evidence,
     fully_copied_campaign,
     hashing,
@@ -28,6 +30,7 @@ from auto_ingest.custody import (
     SOURCE_MUTATION_ALLOWED,
     CampaignState,
     derive_state,
+    evaluate_release,
     plan_resume,
 )
 from auto_ingest.custody import planner as planner_mod
@@ -37,6 +40,16 @@ def plan_for(ev, camp=None, policy=None):
     camp = camp or campaign()
     policy = policy or strict_policy()
     return plan_resume(camp, ev, policy)
+
+
+def with_errors(ev, **fields):
+    return replace(ev, errors=replace(ev.errors, **fields))
+
+
+def hashed_evidence():
+    """Hash complete, nothing else recorded - the shape a fresh hash pass leaves."""
+    return evidence(inv=inventory(10, 1000, complete=True, verified=True),
+                    hsh=hashing(10, verified_bytes=1000, complete=True))
 
 
 # ---------------------------------------------------------------------------
@@ -370,3 +383,127 @@ def test_derivation_is_passed_through_not_recomputed_sideways():
     d = derive_state(camp, ev, policy)
     assert plan_resume(camp, ev, policy, derivation=d).to_dict() == \
         plan_resume(camp, ev, policy).to_dict()
+
+
+# ---------------------------------------------------------------------------
+# names the destination filesystem cannot keep apart
+# ---------------------------------------------------------------------------
+# The card is vfat and the destination is SMB2/exFAT: both case-insensitive, both
+# length-limited. So an unresolved name problem is never a safe next step - the
+# next action would copy one spelling of a name the destination already holds
+# under another, and `os.replace` resolves that by clobbering or by failing.
+COLLISION_SAMPLE = (
+    "case_collision: 'A.mp4' is the same file as 'a.mp4' on a "
+    "case-insensitive filesystem"
+)
+DESTINATION_SAMPLE = (
+    "destination_case_collision: 'a.mp4' is already present at the destination as "
+    "'A.MP4'; copying it would hit the existing file"
+)
+UNREPRESENTABLE_SAMPLE = (
+    "unrepresentable_name: path component 'clip:01.mp4' contains ':'; vfat and exFAT "
+    "cannot store it"
+)
+
+
+def test_a_case_collision_is_its_own_blocker_and_is_not_safe_to_resume():
+    ev = evidence(inv=inventory(2, 200, complete=True, verified=True),
+                  hsh=hashing(2, verified_bytes=200, complete=True),
+                  err=errors(unresolved=2, summaries=(COLLISION_SAMPLE,)))
+    plan = plan_for(ev)
+    assert plan.safe_to_resume is False
+    assert "unresolved_name_problems" in plan.reasons
+    collision = [b for b in plan.blockers if b.code == "case_collision"]
+    assert len(collision) == 1
+    assert "'A.mp4'" in collision[0].detail and "'a.mp4'" in collision[0].detail
+    assert not collision[0].detail.startswith("case_collision")  # prefix stripped
+    assert "which spelling the campaign keeps" in collision[0].remedy
+
+
+def test_each_kind_of_name_problem_gets_its_own_code_and_remedy():
+    """They send an operator to different places, so they must not share a code."""
+    ev = evidence(inv=inventory(3, 300, complete=True, verified=True),
+                  hsh=hashing(3, verified_bytes=300, complete=True),
+                  err=errors(unresolved=3,
+                             summaries=(COLLISION_SAMPLE, DESTINATION_SAMPLE,
+                                        UNREPRESENTABLE_SAMPLE)))
+    codes = [b.code for b in plan_for(ev).blockers]
+    assert codes == ["case_collision", "destination_case_collision",
+                     "unrepresentable_name"]
+    destination = next(b for b in plan_for(ev).blockers
+                       if b.code == "destination_case_collision")
+    assert "clobber" in destination.remedy
+    unrepresentable = next(b for b in plan_for(ev).blockers
+                           if b.code == "unrepresentable_name")
+    assert "cannot store this name" in unrepresentable.remedy
+
+
+def test_name_problem_blockers_are_bounded_however_bad_the_card_is():
+    """10,000 colliding names must not become 10,000 blockers in a report."""
+    from auto_ingest.custody.planner import name_problem_blockers
+
+    samples = tuple(f"case_collision: 'clip_{i:05d}.mp4' collides with "
+                    f"'CLIP_{i:05d}.mp4'" for i in range(10_000))
+    for limit in (1, 5, 20):
+        blockers = name_problem_blockers(samples, limit)
+        assert len(blockers) == limit
+        assert all(b.code == "case_collision" for b in blockers)
+    assert name_problem_blockers((), 20) == ()
+
+
+def test_unrelated_error_summaries_are_not_turned_into_name_blockers():
+    """The samples are free text; only the three known prefixes mean a name."""
+    ev = evidence(err=errors(unresolved=1, summaries=("clip_0.mp4:No such file",)))
+    plan = plan_for(ev)
+    assert plan.blockers == ()
+    assert "unresolved_name_problems" not in plan.reasons
+
+
+def test_a_collision_denies_release_even_when_everything_else_is_proven():
+    """The gate must refuse on a name alone: custody is not releasability.
+
+    Hash complete, copy attested, destination verified, zero mismatches, zero
+    missing, no witness required - and still refused, because an unresolved name
+    problem is on record.
+    """
+    camp, clean = fully_copied_campaign(total_files=100, total_bytes=1000)
+    assert evaluate_release(camp, clean, strict_policy()).allowed is True
+    assert plan_for(clean, camp=camp).safe_to_resume is False  # nothing left to do
+
+    collided = with_errors(clean, unresolved=1, summaries=(COLLISION_SAMPLE,))
+    decision = evaluate_release(camp, collided, strict_policy())
+    assert decision.allowed is False
+    assert "unresolved_errors" in [b.code for b in decision.blockers]
+    assert decision.blockers[-1].detail == "unresolved=1"
+
+    plan = plan_resume(camp, collided, strict_policy())
+    assert plan.current_state is CampaignState.VERIFIED
+    assert plan.safe_to_resume is False
+    assert [b.code for b in plan.blockers][-1] == "case_collision"
+
+
+def test_a_clean_campaign_plans_no_name_blockers_at_all():
+    """No regression: nothing about the ordinary path changes."""
+    camp, clean = fully_copied_campaign()
+    plan = plan_resume(camp, clean, strict_policy())
+    assert plan.blockers == ()
+    assert plan.safe_to_resume is False      # nothing outstanding, as before
+    assert "unresolved_name_problems" not in plan.reasons
+
+
+def test_a_name_problem_survives_the_evidence_round_trip():
+    """`import --apply` writes and re-reads, so the diagnostic must not evaporate
+    on exactly the round trip an operator performs to investigate it."""
+    from auto_ingest.custody.evidence import CampaignEvidence
+    from auto_ingest.custody.hashing import HashProgress, to_evidence
+
+    fragment = to_evidence(HashProgress(
+        ledger_path="/nowhere/hash.jsonl", collisions=2,
+        name_problems=(COLLISION_SAMPLE,),
+    ))
+    reread = CampaignEvidence.from_dict(fragment)
+    assert reread.errors.unresolved == 2
+    assert reread.errors.summaries == (COLLISION_SAMPLE,)
+    # ...and the plan still refuses after the round trip
+    assert plan_for(replace(hashed_evidence(), errors=reread.errors)
+                    ).safe_to_resume is False
