@@ -63,6 +63,7 @@ from .evidence import (
     HashEvidence,
     InventoryEvidence,
     ReconciliationEvidence,
+    SourceReleaseEvidence,
     WorkerEvidence,
 )
 from .machine import Derivation, derive_state, find_contradictions
@@ -113,6 +114,7 @@ __all__ = [
     "SOURCE_DELETION_ALLOWED",
     "SOURCE_MUTATION_ALLOWED",
     "SourceRef",
+    "SourceReleaseEvidence",
     "StorageIdentity",
     "WorkerEvidence",
     "build_status",

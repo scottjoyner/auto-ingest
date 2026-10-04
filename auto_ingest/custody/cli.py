@@ -62,6 +62,7 @@ from .lock import (
 from .mounts import observations_to_evidence, observe_campaign
 from .policy import CustodyPolicy
 from .release_source import execute_release
+from .release_source import to_evidence as release_evidence
 from .report import plan_json, plan_text, status_json, status_text
 from .store import (
     BundleError,
@@ -201,6 +202,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "set that would be removed is only shown")
     pr.add_argument("--limit", type=int, default=None,
                     help="release at most this many objects (executed pass only)")
+    pr.add_argument("--apply", action="store_true",
+                    help="record the result as campaign evidence")
 
     pe = common(sub.add_parser(
         "execute",
@@ -802,6 +805,14 @@ def cmd_release_source(args) -> int:
     payload["executed"] = result.mode == "executed"
     payload["source_root"] = source_root
     payload["destination_root"] = destination
+    if args.apply:
+        applied = import_evidence(args.bundle, release_evidence(result), policy,
+                                 apply=True)
+        payload["applied"] = bool(applied.get("applied"))
+        payload["evidence_result"] = applied
+        status = load_status(args.bundle, policy)
+        payload["state_after"] = status.derivation.state.value
+        payload["source_release_allowed_after"] = status.source_release_allowed
     _emit_release_source(payload, args)
     if result.mode in ("refused", "executed") and not result.complete:
         return EXIT_GATE_CLOSED

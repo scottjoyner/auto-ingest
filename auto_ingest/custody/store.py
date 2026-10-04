@@ -69,6 +69,7 @@ EVIDENCE_BLOCKS = (
     "reconciliation",
     "worker",
     "errors",
+    "source_release",
 )
 EVIDENCE_SCALARS = ("campaign_id", "observed_at")
 
@@ -135,6 +136,7 @@ class CampaignStatus:
                 "started": ev.copy.started,
             },
             "created_at": campaign.created_at,
+            "source_release": ev.source_release.to_dict(),
             "destination": {
                 "canonical": campaign.destination.logical.canonical,
                 "host_path": campaign.destination.host_path,

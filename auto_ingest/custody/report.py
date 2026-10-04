@@ -95,6 +95,15 @@ def status_text(status: CampaignStatus) -> str:
     lines.append(f"next_phase         {data['next_phase']}")
     lines.append(f"next_safe_action   {data['next_safe_action']}")
     lines.append(f"source_release_allowed     {str(data['source_release_allowed']).lower()}")
+    rel = data.get("source_release") or {}
+    if rel.get("started"):
+        lines.append(
+            "source_released       "
+            f"files={rel.get('released', {}).get('files', 0)} "
+            f"bytes={rel.get('released', {}).get('bytes', 0)} "
+            f"failed={rel.get('failed', 0)} refused={rel.get('refused', 0)} "
+            f"complete={str(rel.get('complete', False)).lower()}"
+        )
     lines.append(f"source_mutation_allowed    {str(data['source_mutation_allowed']).lower()}")
     lines.append(f"source_deletion_allowed    {str(data['source_deletion_allowed']).lower()}")
     if data["reasons"]:
