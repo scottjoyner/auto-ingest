@@ -9,6 +9,7 @@ Containerized pipeline that ingests dashcam, audio, and bodycam recordings into 
 | [System Design](docs/system_design.md) | Architecture, service topology, data model, deployment guide |
 | [Deployment Runbook](docs/deployment_runbook.md) | File-by-file operational guide |
 | [Content OS Architecture](docs/architecture.md) | Content workflow engine design |
+| [Fleet Storage Namespace Contract](docs/storage_namespace_contract.md) | Shared `/nas` data plane vs host-local processing/cache tiers |
 | [Docker Skill](deploy/skills/auto-ingest-docker/SKILL.md) | Deploy, manage, and monitor Docker services |
 | [Job Management Skill](deploy/skills/auto-ingest-job-management/SKILL.md) | Enqueue jobs, manage queue, API endpoints |
 | [Troubleshooting Skill](deploy/skills/auto-ingest-troubleshooting/SKILL.md) | Known issues, diagnostics, fixes |

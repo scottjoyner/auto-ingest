@@ -99,10 +99,14 @@ def _load_config():
 
 
 def get_storage_layout():
-    """Return the current hot/cold storage topology.
+    """Return the current shared/hot/cold storage topology.
 
-    The layout is sourced from environment variables first, then config.yaml,
-    then sensible machine-local fallbacks.
+    ``shared_root`` is the fleet data-plane namespace (normally ``/nas``).
+    ``fileserver_root`` remains the legacy/local processing-root concept until
+    callers are migrated deliberately; it must not be treated as the fleet
+    storage namespace.
+
+    Values are sourced from environment variables first, then config.yaml.
     """
     cfg = _load_config()
     knowledge_map = cfg.get('knowledge_map', {})
@@ -121,18 +125,23 @@ def get_storage_layout():
         else:
             matched_machine = list(machine_paths.values())[0]
 
+    shared_root = (
+        os.environ.get('NAS_ROOT')
+        or (matched_machine or {}).get('shared_root')
+        or ''
+    )
     return {
+        'shared_root': shared_root,
         'hot_root': os.environ.get('HOT_STORAGE_ROOT')
         or (matched_machine or {}).get('hot_ssd_root')
         or knowledge_map.get('hot_layer_path')
-        or '/media/scott/SSD_4TB/audio',
+        or '',
         'cold_root': os.environ.get('COLD_STORAGE_ROOT')
         or (matched_machine or {}).get('nas_mirror_root')
-        or knowledge_map.get('mirror_vault_path')
-        or '/media/scott/NAS5',
+        or shared_root,
         'fileserver_root': os.environ.get('FILESERVER_ROOT')
         or (matched_machine or {}).get('fileserver_root')
-        or '/media/scott/SSD_4TB/fileserver',
+        or '',
     }
 
 
@@ -180,38 +189,77 @@ def _require_mounted(path):
     return str(p)
 
 
+def get_shared_root():
+    """Return the fleet-wide shared data-plane root.
+
+    New cross-host storage code should use this instead of ``fileserver_root``.
+    The root is configured with ``NAS_ROOT`` or ``machine_paths.<host>.shared_root``
+    and fails closed when absent or when it resolves only to an empty unmounted
+    directory.
+    """
+    root = get_storage_layout().get('shared_root')
+    if not root:
+        raise RuntimeError(
+            "Shared NAS root is not configured (set NAS_ROOT or "
+            "machine_paths.<host>.shared_root in config.yaml)"
+        )
+    return _require_mounted(root)
+
+
+def get_shared_path(*parts: str) -> str:
+    """Resolve a relative path beneath the shared root without allowing escape."""
+    root = Path(get_shared_root()).expanduser().resolve()
+    candidate = root.joinpath(*parts).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"shared path escapes NAS root: {parts!r}") from exc
+    return str(candidate)
+
+
 def get_hot_root():
-    """Get the SSD hot layer root path."""
-    return get_storage_layout()['hot_root']
+    """Get the host-local hot processing/cache root, failing closed if absent."""
+    root = get_storage_layout().get('hot_root')
+    if not root:
+        raise RuntimeError(
+            "Hot storage root is not configured (set HOT_STORAGE_ROOT or "
+            "machine_paths.<host>.hot_ssd_root in config.yaml)"
+        )
+    return _require_mounted(root)
 
 
 def get_cold_root():
-    """Get the NAS/mirror root path.
-
-    Fail closed: NAS5 is the only accepted NAS mount on deathstar. Do not fall
-    back to legacy NAS3 because it may cause new data to be loaded there.
-    """
-    return _require_mounted(_first_existing_path(get_storage_layout()['cold_root'], '/media/scott/NAS5'))
+    """Get the durable shared/cold root, failing closed if unconfigured."""
+    root = get_storage_layout().get('cold_root')
+    if not root:
+        raise RuntimeError(
+            "Cold storage root is not configured (set COLD_STORAGE_ROOT, NAS_ROOT, "
+            "or machine_paths.<host>.nas_mirror_root in config.yaml)"
+        )
+    return _require_mounted(root)
 
 
 def get_fileserver_root():
-    """Get the fileserver root path for the current machine.
+    """Get the configured host-local processing/fileserver root.
 
-    Priority:
-    1. FILESERVER_ROOT environment variable
-    2. Auto-detected from config.yaml based on hostname
-    3. Fallback to x1-370/default storage layout
+    This is a compatibility/local-processing concept, not the fleet shared
+    namespace. New cross-host storage code should use ``get_shared_root()``.
     """
-    root = get_storage_layout()['fileserver_root']
-    return _first_existing_path(root, '/mnt/8TB_2025/fileserver', '/media/scott/SSD_4TB/fileserver')
+    root = get_storage_layout().get('fileserver_root')
+    if not root:
+        raise RuntimeError(
+            "Fileserver root is not configured (set FILESERVER_ROOT or "
+            "machine_paths.<host>.fileserver_root in config.yaml)"
+        )
+    return _require_mounted(root)
 
 
 def get_audio_root():
-    """Get the canonical destination/root for organized audio."""
+    """Get the configured hot/local audio processing root."""
     env = os.environ.get('AUDIO_ROOT')
-    layout = get_storage_layout()
-    hot_audio = _subpath_or_root(layout.get('hot_root'), 'audio')
-    return _first_existing_path(env, hot_audio, '/mnt/8TB_2025/fileserver/audio', '/media/scott/SSD_4TB/audio', '/media/scott/NAS5/audio')
+    if env:
+        return _require_mounted(env)
+    return _subpath_or_root(get_hot_root(), 'audio')
 
 
 def get_dashcam_root():
@@ -224,12 +272,7 @@ def get_dashcam_root():
     env = os.environ.get('DASHCAM_ROOT')
     if env:
         return env
-    fileserver_root = Path(get_fileserver_root())
-    local_cache = fileserver_root / 'dashcam'
-    if fileserver_root.exists():
-        return str(local_cache)
-    cold = get_cold_root()
-    return _first_existing_path(_subpath_or_root(cold, 'dashcam'), '/media/scott/NAS5/dashcam')
+    return str(Path(get_fileserver_root()) / 'dashcam')
 
 
 def get_bodycam_root():
@@ -242,12 +285,7 @@ def get_bodycam_root():
     env = os.environ.get('BODYCAM_ROOT')
     if env:
         return env
-    fileserver_root = Path(get_fileserver_root())
-    local_cache = fileserver_root / 'bodycam'
-    if fileserver_root.exists():
-        return str(local_cache)
-    cold = get_cold_root()
-    return _first_existing_path(_subpath_or_root(cold, 'bodycam'), '/media/scott/NAS5/bodycam')
+    return str(Path(get_fileserver_root()) / 'bodycam')
 
 
 def get_neo4j_config():
@@ -364,9 +402,18 @@ def build_artifact_ref(path: str, storage_root: str = "local-ssd",
     p = os.path.abspath(os.path.expanduser(str(path)))
     rel = p
     container = None
-    # Relative to known roots if under them.
-    for root in (get_fileserver_root(), get_storage_layout()["hot_root"],
-                 get_storage_layout()["cold_root"]):
+    # Relative to known roots if under them. Artifact description itself must
+    # remain usable even when one optional storage tier is offline/unconfigured.
+    roots = []
+    try:
+        roots.append(get_fileserver_root())
+    except RuntimeError:
+        pass
+    layout = get_storage_layout()
+    for root in (layout.get("hot_root"), layout.get("cold_root"), layout.get("shared_root")):
+        if root and root not in roots:
+            roots.append(root)
+    for root in roots:
         rp = os.path.relpath(p, root)
         if not rp.startswith(".."):
             rel = rp

@@ -92,6 +92,7 @@ def live_config_in_tmp(tmp_path, monkeypatch):
 
 def _clear_override_env(monkeypatch):
     for var in (
+        "NAS_ROOT",
         "HOT_STORAGE_ROOT",
         "COLD_STORAGE_ROOT",
         "FILESERVER_ROOT",
@@ -347,10 +348,11 @@ def test_shim_fallback_from_env(monkeypatch):
         importlib.reload(shim)
 
 
-def test_shim_fallback_defaults(monkeypatch):
+def test_shim_fallback_storage_is_fail_closed(monkeypatch):
     import importlib
 
     for var in (
+        "NAS_ROOT",
         "FILESERVER_ROOT",
         "HOT_STORAGE_ROOT",
         "COLD_STORAGE_ROOT",
@@ -375,8 +377,17 @@ def test_shim_fallback_defaults(monkeypatch):
         import auto_ingest._config as shim
 
         importlib.reload(shim)
-        assert shim.get_fileserver_root() == "/media/scott/SSD_4TB/fileserver"
-        assert shim.get_storage_layout()["hot_root"] == "/media/scott/SSD_4TB/audio"
+        with pytest.raises(RuntimeError, match="FILESERVER_ROOT"):
+            shim.get_fileserver_root()
+        with pytest.raises(RuntimeError, match="HOT_STORAGE_ROOT"):
+            shim.get_hot_root()
+        with pytest.raises(RuntimeError, match="Shared NAS root"):
+            shim.get_shared_root()
+        layout = shim.get_storage_layout()
+        assert layout["shared_root"] == ""
+        assert layout["hot_root"] == ""
+        assert layout["cold_root"] == ""
+        assert layout["fileserver_root"] == ""
         assert shim.get_neo4j_config()["uri"] == "bolt://localhost:7687"
         assert shim.get_nextcloud_root() == "/media/scott/SSD_4TB/nextcloud"
     finally:

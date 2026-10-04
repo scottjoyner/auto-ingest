@@ -17,35 +17,35 @@ machine_paths:
   # x1-370 (home Tailscale node — Neo4j server lives here)
   x1-370:
     fileserver_root: /media/scott/SSD_4TB/fileserver
+    shared_root: /nas
     neo4j_uri: bolt://100.64.43.123:7687
     neo4j_user: neo4j
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: x1-370
     hot_ssd_root: /media/scott/SSD_4TB/audio
-    nas_mirror_root: /media/scott/NAS4/fileserver
+    nas_mirror_root: /nas
 
-  # Any device on the LAN — uses shared SSD_4TB and NAS4 mounts
-  # Mount points:
-  #   SSD_4TB: /media/scott/SSD_4TB (NFS export from x1-370)
-  #   NAS4:    /media/scott/NAS4 (CIFS //100.64.43.123/nas4)
+  # Any fleet node uses /nas for the shared data plane; local hot/cache roots may vary.
   any:
     fileserver_root: /media/scott/SSD_4TB/fileserver
+    shared_root: /nas
     neo4j_uri: bolt://100.64.43.123:7687
     neo4j_user: neo4j
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: ""
     hot_ssd_root: /media/scott/SSD_4TB/audio
-    nas_mirror_root: /media/scott/NAS4/fileserver
+    nas_mirror_root: /nas
 
-  # deathstar-XPS-8920 — points to NAS4 via CIFS mount
+  # deathstar-XPS-8920 — local first-cache plus /nas shared storage
   deathstar:
-    fileserver_root: /media/scott/NAS4/fileserver
+    fileserver_root: /mnt/8TB_2025/fileserver
+    shared_root: /nas
     neo4j_uri: bolt://100.64.43.123:7687
     neo4j_user: neo4j
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: deathstar
-    hot_ssd_root: /mnt/8TB_2025
-    nas_mirror_root: /media/scott/NAS4/fileserver
+    hot_ssd_root: /mnt/8TB_2025/fileserver/audio
+    nas_mirror_root: /nas
 
 # SD-card ingest custody: logical destination + release-gate policy.
 # The core logic never embeds a host mount. Set CUSTODY_DESTINATION_ROOT (or the
@@ -53,7 +53,7 @@ machine_paths:
 custody:
   destination_root: ${CUSTODY_DESTINATION_ROOT}
   destination_name: primary
-  destination_relative_path: fileserver/dashcam
+  destination_relative_path: archive/dashcam
   policy:
     required_scope: all_inventory
     allow_hash_exemptions: true
@@ -71,7 +71,8 @@ knowledge_map:
   # Local working copy for sync tools and scripts.
   local_vault_path: /home/scott/nas-knowledge
   # Durable NAS mirror for the vault and derived artifacts.
-  mirror_vault_path: /media/scott/NAS4/fileserver/shared-knowledge
+  mirror_vault_path: /nas/shared-knowledge
+  canonical_vault_path: /nas/shared-knowledge
   git:
     enabled: true
     repo_url: "git@github.com:scottjoyner/knowledge-vault.git"

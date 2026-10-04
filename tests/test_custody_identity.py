@@ -194,7 +194,7 @@ def test_destination_is_unresolved_without_configuration():
     assert ref.resolved is False
     assert ref.host_path is None
     assert ref.resolved_from == "unresolved"
-    assert ref.logical.canonical == "primary:fileserver/dashcam"
+    assert ref.logical.canonical == "primary:archive/dashcam"
 
 
 def test_destination_resolves_from_env():
@@ -202,7 +202,7 @@ def test_destination_resolves_from_env():
                              check_mount=False)
     assert ref.host_path == "/srv/custody"
     assert ref.resolved_from == "env:CUSTODY_DESTINATION_ROOT"
-    assert ref.campaign_path() == "/srv/custody/fileserver/dashcam"
+    assert ref.campaign_path() == "/srv/custody/archive/dashcam"
 
 
 def test_destination_resolves_from_config_placeholder():
@@ -250,7 +250,7 @@ def test_identity_match_is_fail_closed():
 
 def test_logical_destination_is_host_independent():
     ref = resolve_destination({}, env={}, check_mount=False)
-    assert ref.logical == LogicalDestination("primary", "fileserver/dashcam")
+    assert ref.logical == LogicalDestination("primary", "archive/dashcam")
     assert "/" not in ref.logical.name
 
 

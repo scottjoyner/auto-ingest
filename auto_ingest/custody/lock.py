@@ -117,7 +117,7 @@ class LockUnavailable(RuntimeError):
 #: Markers a pre-existing writer can leave to make itself visible to custody.
 #:
 #: The per-destination lock is keyed on the campaign's *logical* destination
-#: ("primary:fileserver/dashcam"), which a shell script that only knows
+#: ("primary:archive/dashcam"), which a shell script that only knows
 #: $DASHCAM_ROOT cannot derive. So the handshake is deliberately cruder and
 #: host-path independent: while any campaign is running it drops one marker file,
 #: and a writer checks for that file. One `test -e`, no import, no arguments.

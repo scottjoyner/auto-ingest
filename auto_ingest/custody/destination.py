@@ -3,7 +3,7 @@
 Three separate concepts, deliberately not collapsed into one string:
 
 1. **Logical custody destination** - a host-independent name plus a relative
-   path (e.g. ``primary`` + ``fileserver/dashcam``). This is what a campaign
+   path (e.g. ``primary`` + ``archive/dashcam``). This is what a campaign
    record persists and what contracts talk about.
 2. **Resolved host path** - where that logical destination lives *on this host,
    right now*. Resolved from ``CUSTODY_DESTINATION_ROOT`` then
@@ -38,7 +38,7 @@ DESTINATION_NAME_KEY = "destination_name"
 DESTINATION_RELATIVE_KEY = "destination_relative_path"
 
 #: Host-independent default layout of a custody destination under its root.
-DESTINATION_DEFAULT_RELATIVE_PATH = "fileserver/dashcam"
+DESTINATION_DEFAULT_RELATIVE_PATH = "archive/dashcam"
 
 SOURCE_ENV = "env"
 SOURCE_CONFIG = "config"
