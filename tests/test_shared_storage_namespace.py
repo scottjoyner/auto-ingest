@@ -176,6 +176,28 @@ def test_shared_artifact_ref_uses_single_nas_prefix(tmp_path, monkeypatch):
     assert "/nas/nas/" not in ref["container_path"]
 
 
+def test_repository_neo4j_endpoints_match_runtime_topology():
+    cfg = yaml.safe_load((REPO_ROOT / "config.yaml").read_text())
+
+    # x1 owns the primary Docker Neo4j and reaches its published Bolt port locally.
+    assert cfg["machine_paths"]["x1-370"]["neo4j_uri"] == "bolt://127.0.0.1:7688"
+    # Generic fleet clients use the Tailscale TCP proxy rather than localhost.
+    assert cfg["machine_paths"]["any"]["neo4j_uri"] == (
+        "bolt://x1-370.tailcb8954.ts.net:7687"
+    )
+    # Deathstar remains an explicitly separate local DR profile until audited.
+    assert cfg["machine_paths"]["deathstar"]["neo4j_uri"] == "bolt://127.0.0.1:7687"
+
+    for filename in (".env.example", "deploy/path_profiles.env.example"):
+        lines = {}
+        for raw in (REPO_ROOT / filename).read_text().splitlines():
+            if not raw or raw.lstrip().startswith("#") or "=" not in raw:
+                continue
+            key, value = raw.split("=", 1)
+            lines[key.strip()] = value.strip()
+        assert lines["NEO4J_URI"] == "bolt://x1-370.tailcb8954.ts.net:7687"
+
+
 def test_package_shim_exports_shared_resolvers():
     from auto_ingest import _config
 

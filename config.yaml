@@ -8,7 +8,7 @@ machine_paths:
     # Local processing/cache root. Shared durable data is addressed via shared_root.
     fileserver_root: /media/scott/SSD_4TB/fileserver
     shared_root: /nas
-    neo4j_uri: bolt://127.0.0.1:7687
+    neo4j_uri: bolt://127.0.0.1:7688
     neo4j_user: neo4j
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: x1-370
@@ -35,7 +35,7 @@ machine_paths:
     # Local processing/cache root. Shared durable data is addressed via shared_root.
     fileserver_root: /media/scott/SSD_4TB/fileserver
     shared_root: /nas
-    neo4j_uri: bolt://127.0.0.1:7687
+    neo4j_uri: bolt://x1-370.tailcb8954.ts.net:7687
     neo4j_user: neo4j
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: ""

@@ -196,20 +196,34 @@ not independently prove byte presence or custody.
 Before adding new storage labels, audit the live graph for existing file/media,
 source, manifest, path, device, and artifact concepts.
 
-## Current graph-audit blocker
+## Neo4j runtime contract and remaining graph-audit blocker
 
-A read-only live graph audit attempted during this slice found runtime/config
-drift on x1:
+The runtime endpoint topology was validated read-only on 2026-10-04:
 
-- committed auto-ingest config resolves x1 Neo4j to `127.0.0.1:7687`;
-- the healthy Docker Neo4j service is currently published on host port `7688`;
-- the configured auto-ingest credential does not authenticate to that live
-  endpoint.
+```text
+x1 local process      -> bolt://127.0.0.1:7688
+fleet clients         -> bolt://x1-370.tailcb8954.ts.net:7687
+Tailscale TCP proxy   -> localhost:7688
+```
 
-No secret was extracted or exposed to bypass this.
+TCP reachability was proven from x1 locally and from xwing, destroyer, and
+raspberrypi through the Tailscale DNS endpoint. Repository profiles now encode
+that split. Deathstar intentionally retains its separate `127.0.0.1:7687` DR
+profile until that graph is audited.
 
-Resolve the Neo4j endpoint/auth contract as a separate bounded change before
-using live schema results to design the storage projection.
+A stale `assistx-neo4j-bolt-forward.service` still listens on Docker bridge
+`172.17.0.1:7687` and forwards to dead `127.0.0.1:7687`. That belongs to the
+AssistX runtime contract and is not modified by this storage branch.
+
+The remaining blocker for a live read-only schema audit is authentication:
+
+- auto-ingest has no local `.env` supplying a current Neo4j credential;
+- the historical resolver fallback no longer matches the live primary graph;
+- the live credential is owned by the `/home/scott/docker` Neo4j stack.
+
+No credential was read, copied, or exposed to bypass that boundary. Credential
+source-of-truth cleanup should be a separate hardening slice because many legacy
+scripts still carry their own historical fallback behavior.
 
 ## Branch reconciliation notes
 
@@ -228,8 +242,10 @@ not provide.
 
 On the convergence branch:
 
-- focused namespace/config/custody suite: 202 passed;
+- focused namespace/config/custody suite: 213 passed before the provenance fix;
+- current config/shared-namespace regression suite: 45 passed after provenance and Neo4j endpoint fixes;
 - live x1 resolver check proved shared `/nas` + local SSD processing split;
+- xwing, destroyer, and raspberrypi all reached the Tailscale Bolt endpoint on port 7687;
 - full repository suite: 792 passed, 6 skipped, 4 failed;
 - the same four failures reproduce on current main in
   `auto_ingest/tests/test_ml_pure.py`, so this slice adds zero new failures.
