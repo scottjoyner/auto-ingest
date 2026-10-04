@@ -156,7 +156,22 @@ def list_directories(base_path):
 
 
 image_save_location = "/media/scott/NAS/324ab5fd-8cb6-4a27-bd56-e648a5fcdb7a/images/"
-# base_directory = get_fileserver_path("dashcam")  # Adjust this path to your base directory
-# list_directories(base_directory)
-base_directory = get_fileserver_path("dashcam")
-list_directories(base_directory)
+
+def main():
+    # base_directory = get_fileserver_path("dashcam")  # Adjust this path to your base directory
+    # list_directories(base_directory)
+    base_directory = get_fileserver_path("dashcam")
+    list_directories(base_directory)
+
+# Importing this module must not touch the filesystem. It used to call
+# list_directories() at module scope, so merely importing it -- which the tests in
+# auto_ingest/tests/ do -- walked the whole dashcam share. That is a no-op only
+# while get_fileserver_path("dashcam") happens to resolve to an unmounted share;
+# on the host that owns it, that is a recursive walk of the whole corpus at
+# collection time, followed by a YOLO load per clip. main() + the guard is the
+# convention already used by the sibling scripts
+# auto_ingest/dashcam/yolo_batch_worker.py and yolo_embeddings.py, and the only
+# callers are runall.sh and a shell alias (docs/deathstar-cli-storage-migration.md),
+# both of which execute this file as a script.
+if __name__ == "__main__":
+    main()
