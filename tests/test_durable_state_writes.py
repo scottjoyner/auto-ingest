@@ -496,3 +496,21 @@ def test_a_cursor_that_is_valid_json_but_the_wrong_shape_is_reported(tmp_path, m
 
     assert bridge.load_seen() == set()
     assert "WARNING" in capsys.readouterr().err
+
+
+def test_atomic_write_temps_are_gitignored():
+    """A crash mid-write leaves a temp behind; it must not appear in git status.
+
+    The helper writes `<name>.<pid>.<n>.tmp` then os.replace's it, so a stranded
+    temp is untracked and unignored unless .gitignore says otherwise - which
+    would reintroduce exactly the noise the ignore rules exist to prevent.
+    """
+    import subprocess
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    for pattern in ("scripts/.kg_health_state.json.*.tmp",
+                    "scripts/.arxiv_kg_cursor.json.*.tmp"):
+        proc = subprocess.run(["git", "check-ignore", "-q", pattern.replace("*", "1")],
+                              cwd=repo, capture_output=True, timeout=30)
+        assert proc.returncode == 0, f"{pattern} is not gitignored"

@@ -55,6 +55,13 @@ shorts_out_smoke/
 # every run. Tracked once by accident; nothing but the watchdog itself reads it.
 scripts/.kg_health_state.json
 
+# Stranded atomic-write temps (auto_ingest.util.atomic writes
+# "<name>.<pid>.<n>.tmp" then os.replace's it). Normally consumed within the
+# write; a crash mid-write leaves one behind, and it must not show up as an
+# untracked file in git status.
+scripts/.kg_health_state.json.*.tmp
+scripts/.arxiv_kg_cursor.json.*.tmp
+
 # embed-cache WAL/shm siblings (runtime state, not source)
 emb_cache.sqlite-shm
 emb_cache.sqlite-wal
