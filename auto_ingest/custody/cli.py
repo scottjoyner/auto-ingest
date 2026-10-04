@@ -61,6 +61,7 @@ from .lock import (
 )
 from .mounts import observations_to_evidence, observe_campaign
 from .policy import CustodyPolicy
+from .release_source import execute_release
 from .report import plan_json, plan_text, status_json, status_text
 from .store import (
     BundleError,
@@ -184,6 +185,22 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--algorithm", default=DEFAULT_ALGORITHM)
     ph.add_argument("--apply", action="store_true",
                     help="record the result as campaign evidence")
+
+    pr = common(sub.add_parser(
+        "release-source",
+        help="Propose or perform removal of source objects already in custody "
+             "(the only command that may delete from the card)"),
+        observed=False)
+    pr.add_argument("--source-root", default=None,
+                    help="source root to release from (default: the campaign's "
+                         "mount point)")
+    pr.add_argument("--destination", default=None,
+                    help="destination root holding the verified copies")
+    pr.add_argument("--execute", action="store_true",
+                    help="REQUIRED: without it nothing is unlinked and the exact "
+                         "set that would be removed is only shown")
+    pr.add_argument("--limit", type=int, default=None,
+                    help="release at most this many objects (executed pass only)")
 
     pe = common(sub.add_parser(
         "execute",
@@ -735,6 +752,80 @@ def cmd_hash(args) -> int:
     return EXIT_OK
 
 
+def cmd_release_source(args) -> int:
+    """Remove source objects that are already proven to be in custody.
+
+    The only command in the package that may delete anything from the card, and
+    the only irreversible one. Three gates, all of which must hold:
+
+    1. ``--execute`` - without it nothing is unlinked and the exact proposal is
+       only shown;
+    2. the release gate must be open - the real ``evaluate_release``, not a
+       re-derivation of it;
+    3. every key must be proven present *and verified* at the destination by the
+       destination ledger, with the bytes re-checked live before each unlink.
+
+    Refusals are whole-run, not partial: a torn ledger, an absent ledger, an
+    unresolvable key, or a shortfall against the inventory yields no proposal at
+    all, so the set is never silently shorter than the evidence.
+
+    Exit codes: 0 means releasable, with nothing deleted unless ``--execute`` was
+    given; 3 means refused, and ``blockers`` says why. ``mode`` and ``executed``
+    separate a proposal from a pass without overloading the exit status.
+    """
+    policy = _policy_from_file(getattr(args, "policy_file", None))
+    if policy is None:
+        policy = load_policy(load_custody_config())
+    campaign_obj = load_campaign(args.bundle)
+    status = load_status(args.bundle, policy)
+    source_root = args.source_root or campaign_obj.source.mount_point
+    destination = args.destination or campaign_obj.destination.host_path
+
+    if not destination:
+        _emit_release_source({"mode": "refused", "executed": False,
+                              "blockers": ["destination_unresolved"]}, args)
+        return EXIT_GATE_CLOSED
+
+    result = execute_release(
+        args.bundle,
+        source_root,
+        destination,
+        campaign=campaign_obj,
+        evidence=status.evidence,
+        execute=bool(args.execute),
+        policy=policy,
+        limit=args.limit,
+    )
+    payload = result.to_dict()
+    # Derived from `mode` rather than stored, so a proposal and a pass can never
+    # disagree about whether anything was removed.
+    payload["executed"] = result.mode == "executed"
+    payload["source_root"] = source_root
+    payload["destination_root"] = destination
+    _emit_release_source(payload, args)
+    if result.mode in ("refused", "executed") and not result.complete:
+        return EXIT_GATE_CLOSED
+    return EXIT_OK if result.mode != "refused" else EXIT_GATE_CLOSED
+
+
+def _emit_release_source(payload: dict, args) -> None:
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, indent=2, default=str))
+        return
+    lines = [
+        f"mode                   {payload.get('mode')}",
+        f"executed               {str(payload.get('executed', False)).lower()}",
+    ]
+    for key in ("considered", "proposed", "deletable", "already_absent",
+                "deleted", "failed", "deleted_bytes"):
+        if key in payload:
+            lines.append(f"{key:<23} {payload[key]}")
+    for blocker in payload.get("blockers") or []:
+        code = blocker.get("code") if isinstance(blocker, dict) else blocker
+        lines.append(f"  BLOCKER  {code}")
+    print("\n".join(lines))
+
+
 def cmd_execute(args) -> int:
     """Copy exactly the planned objects. Dry-run unless --execute is given.
 
@@ -1016,6 +1107,7 @@ _HANDLERS = {
     "preflight": cmd_preflight,
     "hash": cmd_hash,
     "execute": cmd_execute,
+    "release-source": cmd_release_source,
 }
 
 
