@@ -243,7 +243,7 @@ def test_build_artifact_ref_under_fileserver(live_config_in_tmp, monkeypatch):
     assert ref["storage_root"] == "nas"
     assert ref["relative_path"] == os.path.join("dashcam", "clip.mp4")
     assert ref["host_path"] == full
-    assert ref["container_path"] == "/nas/" + os.path.relpath(full, "/").lstrip("/")
+    assert ref["container_path"] is None
     assert ref["tailscale_host_hint"] == "host1"
     assert ref["sha256"] is None
     assert ref["retention_class"] == "audit"
@@ -273,7 +273,7 @@ def test_build_artifact_ref_under_hot(live_config_in_tmp, monkeypatch):
     full = os.path.join(str(hot), "audio", "x.wav")
     ref = cfg.build_artifact_ref(full)
     assert ref["relative_path"] == os.path.join("audio", "x.wav")
-    assert ref["container_path"] is not None
+    assert ref["container_path"] is None
 
 
 # --------------------------------------------------------------------------- #
