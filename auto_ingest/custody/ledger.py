@@ -2,9 +2,9 @@
 
 The campaign summary stays bounded; per-file detail lives in newline-delimited
 JSON ledgers next to it (``ledgers/hash.jsonl``, ``copy.jsonl``,
-``destination.jsonl``). This module is the only reader. It opens files ``r``
-and never writes, never truncates, never appends, and never creates a ledger -
-a missing ledger is reported as absent, not created.
+``destination.jsonl``, ``collisions.jsonl``). This module is the only reader. It
+opens files ``r`` and never writes, never truncates, never appends, and never
+creates a ledger - a missing ledger is reported as absent, not created.
 
 Two read-only operations live here:
 
@@ -30,6 +30,12 @@ LEDGER_DIRNAME = "ledgers"
 HASH_LEDGER = "hash.jsonl"
 COPY_LEDGER = "copy.jsonl"
 DESTINATION_LEDGER = "destination.jsonl"
+#: Per-name detail for objects the destination filesystem cannot tell apart or
+#: cannot represent: two source keys that case-fold onto one name, a source key
+#: that folds onto something already at the destination, and a name the
+#: destination's filesystem cannot store. Per-file rows live here; the campaign
+#: summary keeps only bounded counters and samples.
+COLLISION_LEDGER = "collisions.jsonl"
 
 #: Statuses that count as "proven present" on the respective side of the diff.
 SOURCE_VERIFIED_STATUSES = ("verified", "hashed")
@@ -208,11 +214,18 @@ def ledger_dir(bundle: str | Path) -> Path:
 def summarize_bundle_ledgers(
     bundle: str | Path, *, max_error_samples: int = MAX_SUMMARY_ENTRIES
 ) -> Dict[str, LedgerSummary]:
-    """Summarise every standard ledger in a campaign bundle (absent is fine)."""
+    """Summarise every standard ledger in a campaign bundle (absent is fine).
+
+    ``collisions.jsonl`` is included so a campaign carrying name problems reports
+    them as a bounded ``by_status`` count instead of leaving the operator to diff
+    the card by hand. Its rows carry their own kinds as statuses, so they can
+    never be mistaken for verified custody: only ``verified`` /
+    ``verified_at_destination`` count as ``files``.
+    """
     root = ledger_dir(bundle)
     return {
         name: summarize_ledger(root / name, max_error_samples=max_error_samples)
-        for name in (HASH_LEDGER, COPY_LEDGER, DESTINATION_LEDGER)
+        for name in (HASH_LEDGER, COPY_LEDGER, DESTINATION_LEDGER, COLLISION_LEDGER)
     }
 
 
@@ -582,6 +595,7 @@ def reconcile_bundle(
 
 
 __all__ = [
+    "COLLISION_LEDGER",
     "COPY_LEDGER",
     "DESTINATION_LEDGER",
     "DESTINATION_VERIFIED_STATUSES",

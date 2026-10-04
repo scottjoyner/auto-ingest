@@ -19,6 +19,10 @@ Two properties matter operationally:
   action's own content, and ``plan_fingerprint`` digests the whole action set.
   Re-planning unchanged evidence yields byte-identical output and identical ids,
   so nothing downstream can generate duplicate work.
+* **A name the destination cannot keep is never a safe next step.** The card is
+  vfat and the destination is SMB2/exFAT: both case-insensitive, both length
+  limited. So the plan refuses to call itself safe while any recorded name problem
+  is unresolved - see :func:`name_problem_blockers`.
 """
 
 from __future__ import annotations
@@ -30,6 +34,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .campaign import Campaign
 from .evidence import CampaignEvidence
+from .hashing import (
+    CASE_COLLISION_PREFIX,
+    DESTINATION_COLLISION_PREFIX,
+    UNREPRESENTABLE_NAME_PREFIX,
+)
 from .machine import Derivation, derive_state
 from .policy import CustodyPolicy
 from .release import Blocker, evaluate_release
@@ -52,6 +61,33 @@ _OPERATION_TARGET = {
 }
 
 _MUTATES_DESTINATION = frozenset({"copy_objects"})
+
+#: ``summary prefix -> (blocker code, remedy)``. One code per kind of name
+#: problem, because they send an operator to different places: two spellings of
+#: one card object is a decision about the card, a name the destination already
+#: holds is a decision about a file that is already there, and an unrepresentable
+#: name is a decision about a filesystem.
+_NAME_PROBLEM_CODES: Tuple[Tuple[str, str, str], ...] = (
+    (
+        DESTINATION_COLLISION_PREFIX,
+        "destination_case_collision",
+        "the destination already holds this name under a different spelling; "
+        "reconcile the two spellings before copying - the atomic replace would "
+        "either clobber the existing object or fail against the server",
+    ),
+    (
+        CASE_COLLISION_PREFIX,
+        "case_collision",
+        "decide which spelling the campaign keeps and resolve the other on the "
+        "card; nothing was renamed, deduplicated or dropped",
+    ),
+    (
+        UNREPRESENTABLE_NAME_PREFIX,
+        "unrepresentable_name",
+        "the destination filesystem cannot store this name; rename it on the "
+        "card or narrow the campaign scope before copying it",
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -163,6 +199,29 @@ def _bytes_per_file(evidence: CampaignEvidence) -> float:
     if files <= 0:
         return 0.0
     return evidence.inventory.discovered_bytes / files
+
+
+def name_problem_blockers(samples: Tuple[str, ...], limit: int) -> Tuple[Blocker, ...]:
+    """One blocker per recorded name problem, from the bounded error summaries.
+
+    ``errors.summaries`` is the only channel a collision can reach the plan
+    through, and it is a bounded one by construction - which is why the result is
+    capped again here: a card with 10,000 colliding names must not produce 10,000
+    blockers in a report. The full list is in ``ledgers/collisions.jsonl``.
+
+    Nothing here resolves anything. The planner has no filesystem access and no
+    business renaming a key; it reports the problem and stops, and the operator
+    decides which spelling the campaign keeps.
+    """
+    blockers: List[Blocker] = []
+    for sample in samples:
+        for prefix, code, remedy in _NAME_PROBLEM_CODES:
+            if sample.startswith(prefix):
+                blockers.append(Blocker(code, sample[len(prefix):].strip(), remedy))
+                break
+        if len(blockers) >= limit:
+            break
+    return tuple(blockers)
 
 
 def plan_resume(
@@ -322,6 +381,20 @@ def plan_resume(
         blockers = decision.blockers
         reasons.append("destination_unresolved")
 
+    # The card is vfat and the destination is SMB2/exFAT: both case-insensitive.
+    # So an unresolved name problem is never safe to resume - the next action
+    # would copy one spelling of a name the destination already holds under
+    # another, and `os.replace` resolves that by clobbering or by failing,
+    # depending on the server. Reporting it as a blocker while still calling the
+    # resume safe is exactly the shape of defect this package exists to prevent.
+    name_blockers = name_problem_blockers(
+        evidence.errors.summaries, policy.max_summary_entries
+    )
+    if name_blockers:
+        safe = False
+        reasons.append("unresolved_name_problems")
+        blockers = tuple(blockers) + name_blockers
+
     fingerprint = hashlib.sha256(
         json.dumps(
             [a.to_dict() for a in actions], sort_keys=True, separators=(",", ":")
@@ -347,5 +420,6 @@ __all__ = [
     "ResumePlan",
     "SOURCE_DELETION_ALLOWED",
     "SOURCE_MUTATION_ALLOWED",
+    "name_problem_blockers",
     "plan_resume",
 ]
