@@ -47,6 +47,23 @@ machine_paths:
     hot_ssd_root: /mnt/8TB_2025
     nas_mirror_root: /media/scott/NAS4/fileserver
 
+# SD-card ingest custody: logical destination + release-gate policy.
+# The core logic never embeds a host mount. Set CUSTODY_DESTINATION_ROOT (or the
+# value below) to whatever this host calls the canonical custody destination.
+custody:
+  destination_root: ${CUSTODY_DESTINATION_ROOT}
+  destination_name: primary
+  destination_relative_path: fileserver/dashcam
+  policy:
+    required_scope: all_inventory
+    allow_hash_exemptions: true
+    declared_hash_exemptions: []
+    require_operator_witness: false
+    strict_destination_scope: false
+    require_destination_identity: true
+    require_read_only_source: true
+    require_mounted_destination: true
+
 # Knowledge Map System configuration
 knowledge_map:
   # Active working vault used by Hermes and knowledge_map.

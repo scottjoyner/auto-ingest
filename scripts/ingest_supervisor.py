@@ -32,6 +32,47 @@ if os.path.exists(CREDS):
             k,v=ln[7:].split('=',1); os.environ.setdefault(k,v.strip('"'))
 os.environ.setdefault('NEO4J_PASSWORD',os.environ.get('NEO4J_PASS',''))
 
+MIN_VERIFIED_NODES=1   # a day that yields fewer clips than this is not ingested
+
+def classify(rc,nodes):
+    """Decide a day's ledger status from its exit code and verified node count.
+
+    Returns (status, reason_or_None). A zero exit alone is not proof of
+    ingestion: the command can succeed while writing nothing, and `pending_days`
+    retires status=='ok' forever. Requiring verified nodes turns that silent loss
+    into a retryable failure. `nodes < 0` means verification itself blew up.
+    """
+    if rc==0 and nodes>=MIN_VERIFIED_NODES: return 'ok',None
+    if rc: return 'fail','nonzero_rc'
+    if nodes<0: return 'fail','verify_failed'
+    return 'fail','no_nodes_verified'
+
+def should_alert(st):
+    """Whether to alert about a failing day - once per failure streak.
+
+    Retries deliberately never stop: a day that fails because Neo4j was briefly
+    down should still land days later. But `pending_days` re-queues it every run,
+    so alerting on every attempt meant a permanently broken day re-alerted every
+    six hours for ever and trained us to ignore the alert file. Alert on the
+    transition into exhausted, then stay quiet until it succeeds.
+    """
+    if st.get('attempts',0)<MAX_ATTEMPTS: return False
+    if st.get('alerted'): return False
+    return True
+
+def pending_days(days,ledger,log=None):
+    """Group retryable day-dirs by month. status=='ok' days are retired for good."""
+    pending={}
+    for day,meta in days.items():
+        st=ledger.get(day,{})
+        if st.get('status')=='ok': continue
+        if not meta['age_ok']:
+            if log: log(f"defer {day} (modified recently)")
+            continue
+        ym=day.replace('/','_')[:7]
+        pending.setdefault(ym,[]).append(day)
+    return pending
+
 def load_ledger():
     if os.path.exists(LEDGER): return json.load(open(LEDGER))
     return {}
@@ -84,13 +125,7 @@ def main():
     if not days: log("nothing to do"); return 0
     if not image_fresh(): return 1
 
-    pending={}
-    for day,meta in days.items():
-        st=ledger.get(day,{})
-        if st.get('status')=='ok': continue
-        if not meta['age_ok']: log(f"defer {day} (modified recently)"); continue
-        ym=day.replace('/','_')[:7]
-        pending.setdefault(ym,[]).append(day)
+    pending=pending_days(days,ledger,log)
     if not pending: log("no pending days"); save_ledger(ledger); return 0
 
     env=dict(os.environ)
@@ -137,12 +172,20 @@ def main():
             except Exception as e:
                 nodes=-1; log(f"verify error {dstr}: {e}")
             st['nodes']=nodes
-            if rc==0:
-                st['status']='ok'; log(f"OK {dstr}: nodes={nodes}")
+            status,reason=classify(rc,nodes)
+            st['status']=status
+            if status=='ok':
+                st.pop('reason',None); st.pop('alerted',None)
+                log(f"OK {dstr}: nodes={nodes}")
             else:
-                st['status']='fail'
-                if st['attempts']>=MAX_ATTEMPTS:
-                    alert(f"day {dstr} failed {st['attempts']}x (rc={rc}, nodes={nodes})")
+                st['reason']=reason
+                log(f"FAIL {dstr}: rc={rc} nodes={nodes} reason={reason}")
+                if should_alert(st):
+                    st['alerted']=True
+                    alert(f"day {dstr} failed {st['attempts']}x (rc={rc}, "
+                          f"nodes={nodes}, reason={reason}); still retrying")
+                elif st.get('alerted'):
+                    log(f"{dstr}: still failing, already alerted - continuing to retry")
             save_ledger(ledger)
     fails=[d for d,s in ledger.items() if s.get('status')=='fail']
     log(f"done. fail-streak days: {len(fails)}")

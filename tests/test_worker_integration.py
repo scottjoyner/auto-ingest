@@ -67,6 +67,9 @@ class TestSpeakerLinking:
     """bin/auto-ingest link-speakers delegates to the package module."""
 
     def test_link_global_speakers_module_exists(self):
+        # link_global_speakers imports torch at module scope, which CI
+        # deliberately does not install (no ML stack). Skip rather than fail.
+        pytest.importorskip("torch")
         mod = importlib.import_module("auto_ingest.diarize.link_global_speakers")
         assert hasattr(mod, "main") or hasattr(mod, "run_linking")
 
@@ -161,10 +164,15 @@ class TestCliSubcommands:
 class TestShim:
     """ingest_transcriptsv5_3.py delegates to the package module."""
 
+    # auto_ingest.ingest.transcripts imports torch at module scope, which CI
+    # deliberately does not install (no ML stack). Skip rather than fail, so the
+    # module's presence is still checked wherever torch IS available.
     def test_shim_importable(self):
+        pytest.importorskip("torch")
         import ingest_transcriptsv5_3  # noqa: F401
 
     def test_transcripts_module_main(self):
+        pytest.importorskip("torch")
         from auto_ingest.ingest.transcripts import main
         assert callable(main)
 

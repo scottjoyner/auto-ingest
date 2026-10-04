@@ -24,6 +24,7 @@ from dashcam_frame_vision import (
     mark_failed, parse_key_datetime, view_of,
 )
 from neo4j import GraphDatabase
+from auto_ingest_config import get_neo4j_password
 
 SALVAGE_DIR = "/mnt/8TB_2025/fileserver/dashcam/_salvage"
 
@@ -62,7 +63,7 @@ def main():
     ap.add_argument("--base", default="/mnt/8TB_2025/fileserver/dashcam")
     ap.add_argument("--neo4j-uri", default="bolt://localhost:7687")
     ap.add_argument("--neo4j-user", default="neo4j")
-    ap.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026"))
+    ap.add_argument("--neo4j-password", default=get_neo4j_password())
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--all-failed", action="store_true", help="also retry timeout_or_hang clips")
     ap.add_argument("--vision-url", default="http://100.85.64.117:1234/v1/chat/completions")

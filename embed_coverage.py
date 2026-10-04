@@ -16,6 +16,7 @@ import sys
 import argparse
 import logging
 from neo4j import GraphDatabase
+from auto_ingest_config import get_neo4j_password
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -30,7 +31,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--uri", default=os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687"))
     ap.add_argument("--user", default=os.getenv("NEO4J_USER", "neo4j"))
-    ap.add_argument("--password", default=os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026"))
+    ap.add_argument("--password", default=get_neo4j_password())
     ap.add_argument("--prop", default="emb_e5_large")
     ap.add_argument("--labels", nargs="*", default=DEFAULT_LABELS)
     args = ap.parse_args()

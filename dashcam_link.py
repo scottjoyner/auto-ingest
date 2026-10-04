@@ -20,13 +20,14 @@ if ROOT not in sys.path:
 
 from dashcam_frame_vision import parse_key_datetime
 from neo4j import GraphDatabase
+from auto_ingest_config import get_neo4j_password
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--neo4j-uri", default="bolt://localhost:7687")
     ap.add_argument("--neo4j-user", default="neo4j")
-    ap.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026"))
+    ap.add_argument("--neo4j-password", default=get_neo4j_password())
     ap.add_argument("--only-unlinked", action="store_true", help="skip clips already ON_DAY")
     args = ap.parse_args()
 

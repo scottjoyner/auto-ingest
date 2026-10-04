@@ -27,13 +27,12 @@ Model lifecycle
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
 import torch
-from transformers import AutoTokenizer, AutoModel, AutoConfig
+from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 from .backend import torch_device
 
@@ -169,7 +168,6 @@ class OrtEmbedModel(EmbedModel):
 
     def _export_onnx(self, base: Path, quant: Optional[Path]):
         """Export the HF model to ONNX with dynamic batch/sequence axes."""
-        import onnxruntime as ort
         import inspect
 
         model = AutoModel.from_pretrained(self.name).eval()
@@ -197,7 +195,7 @@ class OrtEmbedModel(EmbedModel):
                 dynamo=False,
             )
         if quant is not None:
-            from onnxruntime.quantization import quantize_dynamic, QuantType
+            from onnxruntime.quantization import QuantType, quantize_dynamic
 
             quantize_dynamic(str(base), str(quant), weight_type=QuantType.QInt8)
 

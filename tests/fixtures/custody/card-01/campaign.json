@@ -1,0 +1,31 @@
+{
+  "campaign_id": "sdcard-9f1c4a2b7d3e5a60-20260412",
+  "card_id": "CARD-01",
+  "created_at": "2026-04-12T09:15:00Z",
+  "last_observed_at": "2026-10-02T18:20:00Z",
+  "source": {
+    "mount_point": "/media/scott/UNTITLED",
+    "read_only": true,
+    "device": "/dev/sdb1",
+    "filesystem_uuid": "7A3E-2C19",
+    "label": "UNTITLED",
+    "serial": "0x8f2a41c7"
+  },
+  "destination": {
+    "logical": {
+      "name": "primary",
+      "relative_path": "fileserver/dashcam"
+    },
+    "host_path": null,
+    "resolved_from": "unresolved",
+    "mounted": null,
+    "identity": {
+      "filesystem_uuid": null,
+      "device": null,
+      "label": null,
+      "filesystem_type": null,
+      "size_bytes": null,
+      "observed_at": null
+    }
+  }
+}

@@ -22,6 +22,7 @@ if ROOT not in sys.path:
 
 from auto_ingest.embed import EmbedModel
 from neo4j import GraphDatabase
+from auto_ingest_config import get_neo4j_password
 
 INDEX = "DashcamFrame_emb_e5_large_index"
 EMB_MODEL = "intfloat/multilingual-e5-large"
@@ -35,7 +36,7 @@ def main():
     ap.add_argument("--json", action="store_true", help="emit JSON")
     ap.add_argument("--neo4j-uri", default="bolt://localhost:7687")
     ap.add_argument("--neo4j-user", default="neo4j")
-    ap.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026"))
+    ap.add_argument("--neo4j-password", default=get_neo4j_password())
     ap.add_argument("--embed-model", default=EMB_MODEL)
     args = ap.parse_args()
 

@@ -36,7 +36,7 @@ try:
     _pw = get_neo4j_password()
     _cfg = get_neo4j_config()
 except Exception:
-    _pw = os.environ.get("NEO4J_PASSWORD") or "knowledge_graph_2026"
+    _pw = os.environ.get("NEO4J_PASSWORD") or os.environ.get("NEO4J_PASSWORD_DEFAULT", "knowledge_graph_2026")
     _cfg = {"uri": "bolt://127.0.0.1:7687", "user": "neo4j", "database": "neo4j"}
 
 ENV = {

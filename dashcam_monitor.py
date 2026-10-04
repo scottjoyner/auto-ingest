@@ -10,9 +10,10 @@ Run via the dashcam-monitor systemd service (auto-start on boot).
 import os
 import time
 from neo4j import GraphDatabase
+from auto_ingest_config import get_neo4j_password
 
 NEO4J_URI = "bolt://localhost:7687"
-NEO4J_PWD = os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026")
+NEO4J_PWD = get_neo4j_password()
 BASES = ["/mnt/8TB_2025/fileserver/dashcam", "/mnt/8TBHDD/fileserver/dashcam"]
 HEALTH = "dashcam_vision"
 
