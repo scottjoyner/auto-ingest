@@ -5,13 +5,15 @@
 machine_paths:
   # x1-370 (home Tailscale node — Neo4j server lives here)
   x1-370:
+    # Local processing/cache root. Shared durable data is addressed via shared_root.
     fileserver_root: /media/scott/SSD_4TB/fileserver
+    shared_root: /nas
     neo4j_uri: bolt://127.0.0.1:7687
     neo4j_user: neo4j
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: x1-370
     hot_ssd_root: /media/scott/SSD_4TB/audio
-    nas_mirror_root: /media/scott/NAS5
+    nas_mirror_root: /nas
     # Staging flag (added 2026-08-14): marks x1-370 as the dedicated
     # torch/ROCm GPU node for pipeline phases that the RX 480 on deathstar
     # cannot run (pyannote diarization, YOLO embeddings, dense retrieval
@@ -27,30 +29,32 @@ machine_paths:
       rocm_version_min: "6.3"
       note: "RX 9700 XT (Navi 35, GFX1100); requires rocBLAS + torch+rocm build"
 
-  # Any device on the LAN — uses shared SSD_4TB and NAS5 mounts
-  # Mount points:
-  #   SSD_4TB: /media/scott/SSD_4TB (NFS export from x1-370)
-  #   NAS5:    /media/scott/NAS5 (CIFS //100.64.43.123/fileserver; do not use legacy NAS3)
+  # Any fleet node: local hot/cache paths may vary, but shared durable data
+  # must be addressed through the fleet namespace at /nas.
   any:
+    # Local processing/cache root. Shared durable data is addressed via shared_root.
     fileserver_root: /media/scott/SSD_4TB/fileserver
+    shared_root: /nas
     neo4j_uri: bolt://127.0.0.1:7687
     neo4j_user: neo4j
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: ""
     hot_ssd_root: /media/scott/SSD_4TB/audio
-    nas_mirror_root: /media/scott/NAS5
+    nas_mirror_root: /nas
 
-  # deathstar-XPS-8920 — local 8TB HDD first-cache/processing layer plus NAS5 cold storage
-  # NAS5 is durable/cold; process from /mnt/8TB_2025 when possible, then mirror/archive.
+  # deathstar-XPS-8920 — local 8TB HDD first-cache/processing layer plus /nas shared storage.
+  # Process from /mnt/8TB_2025 when possible, then promote/mirror to the shared namespace.
   # DR lane: hosts the merged canonical graph locally (bolt://127.0.0.1:7687).
   deathstar:
+    # Local first-cache/processing root. Shared durable data is addressed via shared_root.
     fileserver_root: /mnt/8TB_2025/fileserver
+    shared_root: /nas
     neo4j_uri: bolt://127.0.0.1:7687
     neo4j_user: neo4j
     neo4j_password: ${NEO4J_PASSWORD}
     hostname_pattern: deathstar
     hot_ssd_root: /mnt/8TB_2025/fileserver/audio
-    nas_mirror_root: /media/scott/NAS5
+    nas_mirror_root: /nas
 
 # SD-card ingest custody (see auto_ingest/custody/, docs/sd-card-campaign-custody.md)
 #
@@ -64,7 +68,7 @@ custody:
   # Resolved at runtime; override per-run with CUSTODY_DESTINATION_ROOT.
   destination_root: ${CUSTODY_DESTINATION_ROOT}
   destination_name: primary
-  destination_relative_path: fileserver/dashcam
+  destination_relative_path: archive/dashcam
   policy:
     # 'all_inventory'  -> every inventoried source object must be verified
     # 'hashed_set'     -> only objects covered by hash evidence (weaker, opt-in)
@@ -87,15 +91,15 @@ knowledge_map:
   local_vault_path: /home/scott/nas-knowledge
 
   # Durable NAS mirror for the vault and derived artifacts.
-  mirror_vault_path: /media/scott/NAS5/shared-knowledge
+  mirror_vault_path: /nas/shared-knowledge
 
   # Canonical vault model (G2 consolidation, DEEP_DIVE §3.7).
   #
-  # The mirror (NAS5/shared-knowledge) is THE single canonical writer. Every
+  # The mirror (/nas/shared-knowledge) is THE single canonical writer. Every
   # host keeps a local clone and PULLS from the mirror; nobody SSH-pushes
   # their local vault to peers. Peers are discovered by Tailscale hostname
   # only — never by raw IP. See docs/VAULT_SYNC.md.
-  canonical_vault_path: /media/scott/NAS5/shared-knowledge
+  canonical_vault_path: /nas/shared-knowledge
 
   # Tailscale hostnames of every peer that holds a local vault clone.
   # Append/remove a hostname here to grow/shrink the fleet. No IPs allowed.

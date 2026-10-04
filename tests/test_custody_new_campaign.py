@@ -126,7 +126,7 @@ def test_unresolved_destination_is_recorded_not_guessed(tmp_path, capsys, monkey
     campaign = load_campaign(tmp_path / "b")
     assert campaign.destination.resolved is False
     assert campaign.destination.host_path is None
-    assert campaign.destination.logical.canonical == "primary:fileserver/dashcam"
+    assert campaign.destination.logical.canonical == "primary:archive/dashcam"
 
 
 def test_destination_is_resolved_from_env_when_configured(tmp_path, capsys, monkeypatch):
