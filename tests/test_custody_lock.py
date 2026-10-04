@@ -6,14 +6,23 @@ The investigation found `sync-service` and `ingest.crontab:5` running
 writes to, with no lock and no campaign awareness. These tests pin the primitive
 that resolves it, and pin that preflight reports the hazard rather than papering
 over it.
+
+The guard tests at the end are the load-bearing ones. `writer_consults_lock()`
+proves the probe *exists*; it cannot prove the writer can *see* the marker, so a
+`/tmp` default -- per-container, invisible across `sync-service` and
+`ingest-cron` -- passed every one of those checks while coordinating nothing.
+The property is asserted instead of grepped: real subprocesses, separate TMPDIRs,
+the real script.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -22,11 +31,19 @@ from custody_helpers import campaign, destination, evidence, write_bundle
 from auto_ingest.custody.cli import EXIT_GATE_CLOSED, main
 from auto_ingest.custody.lock import (
     ACTIVE_MARKER,
+    DEFAULT_LOCK_ROOT,
+    DEFAULT_MARKER_TTL_SEC,
     LockUnavailable,
+    active_marker,
+    active_marker_ttl,
     campaign_lock,
     competing_activity,
     is_campaign_active,
     is_locked,
+    lock_root,
+    marker_is_stale,
+    set_active,
+    touch_active,
     uncoordinated_writers,
     writer_consults_lock,
 )
@@ -361,8 +378,218 @@ def test_the_lock_module_writes_only_its_own_directory(isolated_lock_root):
     from auto_ingest.custody import lock as lock_mod
 
     tree = ast.parse(inspect.getsource(lock_mod))
-    assert lock_mod.DEFAULT_LOCK_ROOT == "/tmp/auto_ingest_custody"
+    assert lock_mod.DEFAULT_LOCK_ROOT == "/nas/custody-locks"
     # only os.mkdir, and only under the lock root
     mkdirs = [n for n in ast.walk(tree)
               if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "mkdir"]
     assert mkdirs, "expected the lock root to be created"
+
+
+# ---------------------------------------------------------------------------
+# the lock root is shared, not per-container
+# ---------------------------------------------------------------------------
+#: The `CUSTODY_LOCK_ROOT="${CUSTODY_LOCK_ROOT:-...}"` default, read out of the
+#: script rather than restated here, so the two defaults cannot drift.
+_SHELL_LOCK_ROOT = re.compile(
+    r'^CUSTODY_LOCK_ROOT="\$\{CUSTODY_LOCK_ROOT:-(?P<default>[^}]+)\}"', re.MULTILINE)
+
+_SHELL_MARKER_TTL = re.compile(
+    r'^CUSTODY_MARKER_TTL_SEC="\$\{CUSTODY_MARKER_TTL_SEC:-(?P<default>[^}]+)\}"',
+    re.MULTILINE)
+
+
+def _shell_default(pattern) -> str:
+    match = pattern.search(LIVE_SYNC.read_text(encoding="utf-8"))
+    assert match, f"sync_from_legacy_drop.sh must pin a default for {pattern.pattern}"
+    return match.group("default")
+
+
+def test_the_default_lock_root_is_not_under_tmp(monkeypatch):
+    """/tmp is per-container, so a /tmp marker coordinates nothing.
+
+    `sync-service` and `ingest-cron` each get a private /tmp. A marker written by
+    `custody execute` in one is invisible to the other, forever, while
+    `writer_consults_lock` keeps reporting the probe as working.
+    """
+    monkeypatch.delenv("CUSTODY_LOCK_ROOT", raising=False)
+    assert lock_root() == Path("/nas/custody-locks")
+    assert str(lock_root()).startswith("/nas/")
+    assert not str(lock_root()).startswith("/tmp")
+    # the env override still wins, which is what keeps tests hermetic
+    monkeypatch.setenv("CUSTODY_LOCK_ROOT", "/somewhere/else")
+    assert lock_root() == Path("/somewhere/else")
+
+
+def test_the_writer_and_the_library_resolve_the_same_default():
+    """One string, two implementations. A mismatch makes the handshake inert."""
+    shell_default = _shell_default(_SHELL_LOCK_ROOT)
+    assert shell_default == DEFAULT_LOCK_ROOT == "/nas/custody-locks"
+    # /nas is the mount ingest-service, ingest-worker, sync-service and
+    # ingest-cron all share (docker-compose.yml; DROP_ROOT=/nas/drop).
+    assert shell_default.startswith("/nas/")
+    # and one TTL, so "stale" means the same thing on both sides of the handshake
+    assert int(_shell_default(_SHELL_MARKER_TTL)) == DEFAULT_MARKER_TTL_SEC
+    assert DEFAULT_MARKER_TTL_SEC == 6 * 60 * 60
+
+
+def _run_python(env, body):
+    """Run `body` in a fresh interpreter and return its stdout."""
+    proc = subprocess.run(
+        [sys.executable, "-c", "\n".join([
+            "import sys, tempfile",
+            f"sys.path.insert(0, {str(REPO_ROOT)!r})",
+            "print('tmpdir=' + tempfile.gettempdir(), flush=True)",
+            body,
+        ])],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def test_two_processes_in_separate_tmpdir_namespaces_see_one_marker(tmp_path):
+    """The cross-namespace property, asserted rather than grepped.
+
+    One interpreter drops the marker in the shared root; a second, with a
+    different TMPDIR, finds it there and does *not* find it in the root its own
+    /tmp would have supplied. That difference is the bug.
+    """
+    shared = tmp_path / "shared-locks"
+    shared.mkdir()
+    ns_a, ns_b = tmp_path / "ns-a", tmp_path / "ns-b"
+    ns_a.mkdir()
+    ns_b.mkdir()
+    # Where a /tmp default would have put the marker for each container.
+    private_b = ns_b / "private-locks"
+
+    env_a = {**os.environ, "TMPDIR": str(ns_a), "CUSTODY_LOCK_ROOT": str(shared),
+             "PYTHONDONTWRITEBYTECODE": "1"}
+    env_b = {**os.environ, "TMPDIR": str(ns_b), "CUSTODY_LOCK_ROOT": str(shared),
+             "PYTHONDONTWRITEBYTECODE": "1"}
+
+    created = _run_python(env_a, "\n".join([
+        "from auto_ingest.custody.lock import set_active",
+        "print('created=' + str(set_active()))",
+    ]))
+    assert f"tmpdir={ns_a}" in created
+    assert created.strip().endswith(str(shared / ACTIVE_MARKER))
+
+    seen = _run_python(env_b, "\n".join([
+        "from auto_ingest.custody.lock import is_campaign_active, marker_is_stale",
+        f"print('shared_active=' + str(is_campaign_active({str(shared)!r})))",
+        f"print('private_active=' + str(is_campaign_active({str(private_b)!r})))",
+        "print('stale=' + str(marker_is_stale("
+        f"{str(shared / ACTIVE_MARKER)!r}, 3600)))",
+    ]))
+    assert f"tmpdir={ns_b}" in seen, "the two namespaces must genuinely differ"
+    assert f"tmpdir={ns_a}" not in seen
+    assert "shared_active=True" in seen
+    assert "stale=False" in seen
+    assert "private_active=False" in seen, (
+        "a per-container root is exactly what would make the handshake inert")
+
+
+def test_the_live_sync_script_stands_down_for_a_marker_from_another_namespace(tmp_path):
+    """The writer sees a marker it did not create, from another TMPDIR."""
+    shared = tmp_path / "shared-locks"
+    drop = tmp_path / "drop"
+    drop.mkdir()
+    set_active(shared)
+    ns = tmp_path / "writer-tmp"
+    ns.mkdir()
+    proc = subprocess.run(["bash", str(LIVE_SYNC)], capture_output=True, text=True,
+                          env={**os.environ, "TMPDIR": str(ns),
+                               "CUSTODY_LOCK_ROOT": str(shared),
+                               "LEGACY_DROP_ROOT": str(drop),
+                               "LOCAL_FILESERVER_ROOT": str(tmp_path / "canonical"),
+                               "REMOTE_PULL": "0"},
+                          timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert "standing down" in proc.stdout
+    assert not (tmp_path / "canonical").exists(), "it synced despite standing down"
+
+
+def test_the_sync_script_proceeds_past_a_stale_marker(tmp_path):
+    """A SIGKILL skips the `finally` that clears the marker.
+
+    Without a TTL the survivor halts ingest forever and silently; past the TTL
+    the writer proceeds and says why.
+    """
+    shared = tmp_path / "shared-locks"
+    set_active(shared)
+    marker = active_marker(shared)
+    ancient = time.time() - (DEFAULT_MARKER_TTL_SEC + 60)
+    os.utime(marker, (ancient, ancient))
+    drop = tmp_path / "drop"
+    drop.mkdir()
+    ns = tmp_path / "writer-tmp"
+    ns.mkdir()
+    proc = subprocess.run(["bash", str(LIVE_SYNC)], capture_output=True, text=True,
+                          env={**os.environ, "TMPDIR": str(ns),
+                               "CUSTODY_LOCK_ROOT": str(shared),
+                               "CUSTODY_MARKER_TTL_SEC": str(DEFAULT_MARKER_TTL_SEC),
+                               "LEGACY_DROP_ROOT": str(drop),
+                               "LOCAL_FILESERVER_ROOT": str(tmp_path / "canonical"),
+                               "REMOTE_PULL": "0"},
+                          timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert "standing down" not in proc.stdout
+    assert "past the" in proc.stdout
+    assert (tmp_path / "canonical").is_dir(), "a stale marker must not halt ingest"
+    assert "Legacy drop sync complete." in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# the marker is a claim with a TTL, not a permanent stand-down
+# ---------------------------------------------------------------------------
+def test_marker_is_stale_reads_the_mtime(isolated_lock_root):
+    marker = set_active()
+    now = time.time()
+    assert marker_is_stale(marker, 3600, now=now) is False
+    assert marker_is_stale(marker, 0, now=now + 1) is True
+
+
+def test_a_missing_marker_is_stale(isolated_lock_root):
+    """A writer must never stand down for something it cannot evaluate."""
+    assert marker_is_stale(active_marker(), 3600) is True
+
+
+def test_an_unreadable_marker_is_stale(isolated_lock_root, tmp_path):
+    assert marker_is_stale(tmp_path / "nope", 3600) is True
+
+
+def test_touch_active_keeps_a_long_campaign_fresh(isolated_lock_root):
+    """The heartbeat a fixed TTL needs and ingest_claim does not provide."""
+    marker = set_active()
+    stale_at = time.time() - 900
+    os.utime(marker, (stale_at, stale_at))
+    assert marker_is_stale(marker, 600) is True
+    assert touch_active() is True
+    assert marker_is_stale(marker, 600) is False
+
+
+def test_touch_active_never_creates_a_marker(isolated_lock_root):
+    """Taking the lock is the CLI's job; a refresh must not start a campaign."""
+    assert touch_active() is False
+    assert not active_marker().exists()
+
+
+def test_the_marker_ttl_is_configurable(monkeypatch):
+    monkeypatch.delenv("CUSTODY_MARKER_TTL_SEC", raising=False)
+    assert active_marker_ttl() == DEFAULT_MARKER_TTL_SEC
+    monkeypatch.setenv("CUSTODY_MARKER_TTL_SEC", "90")
+    assert active_marker_ttl() == 90
+    # a typo must not reap live campaigns
+    monkeypatch.setenv("CUSTODY_MARKER_TTL_SEC", "not-a-number")
+    assert active_marker_ttl() == DEFAULT_MARKER_TTL_SEC
+    monkeypatch.setenv("CUSTODY_MARKER_TTL_SEC", "0")
+    assert active_marker_ttl() == DEFAULT_MARKER_TTL_SEC
+
+
+def test_reverting_the_staleness_branch_fails_closed(tmp_path):
+    """The stand-down half is not the invariant; the expiry half is too."""
+    without_ttl = LIVE_SYNC.read_text(encoding="utf-8").replace(
+        "CUSTODY_MARKER_TTL_SEC", "DISABLED")
+    assert writer_consults_lock(LIVE_SYNC) is True
+    probe_only = tmp_path / "sync.sh"
+    probe_only.write_text(without_ttl, encoding="utf-8")
+    assert writer_consults_lock(probe_only) is False

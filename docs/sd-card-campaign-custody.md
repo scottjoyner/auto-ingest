@@ -389,15 +389,21 @@ state, it is always reported.
 
 ### Phase C.5: the legacy sync stands down
 
-`sync_from_legacy_drop.sh` is now patched. Its first act is an existence test on
-the campaign marker, before any rsync:
+`sync_from_legacy_drop.sh` is now patched. Its first act stats the campaign
+marker, before any rsync:
 
 ```bash
-CUSTODY_LOCK_ROOT="${CUSTODY_LOCK_ROOT:-/tmp/auto_ingest_custody}"
+CUSTODY_LOCK_ROOT="${CUSTODY_LOCK_ROOT:-/nas/custody-locks}"
 CUSTODY_ACTIVE_MARKER="$CUSTODY_LOCK_ROOT/campaign-active"
+CUSTODY_MARKER_TTL_SEC="${CUSTODY_MARKER_TTL_SEC:-21600}"
 if [[ -e "$CUSTODY_ACTIVE_MARKER" ]]; then
-  echo "... custody campaign active ($CUSTODY_ACTIVE_MARKER) — standing down this pass"
-  exit 0
+  marker_age=$(( $(date +%s) - $(stat -c %Y "$CUSTODY_ACTIVE_MARKER" 2>/dev/null || echo 0) ))
+  if [[ "$marker_age" -gt "$CUSTODY_MARKER_TTL_SEC" ]]; then
+    echo "... marker is ${marker_age}s old, past the TTL — no live campaign, syncing"
+  else
+    echo "... custody campaign active — standing down this pass"
+    exit 0
+  fi
 fi
 ```
 
@@ -407,11 +413,42 @@ two cannot be reconciled without inventing a shared naming convention. A marker
 file is the whole handshake. It exits `0` so cron logs a reason rather than an
 error, and the next run five minutes later picks up whatever was left behind.
 
-Two properties matter more than the mechanism:
+**The root is `/nas`, not `/tmp`.** The first version of this probe defaulted to
+`/tmp/auto_ingest_custody` and was inert in production: `sync-service` and
+`ingest-cron` are separate containers with separate `/tmp`s, so each scheduler
+read a *different* file and neither could ever see a marker dropped by
+`custody execute`. Worse, the coordination still *looked* verified.
+`/nas` is the mount all four ingest services already share
+(`docker-compose.yml`; `DROP_ROOT=/nas/drop`), so no compose edit and no restart
+was needed. `CUSTODY_LOCK_ROOT` still overrides it, and the library's
+`DEFAULT_LOCK_ROOT` and the script's default are asserted to be the same string —
+one root in two implementations is the entire invariant.
 
+**The marker is a claim with a TTL**, mirroring `ingest_claim`'s `claimed_at`: the
+file's mtime is the claim timestamp, and a marker older than
+`CUSTODY_MARKER_TTL_SEC` (6h default) is stale — that pass *proceeds* and says
+why. A SIGKILL skips the `finally` in `cli.py` that clears the marker, so it can
+outlive its campaign; without the TTL the survivor halts ingest silently and
+permanently, which is worse than the race the marker exists to prevent.
+
+`ingest_claim` has no heartbeat primitive, so a fixed TTL would instead reap a
+*healthy* campaign: a real one is ~90GB over USB and runs for hours.
+`execute_copy` therefore refreshes the marker's mtime every
+`MARKER_REFRESH_SEC` (30s) while it copies. The refresh is pure bookkeeping —
+`touch_active()` never raises and never creates a marker, so it cannot fail a good
+copy or start a campaign nobody authorized.
+
+Three properties matter more than the mechanism:
+
+* **Visibility is tested, not grepped.** `writer_consults_lock()` reading the
+  script proves the probe *exists*; it cannot prove the writer can *see* the
+  marker, which is precisely how a `/tmp` root passed review. `test_custody_lock.py`
+  now runs two subprocesses with different `TMPDIR`s plus the real script against
+  one shared root, and asserts the default is under `/nas` and not `/tmp`.
 * **The claim is re-derived, never remembered.** `writer_consults_lock()` reads
-  the script and looks for the probe, so reverting this patch makes
-  `no_uncoordinated_writers` fail again. Nothing in the report can go stale.
+  the script and looks for both the probe and the staleness branch, so reverting
+  either half makes `no_uncoordinated_writers` fail again. Nothing in the report
+  can go stale.
 * **The repo is bind-mounted.** `docker-compose.yml` maps `./:/app`, and both
   entry points invoke `/app/deploy/sync_from_legacy_drop.sh`, so the deployed
   script *is* this file. The patch applies on the next tick without a rebuild or
@@ -420,9 +457,10 @@ Two properties matter more than the mechanism:
 `no_uncoordinated_writers` now reports `none`, and `preflight` can return
 `safe_to_execute: true` for a fully reconciled campaign.
 
-Locks are advisory — they coordinate software that agrees to take them. A crashed
-executor releases on the way out, and `is_locked()` needs no custody import, so
-the eventual `sync_from_legacy_drop.sh` change can be a single `flock -n` probe.
+Locks are advisory — they coordinate software that agrees to take them, and the
+marker is deliberately not a `flock` so no writer needs a custody import. A
+crashed executor releases its `flock` on the way out; `is_locked()` remains
+available if a per-destination handshake is ever wanted in place of the marker.
 
 ### Phase D: `custody execute` - the authorized copy
 

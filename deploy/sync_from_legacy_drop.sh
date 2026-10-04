@@ -12,20 +12,39 @@ set -euo pipefail
 # this check the two writers interleave: the sync silently skips whatever the
 # campaign just produced, and can populate those roots independently of it.
 #
-# The handshake is one existence test, deliberately cruder than the campaign's
-# own flock, because this script only knows host paths while the campaign lock is
-# keyed on a logical destination name. Exit 0 so cron logs a reason rather than
-# an error; the next run in five minutes picks up anything left behind.
+# The handshake is one existence test plus one stat, deliberately cruder than the
+# campaign's own flock, because this script only knows host paths while the
+# campaign lock is keyed on a logical destination name. Exit 0 so cron logs a
+# reason rather than an error; the next run in five minutes picks up anything
+# left behind.
+#
+# The lock root is /nas, NOT /tmp. This script runs in two different containers
+# (sync-service and ingest-cron), each with a private /tmp, so a /tmp marker is
+# invisible here and the coordination would be inert while preflight still
+# reported it as working. /nas is the mount all four services share.
+#
+# The marker carries a TTL, mirroring ingest_claim's claimed_at: its mtime is the
+# claim timestamp, and the executor refreshes it while copying, so a live
+# campaign always looks fresh. A marker past the TTL is a campaign that was
+# SIGKILLed - its `finally` never ran - and standing down for it forever would
+# halt ingest silently. Past the TTL this pass proceeds and says so.
 #
 # Removing this block makes `custody preflight` fail closed again:
 # auto_ingest.custody.lock.writer_consults_lock() verifies this probe by reading
 # this file rather than trusting that it was applied.
 # ---------------------------------------------------------------------------
-CUSTODY_LOCK_ROOT="${CUSTODY_LOCK_ROOT:-/tmp/auto_ingest_custody}"
+CUSTODY_LOCK_ROOT="${CUSTODY_LOCK_ROOT:-/nas/custody-locks}"
 CUSTODY_ACTIVE_MARKER="$CUSTODY_LOCK_ROOT/campaign-active"
+CUSTODY_MARKER_TTL_SEC="${CUSTODY_MARKER_TTL_SEC:-21600}"
 if [[ -e "$CUSTODY_ACTIVE_MARKER" ]]; then
-  echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') custody campaign active ($CUSTODY_ACTIVE_MARKER) — standing down this pass"
-  exit 0
+  now=$(date +%s)
+  marker_age=$(( now - $(stat -c %Y "$CUSTODY_ACTIVE_MARKER" 2>/dev/null || echo 0) ))
+  if [[ "$marker_age" -gt "$CUSTODY_MARKER_TTL_SEC" ]]; then
+    echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') custody marker is ${marker_age}s old, past the ${CUSTODY_MARKER_TTL_SEC}s TTL ($CUSTODY_ACTIVE_MARKER) — no live campaign, syncing this pass"
+  else
+    echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') custody campaign active ($CUSTODY_ACTIVE_MARKER, age ${marker_age}s) — standing down this pass"
+    exit 0
+  fi
 fi
 
 LEGACY_DROP_ROOT="${LEGACY_DROP_ROOT:-/nas/fileserver/incoming/deathstar}"

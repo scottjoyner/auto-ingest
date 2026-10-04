@@ -19,12 +19,33 @@ with its own review. What it provides is:
 
 * an advisory lock a campaign takes for its duration;
 * a probe a *pre-existing* writer can consult to stand down, with no custody
-  import required (it reads one lock file);
-* a second, shared lock for coordinating *between* campaigns.
+  import required (it stats one lock file);
+* a second, shared lock for coordinating *between* campaigns;
+* a TTL on the marker, so a SIGKILL cannot leave a permanent stand-down.
+
+It is forbidden to write anything outside the lock root, to touch the destination
+the lock protects, or to require a custody import from a writer that does not have
+one.
 
 Locks are advisory by design: they coordinate software that agrees to take them.
 The legacy writers do not, yet - so :func:`competing_activity` reports that fact
 honestly rather than pretending the lock makes them safe.
+
+Shared, not per-container
+-------------------------
+The default lock root is under ``/nas``, because ``/tmp`` is per-container:
+``sync-service`` and ``ingest-cron`` each have their own, so a marker written by
+``custody execute`` in one namespace is invisible to a writer in another and the
+handshake is inert - while ``writer_consults_lock`` still reports coordination,
+because grepping the probe proves the probe *exists*, never that the writer can
+*see* the marker. ``/nas`` is the mount all four services already share
+(``docker-compose.yml``, ``DROP_ROOT=/nas/drop``).
+
+The marker is a claim with a TTL, mirroring ``ingest_claim``'s ``claimed_at``:
+its mtime is the claim timestamp and a writer proceeds past a marker older than
+``CUSTODY_MARKER_TTL_SEC`` rather than standing down forever. ``ingest_claim``
+has no heartbeat primitive, so :func:`touch_active` is the executor's way of
+keeping a multi-hour campaign fresh.
 """
 
 from __future__ import annotations
@@ -32,12 +53,21 @@ from __future__ import annotations
 import errno
 import fcntl
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 #: Where locks live. Overridable so tests never touch a shared location.
-DEFAULT_LOCK_ROOT = "/tmp/auto_ingest_custody"
+#: Must be a path every participating container mounts: `/tmp` is per-container,
+#: so it is a coordination root that silently coordinates nothing.
+DEFAULT_LOCK_ROOT = "/nas/custody-locks"
+
+#: Marker TTL, generous because a ~90GB USB campaign runs for hours. The
+#: executor refreshes the mtime while it copies, so this bounds how long a
+#: *dead* campaign can keep a writer standing down, not how long a live one can.
+DEFAULT_MARKER_TTL_SEC = 6 * 60 * 60
+
 
 def lock_root(root: Optional[str | Path] = None) -> Path:
     return Path(root or os.environ.get("CUSTODY_LOCK_ROOT") or DEFAULT_LOCK_ROOT)
@@ -45,7 +75,12 @@ def lock_root(root: Optional[str | Path] = None) -> Path:
 
 def _ensure(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
-    os.chmod(root, 0o777)  # multiple operators, one shared campaign host
+    try:
+        os.chmod(root, 0o777)  # multiple operators, one shared campaign host
+    except OSError:
+        # /nas is exFAT/NTFS and keeps no unix modes (see the note in
+        # deploy/sync_from_legacy_drop.sh). Sharing matters; the mode does not.
+        pass
 
 
 @dataclass
@@ -120,13 +155,18 @@ class LockUnavailable(RuntimeError):
 #: ("primary:fileserver/dashcam"), which a shell script that only knows
 #: $DASHCAM_ROOT cannot derive. So the handshake is deliberately cruder and
 #: host-path independent: while any campaign is running it drops one marker file,
-#: and a writer checks for that file. One `test -e`, no import, no arguments.
+#: and a writer checks that file. One `test -e` plus one `stat`, no import, no
+#: arguments.
 ACTIVE_MARKER = "campaign-active"
 
 #: Marker string the patched writer must contain. `competing_activity` greps for
 #: it rather than trusting an operator's word that the script was updated, so
 #: reverting the script makes preflight fail closed again.
 WRITER_PROBE_MARKER = "custody-campaign-lock"
+
+#: The staleness half of the same claim. A stand-down that never expires is a
+#: permanent ingest outage, so the writer must be shown to check the TTL too.
+WRITER_TTL_MARKER = "CUSTODY_MARKER_TTL_SEC"
 
 
 def active_marker(root: Optional[str | Path] = None) -> Path:
@@ -135,10 +175,11 @@ def active_marker(root: Optional[str | Path] = None) -> Path:
 
 
 def is_campaign_active(root: Optional[str | Path] = None) -> bool:
-    """Whether any campaign currently holds a destination.
+    """Whether the marker file exists at all.
 
-    Deliberately a plain existence test, so a shell script can do the same with
-    ``test -e`` and no dependency on this package.
+    Deliberately a plain existence test with no TTL, so it means exactly what
+    ``test -e`` means in the writer - the two must not disagree about whether a
+    file is there. :func:`marker_is_stale` is the TTL-aware question on top of it.
     """
     return active_marker(root).exists()
 
@@ -158,6 +199,61 @@ def clear_active(root: Optional[str | Path] = None) -> None:
         active_marker(root).unlink()
     except OSError:
         pass
+
+
+def active_marker_ttl() -> int:
+    """Marker TTL in seconds, from ``CUSTODY_MARKER_TTL_SEC``.
+
+    Falls back to :data:`DEFAULT_MARKER_TTL_SEC` for an unset, unparseable or
+    non-positive value, so a typo in the environment degrades to "wait longer"
+    rather than "reap live campaigns".
+    """
+    raw = (os.environ.get("CUSTODY_MARKER_TTL_SEC") or "").strip()
+    try:
+        ttl = int(raw)
+    except ValueError:
+        return DEFAULT_MARKER_TTL_SEC
+    return ttl if ttl > 0 else DEFAULT_MARKER_TTL_SEC
+
+
+def marker_is_stale(
+    path: str | Path,
+    ttl_seconds: int,
+    now: Optional[float] = None,
+) -> bool:
+    """Whether a marker is older than its TTL and may be ignored.
+
+    The marker's mtime is the claim timestamp, exactly as ``ingest_claim`` treats
+    ``claimed_at``: no heartbeat field, no extra bookkeeping, and a writer needs
+    only ``stat``. Pure apart from that one stat, and takes ``now`` so a test
+    need not sleep.
+
+    A missing or unreadable marker is stale. Standing down is only ever correct
+    for a marker we could actually evaluate - a writer that cannot read one must
+    proceed, or a filesystem problem halts ingest silently.
+    """
+    try:
+        claimed_at = Path(path).stat().st_mtime
+    except OSError:
+        return True
+    current = time.time() if now is None else now
+    return (current - claimed_at) > ttl_seconds
+
+
+def touch_active(root: Optional[str | Path] = None) -> bool:
+    """Refresh the marker's mtime so a running campaign never looks stale.
+
+    The executor calls this while it copies: ``ingest_claim``'s TTL reaper has no
+    heartbeat primitive, so without a refresh a multi-hour campaign would be
+    reaped mid-copy. Reports whether it refreshed and never raises - a
+    bookkeeping refresh must not be able to fail an otherwise good copy. Returns
+    ``False`` when there is no marker, so this cannot *create* one.
+    """
+    try:
+        os.utime(active_marker(root), None)
+    except OSError:
+        return False
+    return True
 
 
 def campaign_lock(destination_key: str, root: Optional[str | Path] = None) -> CampaignLock:
@@ -217,7 +313,8 @@ def writer_consults_lock(script: Optional[str | Path]) -> bool:
 
     Verified by reading the script rather than trusting a declaration, so
     reverting the patch makes preflight fail closed again instead of silently
-    claiming a coordination that no longer exists.
+    claiming a coordination that no longer exists. Requires the staleness branch
+    as well: a stand-down with no expiry is an outage, not coordination.
     """
     if not script:
         return False
@@ -226,7 +323,8 @@ def writer_consults_lock(script: Optional[str | Path]) -> bool:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    return WRITER_PROBE_MARKER in text and ACTIVE_MARKER in text
+    return all(token in text
+               for token in (WRITER_PROBE_MARKER, ACTIVE_MARKER, WRITER_TTL_MARKER))
 
 
 def competing_activity(
@@ -301,14 +399,19 @@ __all__ = [
     "CampaignLock",
     "CompetingActivity",
     "DEFAULT_LOCK_ROOT",
+    "DEFAULT_MARKER_TTL_SEC",
     "LockUnavailable",
+    "WRITER_TTL_MARKER",
     "active_marker",
+    "active_marker_ttl",
     "campaign_lock",
     "clear_active",
     "competing_activity",
     "is_campaign_active",
     "is_locked",
     "lock_root",
+    "marker_is_stale",
     "set_active",
+    "touch_active",
     "uncoordinated_writers",
 ]
