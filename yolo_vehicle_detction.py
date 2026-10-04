@@ -13,13 +13,35 @@ import uuid
 
 from auto_ingest.backend import torch_device
 
+# Dashcam clips carry a camera suffix: <key>_F.MP4 (front), <key>_R.MP4 (rear),
+# <key>_FR.MP4 (front+rear stacked). Same convention as PATTERN in
+# compress_dashcam.py / compress_dashcam2.py and clip_base_key() in
+# auto_ingest/dashcam/yolo_embeddings.py. The digit/separator in front of the
+# suffix is optional so the legacy 12_F.mp4 shape still matches.
+# NOTE: the "." is escaped and the suffix is anchored to the end of the name.
+# The old literal `_F.MP4` pattern had an unescaped "." (i.e. "any character"),
+# so `CLIP_FXMP4` was accepted as a front-camera clip, and being unanchored and
+# front-only it could never see a rear clip.
+_CAMERA_SUFFIX_RE = re.compile(r"_(\d+)?[_-]?(FR|F|R)\.mp4$", re.IGNORECASE)
+
 def list_files(directory):
+    """Return the sorted base keys (<stem> minus the camera suffix) to process.
+
+    The key is the *base* key, i.e. the stem with _F/_R/_FR removed, because
+    that is what the rest of the chain is named after: the sidecar we write and
+    skip ({key}_YOLOv8n.csv), the video we open ({key}.MP4, see below) and
+    yolo_heatmap.list_files(), which rebuilds keys from {key}_YOLOv8n.csv and
+    then requires {key}.MP4 to exist. Front and rear clips of one clip collapse
+    onto a single key, so both cameras are detected instead of only the front.
+    """
     file_keys = set([])
     for filename in os.listdir(directory):
-        if re.search(r"_\d+F\.mp4$", filename, re.IGNORECASE) or re.search(r"_\d+R\.mp4$", filename, re.IGNORECASE) or re.search(r"_\d+[FR]\.mp4$", filename, re.IGNORECASE):
-            file_keys.add(filename.rsplit('.', 1)[0])
-        if re.search(r"_F.MP4", filename):
-            file_keys.add(filename.rsplit('.', 1)[0])
+        m = _CAMERA_SUFFIX_RE.search(filename)
+        if not m:
+            continue
+        # group(2) is the camera token itself; everything before it (minus the
+        # separator that joined them) is the base key.
+        file_keys.add(filename[:m.start(2)].rstrip("_-"))
     file_keys_copy = file_keys.copy()
     for filename in file_keys_copy:
         if os.path.exists(f"{directory}/{filename}_YOLOv8n.csv"):

@@ -293,7 +293,13 @@ def parse_yolo_csv(csv_path: str) -> pd.DataFrame:
         is_numericish = df["confidence"].map(lambda x: pd.notna(pd.to_numeric(str(x).replace("%",""), errors="coerce"))).all()
         if not is_numericish:
             name_col = "confidence"
-    elif "classification" in df.columns:
+    # NOT an `elif`: the legacy CSV header written by yolo_vehicle_detction.py
+    # and yolo_batch_worker.py is
+    #   Key,vehicle_id,confidence,classification,xywh,xyxy,Frame
+    # so `confidence` is always present (holding a percent) and the
+    # `classification` label column below was unreachable -- every row parsed
+    # with df['name'] == '' and keep_detection() then dropped every detection.
+    if name_col is None and "classification" in df.columns:
         looks_like_num = df["classification"].map(
             lambda x: str(x).strip().endswith("%") or pd.notna(pd.to_numeric(str(x), errors="coerce"))
         ).all()
