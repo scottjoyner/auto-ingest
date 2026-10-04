@@ -91,3 +91,39 @@ def test_days_group_by_month(sup):
 
 def test_minimum_verified_nodes_is_one(sup):
     assert sup.MIN_VERIFIED_NODES == 1
+
+
+@pytest.mark.parametrize("attempts, alerted, expected", [
+    (1, False, False),    # still early - the streak is not long enough yet
+    (2, False, False),
+    (3, False, True),     # crosses MAX_ATTEMPTS -> alert exactly once
+    (4, False, True),
+    (3, True, False),     # already alerted -> stay quiet
+    (99, True, False),    # a permanently broken day must not re-alert for ever
+])
+def test_should_alert_fires_once_per_failure_streak(sup, attempts, alerted, expected):
+    st = {"attempts": attempts, "status": "fail", "alerted": alerted}
+    assert sup.should_alert(st) is expected
+
+
+def test_a_recovered_day_can_alert_again_later(sup):
+    """The 'once' flag must clear on success, or a second outage is silent."""
+    st = {"attempts": 9, "status": "fail", "alerted": True}
+    assert sup.should_alert(st) is False
+    # main() clears both keys on the ok branch
+    st["status"] = "ok"
+    st.pop("reason", None)
+    st.pop("alerted", None)
+    st["attempts"] = 1
+    st["status"] = "fail"
+    assert sup.should_alert(st) is False
+    st["attempts"] = sup.MAX_ATTEMPTS
+    assert sup.should_alert(st) is True, "a new streak must be able to alert again"
+
+
+def test_exhausted_days_are_still_retried(sup):
+    """Alerts stop; retries must not. Data that lands later is data we want."""
+    days = {"2026/04/12": {"age_ok": True}}
+    ledger = {"2026/04/12": {"attempts": 50, "status": "fail", "alerted": True,
+                             "reason": "nonzero_rc"}}
+    assert sup.pending_days(days, ledger) == {"2026_04": ["2026/04/12"]}

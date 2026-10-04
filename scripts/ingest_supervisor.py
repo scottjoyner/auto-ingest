@@ -47,6 +47,19 @@ def classify(rc,nodes):
     if nodes<0: return 'fail','verify_failed'
     return 'fail','no_nodes_verified'
 
+def should_alert(st):
+    """Whether to alert about a failing day - once per failure streak.
+
+    Retries deliberately never stop: a day that fails because Neo4j was briefly
+    down should still land days later. But `pending_days` re-queues it every run,
+    so alerting on every attempt meant a permanently broken day re-alerted every
+    six hours for ever and trained us to ignore the alert file. Alert on the
+    transition into exhausted, then stay quiet until it succeeds.
+    """
+    if st.get('attempts',0)<MAX_ATTEMPTS: return False
+    if st.get('alerted'): return False
+    return True
+
 def pending_days(days,ledger,log=None):
     """Group retryable day-dirs by month. status=='ok' days are retired for good."""
     pending={}
@@ -162,13 +175,17 @@ def main():
             status,reason=classify(rc,nodes)
             st['status']=status
             if status=='ok':
-                st.pop('reason',None); log(f"OK {dstr}: nodes={nodes}")
+                st.pop('reason',None); st.pop('alerted',None)
+                log(f"OK {dstr}: nodes={nodes}")
             else:
                 st['reason']=reason
                 log(f"FAIL {dstr}: rc={rc} nodes={nodes} reason={reason}")
-                if st['attempts']>=MAX_ATTEMPTS:
+                if should_alert(st):
+                    st['alerted']=True
                     alert(f"day {dstr} failed {st['attempts']}x (rc={rc}, "
-                          f"nodes={nodes}, reason={reason})")
+                          f"nodes={nodes}, reason={reason}); still retrying")
+                elif st.get('alerted'):
+                    log(f"{dstr}: still failing, already alerted - continuing to retry")
             save_ledger(ledger)
     fails=[d for d,s in ledger.items() if s.get('status')=='fail']
     log(f"done. fail-streak days: {len(fails)}")
