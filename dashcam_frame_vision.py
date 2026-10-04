@@ -32,6 +32,7 @@ except Exception:
 import cv2
 import subprocess
 import tempfile
+from auto_ingest_config import get_neo4j_password
 
 DEFAULT_PROMPT = (
     "You are a dashcam scene analyst. Describe this dashcam frame concisely and "
@@ -324,7 +325,7 @@ def main():
     ap.add_argument("--vision-model", default="qwen3.5-0.8b-mlx")
     ap.add_argument("--neo4j-uri", default="bolt://localhost:7687")
     ap.add_argument("--neo4j-user", default="neo4j")
-    ap.add_argument("--neo4j-password", default=os.getenv("NEO4J_PASSWORD", "knowledge_graph_2026"))
+    ap.add_argument("--neo4j-password", default=get_neo4j_password())
     ap.add_argument("--prompt", default=DEFAULT_PROMPT)
     ap.add_argument("--sys-prompt", default="You are a precise dashcam scene analyst.")
     ap.add_argument("--max-minutes", type=int, default=None, help="cap minutes per clip (None=all)")

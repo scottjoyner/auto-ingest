@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 from scipy.io import wavfile
 from scipy.signal import resample
+from auto_ingest_config import get_neo4j_password
 
 # --- Config ---
 DEFAULT_USB_PATH = "/media/scott/USB DISK"
@@ -36,7 +37,7 @@ WHISPER_DOWNLOAD_ROOT = "/tmp/whisper_models"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 NEO4J_URI = "bolt://100.64.43.123:7687"
 NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "knowledge_graph_2026"
+NEO4J_PASSWORD = get_neo4j_password()
 
 
 def load_datetime_correction(usb_path):

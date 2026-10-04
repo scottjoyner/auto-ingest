@@ -11,7 +11,7 @@ SCRIPT="/home/deathstar/git/auto-ingest/dashcam_frame_vision.py"
 WORKERS="${DASHCAM_WORKERS:-2}"
 MAX_MIN="${DASHCAM_MAX_MIN:-5}"
 NEO4J_URI="${DASHCAM_NEO4J_URI:-bolt://localhost:7687}"
-NEO4J_PWD="${NEO4J_PASSWORD:-knowledge_graph_2026}"
+NEO4J_PWD="${NEO4J_PASSWORD:-${NEO4J_PASSWORD_DEFAULT:-knowledge_graph_2026}}"
 
 macbook_up() { curl -s --max-time 5 "http://${VISION_HOST}/v1/models" >/dev/null 2>&1; }
 neo4j_up()   { curl -s --max-time 5 "http://localhost:7474" >/dev/null 2>&1; }
