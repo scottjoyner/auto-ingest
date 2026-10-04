@@ -156,19 +156,18 @@ def test_transcripts_pure():
     # before, and the first one masked the second because pytest stops at the
     # first failed assert in a test body):
     #
-    # 1. file_key_from_name() is a *stem reducer*, not a key producer. The run
-    #    it strips is the whisper model id, and the pattern's character class
-    #    (transcripts.py:245) spans "_", "-" and "." on purpose so multi-word
-    #    model ids ("Systran_faster_whisper_large-v3", "distil-large-v3.0")
-    #    collapse too. On a dashcam key the greedy leftmost match therefore also
-    #    eats "0202_171732_medium" and leaves "2025". The authoritative key is
-    #    re-derived by canonicalize_key(), which is exactly what
-    #    discover_keys() does with this return value (transcripts.py:742):
-    #    key = canonicalize_key(file_key_from_name(basename), full_path).
-    #    canonicalize_key() searches the FULL path -- basename included -- for
-    #    the timestamp, so the key survives. Assert that composition (the
-    #    invariant the pipeline relies on) plus the reducer's real output.
-    assert T.file_key_from_name("2025_0202_171732_medium_transcription.txt") == "2025"
+    # 1. file_key_from_name() is a *stem reducer*, not a key producer. It removes
+    #    the sidecar marker and nothing else; the run it removes is the whisper
+    #    model id, which is the LAST token before "_transcription" and starts with
+    #    a size word (TRANSCRIPTION_MODEL_IDS / _PAT_SIDECAR_MODEL, derived in the
+    #    function's docstring from the producers -- whisper_audio_chunked.py:461,
+    #    speakers.py:81/224, MODEL_PREF). The old pattern's character class spanned
+    #    "_", "-" and ".", so on a dashcam key it also ate "0202_171732_medium" and
+    #    left "2025" -- the name was destroyed, not just the sidecar. Assert the stem
+    #    the reducer is supposed to return; test_transcript_keys.py covers the rest of
+    #    the derivation (and that a model-id-less "IMG_4821_transcription.json" keeps
+    #    its whole name).
+    assert T.file_key_from_name("2025_0202_171732_medium_transcription.txt") == "2025_0202_171732"
     assert T.canonicalize_key(
         T.file_key_from_name("2025_0202_171732_medium_transcription.txt"),
         "/dashcam/2025/02/02/20250202_171732/2025_0202_171732_medium_transcription.txt",

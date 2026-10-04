@@ -239,14 +239,79 @@ def canonicalize_key(name_without_suffix: str, full_path: str) -> str:
     base = re.sub(r"[^\w\-]+", "_", name_without_suffix).strip("_")
     return base or stable_id(full_path)
 
+#: Model ids this repo's transcribers actually write into a sidecar filename as
+#: ``<stem>_<model-id>_transcription.{txt,json}``. Derived from the producers, not
+#: guessed: whisper_audio_chunked.py:461 enumerates the legal ``--model`` values
+#: (tiny/base/small/medium/large/large-v2/large-v3, default large-v3) and its
+#: ``--known-models`` defaults to medium,large,large-v3; speakers.py:81/224 writes
+#: ``WHISPER_MODEL`` (default "medium", the same default runall.sh:48 hands whisper)
+#: into the sidecar name; diarize_and_transcribe.py:296 and batch_diarize*.py default
+#: to medium/small. The ``turbo`` and ``*.en`` entries come from MODEL_PREF (this
+#: file:93, mirrored in run_ingest_all.sh:79): model_rank() resolves a filename's tag
+#: against that list, so every entry PAT_TRANS_JSON_TXT's ``[A-Za-z0-9\-\._]+`` class
+#: can capture is a tag that occurs on disk. (The ``faster-whisper:*`` MODEL_PREF
+#: entries contain ":" and can never be captured from a filename.)
+TRANSCRIPTION_MODEL_IDS = (
+    "large-v3", "large-v2", "large", "turbo",
+    "medium.en", "medium",
+    "small.en", "small",
+    "base.en", "base",
+    "tiny.en", "tiny",
+)
+#: What makes a trailing token a model id rather than part of the name: it starts with
+#: a size word and the rest is version/lang decoration ("-v3", ".en", "-onnx"). Taken
+#: from the ids above so extending that list extends this rule, plus "distil" for the
+#: distil-* line (cited by auto_ingest/tests/test_ml_pure.py:162).
+TRANSCRIPTION_MODEL_PREFIXES = tuple(sorted(
+    {i.split("-")[0].split(".")[0] for i in TRANSCRIPTION_MODEL_IDS} | {"distil"}))
+#: ``_<model-id>_transcription`` with the model id as ONE trailing token: it starts
+#: with a size word, decoration may follow, and neither may span "_", so the match can
+#: only ever be the last "_"-delimited chunk -- it cannot reach back into the name.
+_PAT_SIDECAR_MODEL = re.compile(
+    r"_(?:%s)(?:[.\-][A-Za-z0-9]+)*_transcription(_(entites|entities))?$"
+    % "|".join(TRANSCRIPTION_MODEL_PREFIXES), re.IGNORECASE)
+
 def file_key_from_name(name: str) -> str:
-    base = os.path.basename(name)
-    base = re.sub(r"\.(json|txt|csv|rttm)$", "", base, flags=re.IGNORECASE)
-    base = re.sub(r"_([A-Za-z0-9\-\._]+)_transcription(_(entites|entities))?$", "", base, flags=re.IGNORECASE)
+    """Reduce a sidecar/media basename to the stem its recording is keyed by.
+
+    A transcription sidecar is written as ``<stem>_<model-id>_transcription.{txt,json}``
+    (speakers.py:224, whisper_audio_chunked.py:344) and may carry an ``_entities`` /
+    ``_entites`` marker (PAT_ENTITIES, this file:87). This removes that marker and
+    nothing else: it is a *stem reducer*, not a key producer -- ``canonicalize_key``
+    turns the result into the authoritative key, which is the composition
+    ``discover_keys()`` uses (this file:832-833).
+
+    The model id is the LAST token before ``_transcription``. The old pattern,
+    ``_[A-Za-z0-9\\-\\._]+_transcription``, had "_", "-" and "." inside the token
+    class, so whenever an earlier "_" existed the match started at the FIRST one and
+    ate the name as well as the model id: ``meeting_standup_2026-03-04_medium_
+    transcription.json`` reduced to ``meeting`` and ``IMG_4821_transcription.json`` to
+    ``IMG``, collapsing every ``IMG_*`` recording onto one key -- and ``IMG_4821`` vs
+    ``IMG_9912`` transcripts then shared, and overwrote, one mapping entry. Dashcam
+    names survived only by accident: canonicalize_key() re-searches the FULL path for
+    the ``YYYY_MMDD_HHMMSS`` timestamp the reducer had just eaten, and its
+    ``stable_id`` fallback is unreachable because the reduced base was wrong, not empty.
+
+    The token is therefore gated on TRANSCRIPTION_MODEL_PREFIXES, not merely on being
+    the last chunk: a name that carries no model id at all (``IMG_4821_transcription``,
+    written model-id-less by whisper_audio_chunked.py:347 / audio_copy.sh:136) keeps its
+    whole name, while ``large-v3``/``medium.en`` are removed whole instead of leaving
+    ``-v3``/``.en`` behind. Both readings are indistinguishable in the filename, so the
+    tie is broken toward the name: over-preserving costs one sidecar that fails to group
+    with its media, under-preserving merges two distinct recordings. A match at offset 0
+    is refused for the same reason -- the marker must never be the whole stem -- and an
+    empty result falls back to the extension-stripped name, since ``canonicalize_key``'s
+    ``stable_id`` fallback only fires on an empty *sanitised* base.
+    """
+    raw = os.path.basename(name)
+    stem = re.sub(r"\.(json|txt|csv|rttm)$", "", raw, flags=re.IGNORECASE)
+    base = stem
+    m = _PAT_SIDECAR_MODEL.search(base)
+    if m and m.start() > 0: base = base[:m.start()]
     base = re.sub(r"_transcription(_(entites|entities))?$", "", base, flags=re.IGNORECASE)
     base = re.sub(r"_speakers$", "", base, flags=re.IGNORECASE)
     base = re.sub(r"_metadata$", "", base, flags=re.IGNORECASE)
-    return base
+    return base or stem or raw
 
 # =========================
 # Embeddings
@@ -714,6 +779,25 @@ def _rttm_key_from_name(name: str) -> str:
     base = re.sub(r"_speakers$", "", base, flags=re.IGNORECASE)
     return base
 
+#: Camera-variant suffix a media stem may carry: the dashcam _F/_R tails
+#: (speakers.py:174-184, which returns ``_<tail>``) and the bodycam _BC / _BC-N index
+#: (speakers.py:187-193, postprocess_audio.py:122). Those are two views of ONE recording
+#: and deliberately share a key, so the collision report below folds them first.
+_PAT_CAM_SUFFIX = re.compile(r"_(F|R|FR|RF|BC(-\d+)?)$", re.IGNORECASE)
+#: Bounded: this is an ingest path, not a gate. One warning line, at most this many
+#: samples, whatever the corpus size.
+MAX_KEY_COLLISION_SAMPLES = 20
+
+def media_identity_stem(path: str) -> str:
+    """Media basename without extension or camera-variant suffix: one *recording*.
+
+    Two media files with the same identity stem are renditions of one recording
+    (``...m4a`` + ``...mp3``, ``KEY_F.mp4`` + ``KEY_R.mp4``) and legitimately land on
+    one key. Two different identity stems on one key mean two distinct recordings
+    were forced onto one key -- never silent.
+    """
+    return _PAT_CAM_SUFFIX.sub("", os.path.splitext(os.path.basename(path))[0])
+
 def index_rttm_dirs(search_dirs: List[str]) -> Dict[str, List[str]]:
     idx: Dict[str, List[str]] = {}; total = 0
     for root_dir in search_dirs:
@@ -738,6 +822,12 @@ def pick_rttm_for_key(key: str, idx: Dict[str, List[str]]) -> Optional[str]:
 def discover_keys() -> Dict[str, Dict[str, Any]]:
     with TimedStage(st_discover, detail=f"roots={len(SCAN_ROOTS)}"):
         mapping: Dict[str, Dict[str, Any]] = {}
+        # key -> the distinct recording identity stems filed under it (see
+        # media_identity_stem). More than one means two distinct recordings were forced
+        # onto one key -- possible even after the stem reducer is correct, because
+        # canonicalize_key rebuilds a dashcam key from the YYYY_MMDD_HHMMSS timestamp
+        # and two clips can start in the same second. Reported below, never merged.
+        id_stems: Dict[str, List[str]] = {}
         def add(kind: str, path: str):
             base = file_key_from_name(os.path.basename(path))
             key = canonicalize_key(base, path)
@@ -746,7 +836,12 @@ def discover_keys() -> Dict[str, Dict[str, Any]]:
             elif kind == "csv": mapping[key]["csv_all"].append(path)
             elif kind == "entities": mapping[key]["entities"] = path
             elif kind == "rttm": mapping[key]["rttm"] = path
-            elif kind == "media": mapping[key]["media_all"].append(path)
+            elif kind == "media":
+                mapping[key]["media_all"].append(path)
+                stems = id_stems.setdefault(key, [])
+                stem = media_identity_stem(path)
+                if stem not in stems:
+                    stems.append(stem)
             elif kind == "meta": mapping[key]["meta_all"].append(path)
 
         for root in SCAN_ROOTS:
@@ -780,6 +875,16 @@ def discover_keys() -> Dict[str, Dict[str, Any]]:
             cand = pick_rttm_for_key(key, rttm_idx)
             if cand: rec["rttm"] = cand; attached += 1
         log.info(f"[rttm-attach] attached RTTM to {attached} of {len(mapping)} keys")
+        # Report, never merge: every path stays in the mapping, but an operator has to
+        # know that two recordings are sharing a key. Bounded (one warning, at most
+        # MAX_KEY_COLLISION_SAMPLES keys) and non-fatal -- this is an ingest path.
+        collided = sorted((k, sorted(v)) for k, v in id_stems.items() if len(v) > 1)
+        if collided:
+            log.warning("[key-collision] %d key(s) hold media from more than one recording (%d recording(s) "
+                        "on them), so distinct recordings share one key. All paths are kept and media_best "
+                        "picks one: %s%s", len(collided), sum(len(v) for _, v in collided),
+                        "; ".join(f"{k}: {' | '.join(v)}" for k, v in collided[:MAX_KEY_COLLISION_SAMPLES]),
+                        " ..." if len(collided) > MAX_KEY_COLLISION_SAMPLES else "")
         return mapping
 
 # =========================
