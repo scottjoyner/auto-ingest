@@ -100,6 +100,7 @@ CONDITION_ORDER: Tuple[str, ...] = (
     "copy_result_complete",
     "copy_ledger_complete",
     "destination_verification_complete",
+    "destination_verification_covers_required",
     "mismatch_count_zero",
     "missing_destination_zero",
     "unresolved_errors_zero",
@@ -203,6 +204,22 @@ def evaluate_release(
             f"verified={dst.verified_files} failures={dst.failures}"
             f" complete={dst.verification_complete}",
             "run full destination verification",
+        ))
+
+    # `verification_complete` is a claim ABOUT the verification having finished;
+    # it is not evidence that anything was proven. An imported document can assert
+    # the flag while carrying verified_files=0, and that combination passed this
+    # gate - so a campaign could be declared releasable with custody proven for
+    # nothing at all. Cross-check the count against the same required-scope
+    # definition the machine uses, so a bare flag cannot stand in for the work.
+    required_objects = policy.required_objects(inv.discovered_files, hsh.verified_files)
+    if dst.verification_complete and dst.verified_files < required_objects:
+        blockers.append(Blocker(
+            "destination_verification_short",
+            f"verified={dst.verified_files} required={required_objects}"
+            f" scope={policy.required_scope}",
+            "verification claims complete but proves fewer objects than this "
+            "policy requires; re-run verification over the full scope",
         ))
 
     if rec.mismatched:
