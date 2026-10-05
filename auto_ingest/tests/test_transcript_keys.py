@@ -312,3 +312,71 @@ def test_no_collision_warning_when_keys_are_distinct(T, tmp_path, monkeypatch, c
 
     assert len(mapping) == 3
     assert not [r for r in caplog.records if "key-collision" in r.getMessage()]
+
+
+# ---------------------------------------------------------------------------
+# Model-tag extraction and ranking (select_best_json)
+# ---------------------------------------------------------------------------
+
+def test_the_model_tag_is_the_last_token_not_the_whole_prefix(T):
+    """The tag must not swallow the key prefix.
+
+    `_([A-Za-z0-9\\-\\._]+)` spans `_`, so for
+    `2025_0202_171732_large-v3_transcription.txt` it captured
+    `0202_171732_large-v3`. MODEL_PREF.index() then missed, and large-v3,
+    large-v2 and large ALL fell through to the substring fallback at rank 100.
+    """
+    assert T.extract_model_tag_from_json_txt(
+        "2025_0202_171732_large-v3_transcription.txt") == "large-v3"
+    assert T.extract_model_tag_from_json_txt(
+        "2025_0202_171732_large-v2_transcription.txt") == "large-v2"
+    assert T.extract_model_tag_from_json_txt(
+        "meeting_standup_medium_transcription.txt") == "medium"
+
+
+def test_model_preference_order_is_actually_honoured(T):
+    """The bug was a three-way tie: large-v3 did not beat large."""
+    def rank(suffix):
+        return T.model_rank(T.extract_model_tag_from_json_txt(
+            f"2025_0202_171732_{suffix}_transcription.txt"))
+
+    assert rank("large-v3") == 0
+    assert rank("large-v3") < rank("large-v2") < rank("large") < rank("medium")
+    assert rank("medium") < rank("small") < rank("tiny")
+    assert rank("large-v3") < rank("medium.en")
+
+
+def test_a_tag_with_a_still_present_prefix_still_ranks_by_model(T):
+    """Older on-disk names must not tie. Longest matching suffix wins."""
+    assert T.model_rank("0202_171732_large-v3") < T.model_rank("0202_171732_large")
+    assert T.model_rank("x_medium") < T.model_rank("x_small")
+    # No model in the name at all is still the worst case.
+    assert T.model_rank("4821") > T.model_rank("large-v3")
+
+
+def test_select_best_json_prefers_large_v3(T, tmp_path):
+    """End to end: given all three, the strongest model must win.
+
+    `select_best_json` sorts on (in_audio_base, rank, -segments, -mtime, path),
+    so an equal rank would be broken by segment count or mtime rather than by
+    model - which is how the wrong transcript could be chosen.
+    """
+    written = {}
+    for suffix in ("large", "large-v2", "large-v3"):
+        path = tmp_path / f"2025_0202_171732_{suffix}_transcription.json"
+        path.write_text('{"segments": [{"start": 0.0, "end": 1.0}]}', encoding="utf-8")
+        written[suffix] = str(path)
+    with mock.patch.object(T, "is_in_audio_base", return_value=True):
+        best = T.select_best_json(sorted(written.values()), [])
+    assert best == written["large-v3"], "the strongest model must win"
+
+
+def test_no_model_tag_is_still_selectable(T, tmp_path):
+    """An untagged sidecar must not become unselectable."""
+    a = tmp_path / "plain_transcription.json"
+    b = tmp_path / "2025_0202_171732_medium_transcription.json"
+    for p in (a, b):
+        p.write_text('{"segments": [{"start": 0.0, "end": 1.0}]}', encoding="utf-8")
+    with mock.patch.object(T, "is_in_audio_base", return_value=True):
+        best = T.select_best_json([str(a), str(b)], [])
+    assert best == str(b), "a tagged transcript outranks an untagged one"

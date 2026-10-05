@@ -82,7 +82,16 @@ NEO4J_ENABLED = bool(NEO4J_URI and NEO4J_USER and NEO4J_PASSWORD)
 DEFAULT_BATCH_SIZE = int(os.getenv("EMBED_BATCH", "32"))
 
 AUDIO_BASE = Path(get_fileserver_path("audio"))
-PAT_TRANS_JSON_TXT = re.compile(r"_([A-Za-z0-9\-\._]+)_transcription\.txt$", re.IGNORECASE)
+#: Model tag in a sidecar filename. The tag is the LAST underscore-delimited
+#: token before `_transcription.txt`, so the class must not span `_`. The old
+#: `[A-Za-z0-9\-\._]+` did, which swallowed the key prefix: for
+#: `2025_0202_171732_large-v3_transcription.txt` it captured
+#: `0202_171732_large-v3`, so MODEL_PREF.index() never matched and large-v3,
+#: large-v2 and large ALL fell through to the substring fallback at rank 100 -
+#: a three-way tie, and the model preference was ignored for every dashcam
+#: transcript. No entry in MODEL_PREF contains `_`, so "no underscore in the tag"
+#: is the discriminator, derived from that list rather than guessed.
+PAT_TRANS_JSON_TXT = re.compile(r"_([^_]+)_transcription\.txt$", re.IGNORECASE)
 PAT_TRANS_CSV      = re.compile(r"_transcription\.csv$", re.IGNORECASE)
 PAT_ENTITIES       = re.compile(r"_transcription_(entites|entities)\.csv$", re.IGNORECASE)
 PAT_RTTM           = re.compile(r"_speakers\.rttm$", re.IGNORECASE)
@@ -739,16 +748,30 @@ def extract_model_tag_from_json_txt(p: str) -> str:
     m = PAT_TRANS_JSON_TXT.search(os.path.basename(p)); return m.group(1) if m else ""
 
 def model_rank(tag: str) -> int:
+    """Lower is better. Exact MODEL_PREF order wins; fallbacks only for junk.
+
+    The suffix pass is new and matters: a tag that still carries a prefix (an
+    older on-disk name, or a key containing a dot) should still rank by the model
+    it names. Without it, `0202_171732_large-v3` and `0202_171732_large` both
+    hit the substring branch and tie at 100, so `select_best_json` could pick the
+    weaker model over large-v3.
+    """
     if not tag: return 10_000
     t = tag.lower()
     try: return MODEL_PREF.index(t)
-    except ValueError:
-        if "large" in t: return 100
-        if "medium" in t: return 200
-        if "small" in t: return 300
-        if "base" in t: return 400
-        if "tiny" in t: return 500
-        return 9999
+    except ValueError: pass
+    # Suffix match: pick the LONGEST preference entry the tag ends with, so
+    # large-v3 beats large rather than tying with it.
+    best = None
+    for i, pref in enumerate(MODEL_PREF):
+        if t.endswith(pref) and (best is None or i < best): best = i
+    if best is not None: return best
+    if "large" in t: return 100
+    if "medium" in t: return 200
+    if "small" in t: return 300
+    if "base" in t: return 400
+    if "tiny" in t: return 500
+    return 9999
 
 def is_in_audio_base(p: str) -> bool:
     try: return str(Path(p).resolve()).startswith(str(AUDIO_BASE.resolve()))
