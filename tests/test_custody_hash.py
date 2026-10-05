@@ -1160,3 +1160,40 @@ def test_nfc_and_nfd_are_distinct_on_this_destination():
     assert detect_name_problems([nfc, nfd]) == [], (
         "exFAT and SMB2 keep the two spellings apart; reporting them is a false "
         "positive. APFS would need a separate, deliberate normalisation pass.")
+
+
+def test_a_resumed_pass_reports_cumulative_inventory_bytes(tmp_path):
+    """inventory.discovered_bytes must be cumulative, like verified_files.
+
+    Found by hashing the real 94GB card twice: the second, resumed pass wrote
+    `discovered_files: 67644` beside `discovered_bytes: 0`. The ledger held
+    94,278,672,670 bytes. `capacity.py:85` scales its requirement by
+    discovered_bytes, so a campaign that had already hashed the whole card
+    looked like a zero-byte copy - the copy would be planned with no capacity
+    reservation at all.
+    """
+    src = tmp_path / "card"
+    src.mkdir()
+    payloads = {"a.mp4": b"A" * 4096, "b.mp4": b"B" * 8192}
+    for name, data in payloads.items():
+        (src / name).write_bytes(data)
+
+    bundle = tmp_path / "b"
+    total = sum(len(v) for v in payloads.values())
+
+    first = hash_source(bundle, {k: src / k for k in payloads})
+    assert first.complete and first.hashed == 2
+    fragment = to_evidence(first, discovered=2)
+    assert fragment["inventory"]["discovered_bytes"] == total
+
+    # Second pass: everything is skipped, so bytes_read is 0. The cumulative
+    # figure must still be right, or the campaign silently loses its own size.
+    second = hash_source(bundle, {k: src / k for k in payloads})
+    assert second.skipped_existing == 2, "resume should skip both"
+    assert second.bytes_read == 0, "nothing new was read"
+    resumed = to_evidence(second, discovered=2)
+    assert resumed["inventory"]["discovered_files"] == 2
+    assert resumed["inventory"]["discovered_bytes"] == total, (
+        "a fully-skipped pass reported zero bytes for a card that holds "
+        f"{total}, so capacity planning saw a zero-byte copy")
+    assert resumed["hash"]["verified_bytes"] == total

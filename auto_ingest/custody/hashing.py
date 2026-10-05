@@ -945,6 +945,13 @@ def to_evidence(result: HashProgress, *, algorithm: str = DEFAULT_ALGORITHM,
         known = result.hashed + result.skipped_existing
         fragment["inventory"] = {
             "discovered_files": known,
+            # Cumulative for the same reason as hash.verified_files above: a
+            # resumed pass measures the skipped bytes from the ledger it resumed
+            # from, so this is the total across every pass, not this pass's delta.
+            # It was previously absent entirely, which left a resumed campaign
+            # claiming 67,644 files and ZERO bytes - and capacity.py:85 scales
+            # its requirement by discovered_bytes, so the whole copy looked free.
+            "discovered_bytes": result.bytes_read + result.bytes_skipped,
             # Only claim a complete inventory when the pass actually covered
             # everything it walked; a --limit probe leaves it open.
             "complete": result.complete and known == discovered,
