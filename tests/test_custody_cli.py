@@ -727,9 +727,12 @@ def test_execute_uses_the_recorded_root_without_being_told(tmp_path):
     o, e = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
         code = _main(["execute", "--bundle", bundle, "--json"])
+    assert code == EXIT_OK, e.getvalue()
     report = json.loads(o.getvalue())
-    assert report["source_root"] == str(root), e.getvalue()
+    assert report["source_root"] == str(root)
+    # The original symptom, asserted directly rather than inferred from success.
     assert "No such file" not in o.getvalue()
+    assert "No such file" not in e.getvalue()
 
 
 def test_execute_refuses_a_wrong_root_by_explicit_flag(tmp_path):
