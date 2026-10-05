@@ -600,3 +600,106 @@ def test_the_recorded_layout_carries_the_date_provenance(tmp_path):
             for r in (json.loads(line) for line in path.read_text().splitlines())}
     assert rows["DCIM/2026_0829_123850_F.MP4"]["key_source"] == "filename"
     assert rows["VIDEO/MOVI0000.avi"]["key_source"] == "mtime"
+
+
+# ---------------------------------------------------------------------------
+# Orphaned detections: preserved, quarantined, never dropped
+# ---------------------------------------------------------------------------
+# On the real card, 2,934 detection files describe recordings from 2024 that are
+# on neither the card nor the NAS. They are the only surviving record of that
+# footage. So the requirement is not "handle them" - it is that nothing here may
+# lose them, and that they must not sit in the live date tree looking paired.
+
+def test_a_detection_without_its_clip_is_routed_to_a_labelled_namespace():
+    plan = plan_staging([
+        "DCIM/Movie/2026_0829_123850_F.MP4",
+        "yolo/2026_0829_123850_F_YOLOv8n.csv",
+        "yolo/2024_0713_112243_F_YOLOv8n.csv",
+    ])
+    landed = {o.source_key: o.destination_key for o in plan.staged}
+    assert landed["yolo/2024_0713_112243_F_YOLOv8n.csv"] == (
+        "orphaned-detections/2024/07/13/2024_0713_112243_F_YOLOv8n.csv")
+    # The paired pair is untouched.
+    assert landed["DCIM/Movie/2026_0829_123850_F.MP4"] == (
+        "2026/08/29/2026_0829_123850_F.MP4")
+    assert landed["yolo/2026_0829_123850_F_YOLOv8n.csv"] == (
+        "2026/08/29/2026_0829_123850_F_YOLOv8n.csv")
+
+
+def test_routing_preserves_every_object_and_changes_no_collisions():
+    """The load-bearing property: routing moves paths, it never drops anything and
+    it cannot introduce a collision, because prefixing is injective."""
+    keys = [
+        "DCIM/Movie/2026_0829_123850_F.MP4",
+        "DCIM/Movie/2026_0829_123850_R.MP4",
+        "yolo/2026_0829_123850_F_YOLOv8n.csv",
+        "yolo/2026_0829_123850_R_YOLOv8n.csv",
+        "yolo/2024_0713_112243_F_YOLOv8n.csv",
+        "yolo/2024_0713_112243_R_YOLOv8n.csv",
+        "yolo/2024_0714_101500_F_YOLOv8n.csv",
+    ]
+    routed = plan_staging(keys)
+    plain = plan_staging(keys, orphan_prefix="")
+
+    assert len(routed.staged) == len(keys) == len(plain.staged)
+    assert routed.collisions() == plain.collisions() == ()
+    assert len({o.source_key for o in routed.staged}) == len(keys)
+    assert len({o.destination_key for o in routed.staged}) == len(keys)
+
+
+def test_orphans_are_named_rather_than_swallowed():
+    plan = plan_staging([
+        "DCIM/Movie/2026_0829_123850_F.MP4",
+        "yolo/2026_0829_123850_F_YOLOv8n.csv",
+        "yolo/2024_0713_112243_F_YOLOv8n.csv",
+        "yolo/2024_0713_112243_R_YOLOv8n.csv",
+    ])
+    orphans = plan.unpaired_detections()
+    assert {o.source_key for o in orphans} == {
+        "yolo/2024_0713_112243_F_YOLOv8n.csv",
+        "yolo/2024_0713_112243_R_YOLOv8n.csv",
+    }
+    assert plan.pairing()["detections_without_clip"] == 2
+    assert plan.pairing()["paired"] == 1
+
+
+def test_pairing_is_decided_after_every_object_has_a_place():
+    """A clip planned last still rescues its own csv. Deciding during the first
+    pass would orphan it - the same bug as reading a file before the writer
+    finished."""
+    # The csv sorts before the clip, so a single forward pass would see no clip.
+    plan = plan_staging([
+        "DCIM/Movie/2026_0829_123850_F.MP4",
+        "yolo/2026_0829_123850_F_YOLOv8n.csv",
+    ])
+    assert plan.unpaired_detections() == ()
+    assert not any(o.destination_key.startswith("orphaned-detections")
+                   for o in plan.staged)
+
+
+def test_same_stem_on_a_different_day_is_still_an_orphan():
+    """Coincidence, not a match: the detector looks beside the csv."""
+    plan = plan_staging([
+        "DCIM/Movie/2026_0829_123850_F.MP4",
+        "yolo/2026_0830_123850_F_YOLOv8n.csv",
+    ])
+    assert len(plan.unpaired_detections()) == 1
+    assert plan.staged[1].destination_key.startswith("orphaned-detections/")
+
+
+def test_routing_can_be_turned_off_when_the_dates_line_up_again():
+    """A later card may carry the media these detections describe. The namespace
+    is a default, not a sentence - and with everything paired it is empty anyway."""
+    keys = ["DCIM/Movie/2024_0713_112243_F.MP4",
+            "yolo/2024_0713_112243_F_YOLOv8n.csv"]
+    assert plan_staging(keys).unpaired_detections() == ()
+    assert plan_staging(keys, orphan_prefix="").unpaired_detections() == ()
+    assert plan_staging(keys, orphan_prefix=None).unpaired_detections() == ()
+
+
+def test_a_clip_is_never_routed_as_an_orphan():
+    """Only detections can be orphaned. A clip with no csv is simply not yet
+    detected, which is the normal state of fresh footage."""
+    plan = plan_staging(["DCIM/Movie/2026_0829_123850_F.MP4"])
+    assert plan.unpaired_detections() == ()
+    assert plan.staged[0].destination_key == "2026/08/29/2026_0829_123850_F.MP4"

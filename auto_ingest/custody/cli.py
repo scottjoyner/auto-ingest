@@ -211,6 +211,10 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--media-only", dest="include_sidecars",
                     action="store_false",
                     help="stage media only, leaving sidecars for a later pass")
+    ps.add_argument("--orphan-prefix", default=None,
+                    help="namespace for detection files whose clip is not on "
+                         "the card (default: orphaned-detections; pass an empty "
+                         "string to leave them in the date tree)")
     ps.add_argument("--key-undated-by-mtime", action="store_true",
                     help="for media with no timestamp in its name, group it by "
                          "filesystem mtime and keep the original filename. Off by "
@@ -938,7 +942,8 @@ def cmd_stage(args) -> int:
                 continue
     plan = plan_staging(walked_paths, include_sidecars=args.include_sidecars,
                         mtimes=mtimes,
-                        allow_mtime_key=args.key_undated_by_mtime)
+                        allow_mtime_key=args.key_undated_by_mtime,
+                        orphan_prefix=args.orphan_prefix)
     mapping = {o.source_key: o.destination_key for o in plan.staged}
 
     # Hash only what will be staged, and hash it from its SOURCE path. Hashing
@@ -967,6 +972,8 @@ def cmd_stage(args) -> int:
         "unstaged_by_reason": plan.by_reason(),
         "destination_collisions": list(plan.collisions()),
         "pairing": plan.pairing(),
+        "orphaned_detections": len(plan.unpaired_detections()),
+        "orphan_prefix": args.orphan_prefix or "",
         "applied": False,
     })
     if args.apply:
@@ -1011,7 +1018,23 @@ def cmd_stage(args) -> int:
                 f"clips {pairing['clips']}, detections {pairing['detections']}, "
                 f"paired {pairing['paired']}\n"
             )
-            if pairing["detections_without_clip"]:
+            orphans = plan.unpaired_detections()
+            if orphans:
+                # Preserved, and said out loud. These describe recordings that are
+                # not here and may not exist anywhere - on the real card they were
+                # the only surviving record of 2024 footage that is otherwise gone.
+                # They are routed to a labelled namespace rather than dropped, and
+                # the count is reported so the set is auditable.
+                sys.stdout.write(
+                    f"orphaned detections {len(orphans)}, routed to "
+                    f"{args.orphan_prefix or '(date tree)'}/\n")
+                sys.stderr.write(
+                    f"custody: {len(orphans)} staged detection file(s) have no "
+                    f"clip on this card. They are preserved, not dropped, and "
+                    f"routed to {args.orphan_prefix or 'the date tree'}/ - they "
+                    f"describe recordings that are not on the card and may not "
+                    f"exist anywhere.\n")
+            if pairing["detections_without_clip"] and not orphans:
                 # Said plainly, because the alternative reading is "naming bug".
                 sys.stderr.write(
                     f"custody: {pairing['detections_without_clip']} staged detection "

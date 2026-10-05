@@ -49,7 +49,7 @@ Vocabulary, in this file's own terms:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Iterable, List, Optional, Tuple
 
 #: Roles, most specific first. Order matters: ``_YOLOv8n.csv`` must be tested
@@ -430,6 +430,35 @@ class StagingPlan:
             counts[source] = counts.get(source, 0) + 1
         return counts
 
+    def unpaired_detections(self) -> Tuple["StagedObject", ...]:
+        """Staged detection files with no clip in the same directory.
+
+        The detector resolves ``{stem}.MP4`` beside the csv, so that is the only
+        pairing that means anything. Same stem in a different directory is a
+        coincidence, not a match.
+        """
+        clips: Dict[str, set] = {}
+        for obj in self.staged:
+            directory, _, name = obj.destination_key.rpartition("/")
+            base, dot, _ = name.rpartition(".")
+            if not dot:
+                continue
+            if obj.role == VIDEO_ROLE:
+                clips.setdefault(directory, set()).add(base)
+            elif obj.role == DETECTION_CSV_ROLE:
+                clips.setdefault(directory, set())  # ensure the key exists
+        out = []
+        for obj in self.staged:
+            if obj.role != DETECTION_CSV_ROLE:
+                continue
+            directory, _, name = obj.destination_key.rpartition("/")
+            base, dot, _ = name.rpartition(".")
+            stem = (base[: -len(DETECTION_MARKER)]
+                    if base.endswith(DETECTION_MARKER) else base)
+            if stem not in clips.get(directory, set()):
+                out.append(obj)
+        return tuple(sorted(out, key=lambda o: o.source_key))
+
     def pairing(self) -> Dict[str, int]:
         """How staged clips and detection files relate, per destination directory.
 
@@ -500,10 +529,15 @@ class StagingPlan:
         }
 
 
+ORPHAN_PREFIX = "orphaned-detections"
+
+
 def plan_staging(source_keys: Iterable[str], *,
                  include_sidecars: bool = True,
                  mtimes: Optional[Dict[str, float]] = None,
-                 allow_mtime_key: bool = False) -> StagingPlan:
+                 allow_mtime_key: bool = False,
+                 orphan_prefix: Optional[str] = ORPHAN_PREFIX,
+                 ) -> StagingPlan:
     """Plan the whole card in one pass.
 
     ``source_keys`` are POSIX-relative paths under the source root, in any order.
@@ -517,6 +551,20 @@ def plan_staging(source_keys: Iterable[str], *,
                               mtime=(mtimes or {}).get(source_key),
                               allow_mtime_key=allow_mtime_key)
         (staged if obj.stageable else unstaged).append(obj)
+
+    if orphan_prefix:
+        # Second pass, because whether a detection is orphaned is only knowable
+        # once every object has a place: the clip it needs may be the last one
+        # planned.
+        plan = StagingPlan(staged=tuple(staged), unstaged=tuple(unstaged))
+        orphans = plan.unpaired_detections()
+        if orphans:
+            orphan_keys = {o.source_key for o in orphans}
+            staged = [
+                replace(o, destination_key=f"{orphan_prefix}/{o.destination_key}")
+                if o.source_key in orphan_keys else o
+                for o in staged
+            ]
     return StagingPlan(staged=tuple(staged), unstaged=tuple(unstaged))
 
 
