@@ -826,6 +826,55 @@ def cmd_hash(args) -> int:
     return EXIT_OK
 
 
+def _resolve_source_root(args, campaign_obj, keys) -> "tuple[str | None, list[str]]":
+    """Where the objects behind ``keys`` actually are, and what to complain about.
+
+    Custody keys are relative to whatever root the walk started from, but the
+    campaign only remembers the card's mount point. Staging ``UNTITLED/VIDEO`` and
+    then copying without restating the root produced "No such file or directory"
+    once per object, which reads as a lost card rather than as two commands
+    disagreeing about a path.
+
+    So: prefer what `stage` recorded, fall back to the mount point, and check the
+    answer before any bytes move rather than after the first failure.
+
+    Returns ``(source_root, problems)``. A non-empty ``problems`` means the root
+    does not hold the objects and the caller must stop.
+    """
+    from .ledger import read_staged_meta
+
+    explicit = getattr(args, "source_root", None)
+    recorded = read_staged_meta(args.bundle) or {}
+    roots = [r for r in (recorded.get("source_roots") or []) if r]
+
+    source_root = explicit
+    if source_root is None and len(roots) == 1:
+        source_root = roots[0]
+    if source_root is None:
+        source_root = campaign_obj.source.mount_point
+
+    problems: List[str] = []
+    sample = keys[0] if keys else None
+    if sample and source_root:
+        if not (Path(source_root) / sample).exists():
+            problems.append(
+                f"source root {source_root!r} does not contain {sample!r}")
+            if roots and len(roots) > 1:
+                problems.append(
+                    f"stage walked several roots: {roots}; pass --source-root "
+                    f"to say which one these keys are relative to")
+            elif roots:
+                problems.append(
+                    f"stage recorded root {roots[0]!r}; pass --source-root to "
+                    f"override it")
+            else:
+                problems.append(
+                    "no staged layout was recorded for this bundle, so the "
+                    "source root defaulted to the campaign's mount point; pass "
+                    "--source-root")
+    return source_root, problems
+
+
 def cmd_stage(args) -> int:
     """Lay the source out where the ingest pipeline will actually find it.
 
@@ -908,7 +957,8 @@ def cmd_stage(args) -> int:
         payload["evidence_result"] = write_status
 
     # Recorded, not recomputed later. `execute` reads this.
-    staged_path = write_staged_ledger(args.bundle, plan)
+    staged_path = write_staged_ledger(args.bundle, plan,
+                                       source_roots=list(args.root))
     payload["staged_ledger"] = str(staged_path)
 
     from_mtime = plan.by_key_source().get("mtime", 0)
@@ -994,7 +1044,22 @@ def cmd_release_source(args) -> int:
         policy = load_policy(load_custody_config())
     campaign_obj = load_campaign(args.bundle)
     status = load_status(args.bundle, policy)
-    source_root = args.source_root or campaign_obj.source.mount_point
+    from .verify import source_digests
+
+    source_root, root_problems = _resolve_source_root(
+        args, campaign_obj, sorted(source_digests(args.bundle)))
+    if root_problems:
+        # Structured, not just a diagnostic: a --json caller gets a parseable
+        # refusal rather than empty stdout and an exit code to guess from.
+        if getattr(args, "json", False):
+            print(json.dumps({"mode": "refused", "executed": False,
+                              "blockers": root_problems,
+                              "source_root": source_root},
+                             sort_keys=True, indent=2, default=str))
+        else:
+            for problem in root_problems:
+                sys.stderr.write(f"custody: {problem}\n")
+        return EXIT_GATE_CLOSED
     destination = args.destination or campaign_obj.destination.host_path
 
     if not destination:
@@ -1077,7 +1142,22 @@ def cmd_execute(args) -> int:
     status = load_status(args.bundle, policy)
     mounts = observe_campaign(campaign_obj)
 
-    source_root = args.source_root or campaign_obj.source.mount_point
+    from .verify import source_digests
+
+    source_root, root_problems = _resolve_source_root(
+        args, campaign_obj, sorted(source_digests(args.bundle)))
+    if root_problems:
+        # Structured, not just a diagnostic: a --json caller gets a parseable
+        # refusal rather than empty stdout and an exit code to guess from.
+        if getattr(args, "json", False):
+            print(json.dumps({"mode": "refused", "executed": False,
+                              "blockers": root_problems,
+                              "source_root": source_root},
+                             sort_keys=True, indent=2, default=str))
+        else:
+            for problem in root_problems:
+                sys.stderr.write(f"custody: {problem}\n")
+        return EXIT_GATE_CLOSED
     destination = args.destination or campaign_obj.destination.host_path
 
     activity = competing_activity(

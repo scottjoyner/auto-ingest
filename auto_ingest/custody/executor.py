@@ -45,7 +45,16 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from .hashing import CHUNK_BYTES, DEFAULT_ALGORITHM
 from .ledger import (
@@ -53,6 +62,7 @@ from .ledger import (
     DESTINATION_LEDGER,
     HASH_LEDGER,
     STAGED_LEDGER,
+    STAGED_META,
     ledger_dir,
     read_records,
 )
@@ -453,7 +463,8 @@ __all__ = [
 ]
 
 
-def write_staged_ledger(bundle: str | Path, plan: Any) -> Path:
+def write_staged_ledger(bundle: str | Path, plan: Any, *,
+                       source_roots: Optional[Sequence[str]] = None) -> Path:
     """Record the layout in the campaign bundle, atomically.
 
     ``custody execute`` reads this rather than re-deriving the layout, so the
@@ -487,6 +498,20 @@ def write_staged_ledger(bundle: str | Path, plan: Any) -> Path:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp, path)
+
+    # The roots, recorded next to the layout they produced.
+    meta_path = ledgers / STAGED_META
+    meta_tmp = meta_path.with_suffix(meta_path.suffix + ".tmp")
+    with open(meta_tmp, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "source_roots": sorted({str(r) for r in (source_roots or ())}),
+            "staged_objects": len(plan.staged),
+            "keyed_from_mtime": plan.by_key_source().get("mtime", 0),
+        }, sort_keys=True, indent=2))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(meta_tmp, meta_path)
     return path
 
 

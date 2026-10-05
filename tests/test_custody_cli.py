@@ -684,3 +684,96 @@ def test_the_plan_judges_presence_where_the_recorded_layout_says(tmp_path):
 
     after = plan_copy(bundle, dest, mapping)
     assert "DCIM/Movie/2026_0829_123850_F.MP4" not in after.absent
+
+
+# ---------------------------------------------------------------------------
+# The source root that stage walked is the one execute must use
+# ---------------------------------------------------------------------------
+# Custody keys are relative to the root the walk started from. The campaign only
+# remembers the card's mount point, so staging UNTITLED/VIDEO and copying without
+# restating the root produced "No such file or directory" once per object - which
+# reads as a lost card rather than as two commands disagreeing about a path. It
+# cost a real 1.9 GB copy before anyone noticed.
+
+def _staged_subdirectory_campaign(tmp_path):
+    """A campaign staged against a subdirectory of the card."""
+    root = _card(tmp_path) / "DCIM"
+    bundle = _bundle(tmp_path)
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        assert _main(["stage", "--bundle", bundle, "--root", str(root),
+                      "--policy-file", str(_policy_file(tmp_path)),
+                      "--apply", "--json"]) == EXIT_OK, e.getvalue()
+    return root, bundle
+
+
+def test_stage_records_the_root_it_walked(tmp_path):
+    from auto_ingest.custody.ledger import read_staged_meta
+
+    root, bundle = _staged_subdirectory_campaign(tmp_path)
+    meta = read_staged_meta(bundle)
+    assert meta is not None
+    assert meta["source_roots"] == [str(root)]
+    assert meta["staged_objects"] > 0
+
+
+def test_execute_uses_the_recorded_root_without_being_told(tmp_path):
+    """The footgun, closed: no --source-root, and it still finds the objects."""
+    root, bundle = _staged_subdirectory_campaign(tmp_path)
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        code = _main(["execute", "--bundle", bundle, "--json"])
+    report = json.loads(o.getvalue())
+    assert report["source_root"] == str(root), e.getvalue()
+    assert "No such file" not in o.getvalue()
+
+
+def test_execute_refuses_a_wrong_root_by_explicit_flag(tmp_path):
+    """An explicit --source-root still wins, and a wrong one is refused before
+    any bytes move rather than once per object."""
+    root, bundle = _staged_subdirectory_campaign(tmp_path)
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        code = _main(["execute", "--bundle", bundle, "--source-root",
+                      str(tmp_path / "card"), "--execute", "--json"])
+    assert code == EXIT_GATE_CLOSED
+    # Legible to a machine caller, which is the point of --json.
+    report = json.loads(o.getvalue())
+    assert report["mode"] == "refused"
+    assert report["executed"] is False
+    assert report["source_root"] == str(tmp_path / "card")
+    assert any("does not contain" in b for b in report["blockers"])
+
+
+def test_the_same_refusal_reaches_a_human_on_stderr(tmp_path):
+    """Without --json there is no payload to carry it, so the diagnostic must
+    actually be printed rather than silently returned as an exit code."""
+    root, bundle = _staged_subdirectory_campaign(tmp_path)
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        code = _main(["execute", "--bundle", bundle, "--source-root",
+                      str(tmp_path / "card"), "--execute"])
+    assert code == EXIT_GATE_CLOSED
+    assert "does not contain" in e.getvalue()
+    assert "--source-root" in e.getvalue()
+
+
+def test_release_refuses_a_wrong_root_before_deleting_anything(tmp_path):
+    """Same check, and the stakes are higher: release removes the source."""
+    root, bundle = _staged_subdirectory_campaign(tmp_path)
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        code = _main(["release-source", "--bundle", bundle, "--source-root",
+                      str(tmp_path / "card"), "--json"])
+    assert code == EXIT_GATE_CLOSED
+    assert any("does not contain" in b for b in json.loads(o.getvalue())["blockers"])

@@ -44,6 +44,13 @@ COLLISION_LEDGER = "collisions.jsonl"
 #: decision - and a custody ledger that cannot say where a byte was told to go
 #: cannot answer for it afterwards. Recorded once, consumed once.
 STAGED_LEDGER = "staged.jsonl"
+#: The roots `stage` walked, recorded beside the layout it produced. Custody keys
+#: are relative to whatever root the walk started from, and the campaign only
+#: remembers the card's mount point - so staging a subdirectory and then copying
+#: without restating the root produced "No such file or directory" for every
+#: object, which reads as a lost card rather than a mismatch between two
+#: commands. Recorded here so the copy does not have to be told twice.
+STAGED_META = "staged_meta.json"
 
 #: Statuses that count as "proven present" on the respective side of the diff.
 SOURCE_VERIFIED_STATUSES = ("verified", "hashed")
@@ -623,6 +630,18 @@ __all__ = [
     "summarize_bundle_ledgers",
     "summarize_ledger",
 ]
+
+
+def read_staged_meta(bundle: str | Path) -> Optional[Dict[str, Any]]:
+    """What `stage` recorded about itself: the roots it walked, and when."""
+    path = Path(bundle) / LEDGER_DIRNAME / STAGED_META
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def read_staged_ledger(bundle: str | Path) -> Optional[Dict[str, str]]:
