@@ -865,6 +865,7 @@ def cmd_stage(args) -> int:
         "by_role": plan.by_role(),
         "unstaged_by_reason": plan.by_reason(),
         "destination_collisions": list(plan.collisions()),
+        "pairing": plan.pairing(),
         "applied": False,
     })
     if args.apply:
@@ -890,6 +891,26 @@ def cmd_stage(args) -> int:
         )
         for reason, count in sorted(plan.by_reason().items(), key=lambda kv: -kv[1]):
             sys.stdout.write(f"  unstaged {count:<8} {reason}\n")
+        pairing = plan.pairing()
+        if pairing["clips"] or pairing["detections"]:
+            sys.stdout.write(
+                f"clips {pairing['clips']}, detections {pairing['detections']}, "
+                f"paired {pairing['paired']}\n"
+            )
+            if pairing["detections_without_clip"]:
+                # Said plainly, because the alternative reading is "naming bug".
+                sys.stderr.write(
+                    f"custody: {pairing['detections_without_clip']} staged detection "
+                    f"file(s) have no clip on this card - leftovers from an "
+                    f"already-archived session, or detections for media that was "
+                    f"never on this card. They will stage without pairing.\n"
+                )
+            if pairing["clips_without_detection"]:
+                sys.stderr.write(
+                    f"custody: {pairing['clips_without_detection']} staged clip(s) "
+                    f"have no detection file yet - expected for fresh footage; the "
+                    f"detector writes those after ingest.\n"
+                )
     if collisions:
         # Never resolved here. Two sources claiming one staged path means the
         # layout is wrong, and picking a winner would lose one of them silently.

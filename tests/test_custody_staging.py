@@ -433,3 +433,68 @@ def test_a_bodily_date_directory_never_becomes_the_key():
     obj = destination_for("2026/08/29/clip.MP4")
     assert obj.stageable is False
     assert obj.reason == "no_YYYY_MMDD_HHMMSS_in_name_or_path"
+
+
+# ---------------------------------------------------------------------------
+# Clips and detections that do not meet
+# ---------------------------------------------------------------------------
+
+def test_pairing_counts_a_fresh_card_with_no_detections_yet():
+    plan = plan_staging([
+        "DCIM/Movie/2026_0829_123850_F.MP4",
+        "DCIM/Movie/2026_0829_123850_R.MP4",
+    ])
+    assert plan.pairing() == {
+        "clips": 2, "detections": 0, "paired": 0,
+        "detections_without_clip": 0, "clips_without_detection": 2,
+    }
+
+
+def test_pairing_counts_a_clip_with_its_detection():
+    plan = plan_staging([
+        "DCIM/Movie/2026_0829_123850_F.MP4",
+        "yolo/2026_0829_123850_F_YOLOv8n.csv",
+    ])
+    assert plan.pairing()["paired"] == 1
+    assert plan.pairing()["detections_without_clip"] == 0
+    assert plan.pairing()["clips_without_detection"] == 0
+
+
+def test_pairing_reports_orphaned_detections_rather_than_hiding_them():
+    """The state the real card is actually in: detections from a session whose
+    media was already archived, plus fresh media with no detections yet.
+
+    Nothing is wrong, and nothing pairs. Counted, because "2,934 staged files,
+    none paired" otherwise reads as a naming failure.
+    """
+    plan = plan_staging([
+        "DCIM/Movie/2026_0829_123850_F.MP4",
+        "yolo/2024_0713_112243_F_YOLOv8n.csv",
+        "yolo/2024_0713_112243_R_YOLOv8n.csv",
+    ])
+    summary = plan.pairing()
+    assert summary == {
+        "clips": 1, "detections": 2, "paired": 0,
+        "detections_without_clip": 2, "clips_without_detection": 1,
+    }
+
+
+def test_pairing_does_not_pair_across_date_directories():
+    """Same stem, different day: still unpaired. The detector looks in one
+    directory, so a stem match across days is a coincidence, not a match."""
+    plan = plan_staging([
+        "DCIM/Movie/2026_0829_123850_F.MP4",
+        "yolo/2026_0830_123850_F_YOLOv8n.csv",
+    ])
+    assert plan.pairing()["paired"] == 0
+
+
+def test_pairing_ignores_per_recording_sidecars():
+    """A transcript shares the stem but is not a detection, and must not be
+    counted as one."""
+    plan = plan_staging([
+        "DCIM/Movie/2026_0829_123850_F.MP4",
+        "2026_0829_123850_medium_transcription.txt",
+    ])
+    assert plan.pairing()["detections"] == 0
+    assert plan.pairing()["clips"] == 1

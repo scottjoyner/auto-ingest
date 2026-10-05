@@ -16,6 +16,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from .media_pairing import find_file_keys
+
 from neo4j import GraphDatabase
 import numpy as np
 import pandas as pd
@@ -1689,18 +1691,6 @@ def process_directory(
 # =========================
 # File discovery (hardened)
 # =========================
-def find_file_keys(directory: str) -> List[str]:
-    keys = set()
-    for fn in os.listdir(directory):
-        if re.search(r"_YOLOv8n\.csv$", fn):
-            k = fn.rsplit("_YOLOv8n", 1)[0]
-            mp4 = os.path.join(directory, f"{k}.MP4")
-            if os.path.exists(mp4) and os.path.getsize(mp4) > 0:
-                keys.add(k)
-            else:
-                logging.warning(f"[scan] Missing or empty MP4 for {k}, skipping")
-    return sorted(keys)
-
 def is_yyyymmdd_dir(path: str) -> bool:
     parts = os.path.normpath(path).split(os.sep)
     if len(parts) < 3: return False

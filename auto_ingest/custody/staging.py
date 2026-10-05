@@ -57,6 +57,11 @@ from typing import Dict, Iterable, List, Optional, Tuple
 VIDEO_ROLE = "video"
 AUDIO_ROLE = "audio"
 DETECTION_CSV_ROLE = "detection_csv"
+
+#: The marker this detector puts on its csv. Held once because `pairing` has to
+#: remove it to compare against a clip's stem, and two literals that must agree
+#: is exactly how that comparison starts silently reporting zero.
+DETECTION_MARKER = "_YOLOv8n"
 TRANSCRIPT_TXT_ROLE = "transcript_txt"
 TRANSCRIPT_CSV_ROLE = "transcript_csv"
 ENTITIES_CSV_ROLE = "entities_csv"
@@ -261,7 +266,7 @@ def staged_filename(stem: str, suffix: str, role: str, *,
     to rewrite, and the name is kept verbatim.
     """
     if role == DETECTION_CSV_ROLE:
-        return f"{stem}_YOLOv8n.csv"
+        return f"{stem}{DETECTION_MARKER}.csv"
     if role in PER_RECORDING_ROLES and key and base:
         # `base` is the source basename without its extension. Rewriting only the
         # key prefix leaves every marker after it in place.
@@ -359,6 +364,51 @@ class StagingPlan:
         for obj in self.staged:
             counts[obj.role] = counts.get(obj.role, 0) + 1
         return counts
+
+    def pairing(self) -> Dict[str, int]:
+        """How staged clips and detection files relate, per destination directory.
+
+        This is the measurement that turns "we staged 3,558 files" into an
+        operator decision. On the real card it reported 624 clips and 2,934
+        detection files across *disjoint* date ranges - 2026/08-29..09/01 for the
+        media, 2024/07/13..08/03 for the detections - with no 2024 video present
+        at all. So every one of those 2,934 csv files described a recording that
+        is not on the card.
+
+        That is a legitimate state and not an error: YOLO csvs are produced by
+        running the detector, so a card can hold the outputs of a session whose
+        media was already archived, plus fresh media whose detections do not exist
+        yet. But it is invisible unless something counts it, and "2,934 staged
+        files, none of them paired" would otherwise read as a naming failure.
+
+        Counts, not paths: a bounded summary is what belongs in a status report.
+        """
+        clips: Dict[str, set] = {}
+        detections: Dict[str, set] = {}
+        for obj in self.staged:
+            directory, _, name = obj.destination_key.rpartition("/")
+            base, dot, _ = name.rpartition(".")
+            if not dot:
+                continue
+            if obj.role == DETECTION_CSV_ROLE:
+                detections.setdefault(directory, set()).add(
+                    base[: -len(DETECTION_MARKER)]
+                    if base.endswith(DETECTION_MARKER) else base)
+            elif obj.role == VIDEO_ROLE:
+                clips.setdefault(directory, set()).add(base)
+        paired = sum(len(clips.get(d, set()) & stems) for d, stems in detections.items())
+        clips_total = sum(len(s) for s in clips.values())
+        det_total = sum(len(s) for s in detections.values())
+        return {
+            "clips": clips_total,
+            "detections": det_total,
+            "paired": paired,
+            # A csv whose clip is not here: a leftover from an archived session.
+            "detections_without_clip": det_total - paired,
+            # A clip with no csv: not yet detected, which is the normal state of
+            # footage arriving from a card.
+            "clips_without_detection": clips_total - paired,
+        }
 
     def collisions(self) -> Tuple[str, ...]:
         """Destination paths claimed by more than one source object.
