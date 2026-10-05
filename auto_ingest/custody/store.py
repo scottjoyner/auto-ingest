@@ -30,6 +30,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 from .campaign import Campaign, CardIdentity, SourceRef, resolve_campaign
 from .destination import (
     DestinationRef,
+    StorageIdentity,
     load_custody_config,
     load_policy,
     resolve_destination,
@@ -238,6 +239,53 @@ class CampaignStatus:
 
 def _policy_dict(policy: CustodyPolicy) -> Dict[str, Any]:
     return dict(sorted(policy.to_dict().items()))
+
+
+def declare_destination_identity(
+    bundle: str | Path,
+    identity: StorageIdentity,
+    *,
+    replace: bool = False,
+) -> Dict[str, Any]:
+    """Record what the destination storage *is*, as an operator declaration.
+
+    Needed because the declaration is otherwise only ever made at campaign
+    creation, from whatever was configured then. A campaign created before the
+    operator knew which share backs it - or created with only an env var set for
+    the root, no identity alongside - otherwise can never satisfy
+    ``require_destination_identity``, because the gate compares a declaration
+    against an observation and there is nothing on the left to compare.
+
+    A declaration, not an observation. Recording what the kernel currently reports
+    here would make the gate compare the filesystem to itself and always pass,
+    which is worse than the closed gate it replaces.
+
+    Refuses to overwrite an existing declaration without ``replace``: silently
+    re-pointing a campaign's destination identity at whatever is currently
+    mounted would let a wrong mount satisfy the gate.
+    """
+    path = Path(bundle) / CAMPAIGN_FILE
+    if not path.is_file():
+        raise CampaignCreationError(f"no campaign at {path}")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    existing = ((raw.get("destination") or {}).get("identity")) or None
+    if existing and not replace:
+        return {
+            "declared": False,
+            "reason": "already_declared",
+            "existing": existing,
+            "proposed": identity.to_dict(),
+        }
+    dest = dict(raw.get("destination") or {})
+    dest["identity"] = identity.to_dict()
+    raw["destination"] = dest
+    _write_json_atomic(path, raw)
+    return {
+        "declared": True,
+        "replaced": bool(existing),
+        "identity": identity.to_dict(),
+        "previous": existing,
+    }
 
 
 def load_campaign(bundle: str | Path) -> Campaign:

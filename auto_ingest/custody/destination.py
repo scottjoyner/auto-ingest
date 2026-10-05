@@ -32,10 +32,31 @@ DESTINATION_ENV_VARS: Tuple[str, ...] = (
     "CUSTODY_DESTINATION_PATH",
 )
 
+# Declared identity of the destination storage, in the environment so that a
+# committed config.yaml stays portable between hosts. Precedence: env then config.
+DESTINATION_IDENTITY_ENV_VARS: Tuple[str, ...] = (
+    "CUSTODY_DESTINATION_FILESYSTEM_UUID",
+    "CUSTODY_DESTINATION_DEVICE",
+    "CUSTODY_DESTINATION_FILESYSTEM_TYPE",
+)
+
 #: Config keys consulted (inside the top-level ``custody:`` block).
 DESTINATION_CONFIG_KEY = "destination_root"
 DESTINATION_NAME_KEY = "destination_name"
 DESTINATION_RELATIVE_KEY = "destination_relative_path"
+
+# Declared destination identity. An operator states what the destination IS, so
+# that an observation has something to be compared against.
+#:
+# A block filesystem is normally identified by ``destination_filesystem_uuid``.
+# A network share cannot be: there is no block device, so no /dev/disk/by-uuid
+# entry will ever exist for it, and declaring a UUID would be a claim nothing can
+# confirm - which `match_identity` correctly refuses. For those, the share is
+# identified by the device string the kernel reports (``//host/share`` for CIFS),
+# which names the server and the share and is the strongest thing available.
+DESTINATION_IDENTITY_UUID_KEY = "destination_filesystem_uuid"
+DESTINATION_IDENTITY_DEVICE_KEY = "destination_device"
+DESTINATION_IDENTITY_TYPE_KEY = "destination_filesystem_type"
 
 #: Host-independent default layout of a custody destination under its root.
 DESTINATION_DEFAULT_RELATIVE_PATH = "fileserver/dashcam"
@@ -281,6 +302,23 @@ def resolve_destination(
             host_path = value
             resolved_from = f"config:custody.{DESTINATION_CONFIG_KEY}"
 
+    if identity is None:
+        # Declared, never observed. An operator states what the destination is; the
+        # gate's job is to check that claim against the kernel, which is the whole
+        # point of keeping the two apart.
+        declared_uuid = (_opt_str(env.get(DESTINATION_IDENTITY_ENV_VARS[0]))
+                        or _opt_str(config.get(DESTINATION_IDENTITY_UUID_KEY)))
+        declared_device = (_opt_str(env.get(DESTINATION_IDENTITY_ENV_VARS[1]))
+                           or _opt_str(config.get(DESTINATION_IDENTITY_DEVICE_KEY)))
+        declared_type = (_opt_str(env.get(DESTINATION_IDENTITY_ENV_VARS[2]))
+                         or _opt_str(config.get(DESTINATION_IDENTITY_TYPE_KEY)))
+        if declared_uuid or declared_device:
+            identity = StorageIdentity(
+                filesystem_uuid=declared_uuid,
+                device=declared_device,
+                filesystem_type=declared_type,
+            )
+
     logical = LogicalDestination(
         name=_opt_str(config.get(DESTINATION_NAME_KEY)) or "primary",
         relative_path=(_opt_str(config.get(DESTINATION_RELATIVE_KEY))
@@ -294,6 +332,15 @@ def resolve_destination(
                 mounted = os.path.ismount(host_path)
             except OSError:  # pragma: no cover - ismount does not raise in practice
                 mounted = False
+            if not mounted:
+                # ismount() is false for a directory *inside* a mount, which is the
+                # normal shape of a network destination: the share is at /nas, the
+                # archive is at /nas/fileserver/headcam. Falling back to isdir()
+                # alone would be wrong - an ordinary directory would pass - so the
+                # containing mount is consulted instead.
+                from .mounts import observe_mount
+
+                mounted = observe_mount(host_path, allow_containing=True).present
         else:
             mounted = None
 

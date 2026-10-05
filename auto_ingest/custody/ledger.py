@@ -179,6 +179,7 @@ def summarize_ledger(
     records = 0
     files = 0
     nbytes = 0
+    proven: Dict[str, int] = {}
     errors: List[str] = []
     malformed = 0
     truncated = False
@@ -202,11 +203,21 @@ def summarize_ledger(
             records += 1
             by_status[record.status] = by_status.get(record.status, 0) + 1
             if record.status in verified:
-                files += 1
-                nbytes += record.size
+                # Distinct keys, not rows. A `--recheck` pass re-proves objects it
+                # already proved and appends fresh rows, so counting rows made a
+                # ledger of 3 objects report 9 after three rechecks - and the drift
+                # check below then called that a contradiction between the ledger
+                # and the evidence, which agreed perfectly.
+                #
+                # A later row for the same key supersedes an earlier one, so a
+                # re-verification that changed size or digest is reflected rather
+                # than averaged away.
+                proven[record.key or record.path] = record.size
             elif record.status in {"failed", "mismatch", "missing"}:
                 if len(errors) < max_error_samples:
                     errors.append(f"{record.key or record.path}:{record.status}")
+    files = len(proven)
+    nbytes = sum(proven.values())
     return LedgerSummary(
         present=True,
         path=str(p),

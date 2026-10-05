@@ -305,9 +305,27 @@ def test_the_executor_has_no_bulk_delete_primitive():
         assert "os" not in receiver and "shutil" not in receiver, receiver
 
     source = _source(CUSTODY_DIR / "store.py")
-    # every write goes through the single atomic helper
+    # Every write goes through the single atomic helper. The count is named rather
+    # than merely bounded: each site is a distinct thing that persists evidence or a
+    # campaign, and a new one should be a decision someone can see in the diff.
+    #   1. the helper's own definition
+    #   2. new_campaign - campaign.json
+    #   3. store status - evidence.json
+    #   4. declare_destination_identity - campaign.json
     assert source.count("def _write_json_atomic") == 1
-    assert source.count("_write_json_atomic(") == 3  # def + import-free: 2 call sites
+    assert source.count("_write_json_atomic(") == 4
+
+    # The destination-identity declaration is an operator's claim about storage,
+    # and it lands in campaign.json next to the destination it describes - never in
+    # evidence, which is only for things that were observed.
+    decl = next(node for node in ast.parse(source).body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "declare_destination_identity")
+    decl_text = ast.get_source_segment(source, decl) or ""
+    assert "_write_json_atomic" in decl_text
+    assert "CAMPAIGN_FILE" in decl_text
+    assert "EVIDENCE" not in decl_text, (
+        "a declaration must not be written as evidence")
     for fn in ("new_campaign", "import_evidence"):
         assert f"def {fn}(" in source
     # and both are gated

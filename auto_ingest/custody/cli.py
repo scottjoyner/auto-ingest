@@ -71,6 +71,7 @@ from .store import (
     CampaignCreationError,
     CampaignStatus,
     _write_json_atomic,
+    declare_destination_identity,
     import_evidence,
     load_campaign,
     load_custody_config,
@@ -215,6 +216,22 @@ def build_parser() -> argparse.ArgumentParser:
                          "filesystem mtime and keep the original filename. Off by "
                          "default: an mtime is a last-written time, not a "
                          "camera-written one, so using it is an operator decision.")
+
+    pd = common(sub.add_parser(
+        "declare-destination",
+        help="Record what the destination storage is, as an operator declaration "
+             "(the release gate compares this against what the kernel reports)."),
+        observed=False)
+    pd.add_argument("--device", default=None,
+                    help="device or share string, e.g. //host/share for CIFS")
+    pd.add_argument("--filesystem-uuid", default=None,
+                    help="filesystem UUID; block filesystems only")
+    pd.add_argument("--filesystem-type", default=None,
+                    help="e.g. ext4, vfat, cifs")
+    pd.add_argument("--replace", action="store_true",
+                    help="overwrite an existing declaration")
+    pd.add_argument("--apply", action="store_true",
+                    help="write campaign.json")
 
     pr = common(sub.add_parser(
         "release-source",
@@ -1018,6 +1035,68 @@ def cmd_stage(args) -> int:
     return EXIT_OK
 
 
+def cmd_declare_destination(args) -> int:
+    """State what the destination storage is. Not an observation.
+
+    The release gate compares a declaration against what the kernel reports and
+    refuses when they differ, or when either side is missing. This supplies the
+    left-hand side, which otherwise only ever comes from config at campaign
+    creation - so a campaign made before the operator knew which share backed it
+    had no way to satisfy the gate at all.
+
+    Recording the *observed* identity here would be worse than the closed gate it
+    replaces: the gate would be comparing the filesystem to itself and would pass
+    for whatever happened to be mounted.
+    """
+    from .destination import StorageIdentity
+
+    identity = StorageIdentity(
+        filesystem_uuid=args.filesystem_uuid or None,
+        device=args.device or None,
+        filesystem_type=args.filesystem_type or None,
+    )
+    if not (identity.filesystem_uuid or identity.device):
+        sys.stderr.write(
+            "custody: declare a --device or a --filesystem-uuid; with neither "
+            "there is nothing for the gate to compare\n"
+        )
+        return EXIT_USAGE
+    if args.filesystem_uuid and not args.device:
+        sys.stderr.write(
+            "custody: a UUID with no device is a claim the observation may be "
+            "unable to confirm. For a network share there is no block device and "
+            "no UUID will ever be observed - name the share with --device\n"
+        )
+        return EXIT_USAGE
+
+    if not args.apply:
+        print(json.dumps({"mode": "dry_run", "applied": False,
+                          "identity": identity.to_dict()},
+                         sort_keys=True, indent=2, default=str))
+        return EXIT_OK
+
+    result = declare_destination_identity(args.bundle, identity, replace=args.replace)
+    result["applied"] = True
+    if not result.get("declared"):
+        sys.stderr.write(
+            f"custody: a destination identity is already declared "
+            f"({result.get('existing')}); refusing to re-point it without "
+            f"--replace\n"
+        )
+        print(json.dumps(result, sort_keys=True, indent=2, default=str))
+        return EXIT_GATE_CLOSED
+    if args.json:
+        print(json.dumps(result, sort_keys=True, indent=2, default=str))
+    else:
+        sys.stdout.write(
+            f"declared            {result['identity'].get('device') or ''}"
+            f"{result['identity'].get('filesystem_uuid') or ''}\n"
+            f"replaced            {str(result.get('replaced', False)).lower()}\n"
+            "next                run `custody observe-mount` and re-check status\n"
+        )
+    return EXIT_OK
+
+
 def cmd_release_source(args) -> int:
     """Remove source objects that are already proven to be in custody.
 
@@ -1211,8 +1290,24 @@ def cmd_execute(args) -> int:
     observed_ro = mounts["source"]["observed_read_only"]
     if observed_ro is not True:
         blockers.append("source_not_observed_read_only")
-    if campaign_obj.destination.identity is not None and not campaign_obj.destination.mounted:
-        blockers.append("destination_not_mounted")
+    # The snapshot `campaign.destination.mounted` is taken at creation, so it is
+    # False for every network destination: the archive is a subdirectory of the
+    # mount, not the mount point. This check only became reachable once a
+    # destination identity was declared, which is why it never fired before.
+    #
+    # The observation may only make the answer *stricter* when it positively found
+    # a backing mount. `observed_usable: false` on its own means "I looked and saw
+    # nothing", which for a destination that is a plain directory says nothing true
+    # about the storage - and treating it as authoritative refused every campaign
+    # whose destination is an ordinary directory rather than a mount point.
+    dest_obs = mounts.get("destination") or {}
+    if campaign_obj.destination.identity is not None:
+        backing = (dest_obs.get("observation") or {}).get("backing_mount_point")
+        if backing:
+            if dest_obs.get("observed_usable") is False:
+                blockers.append("destination_path_absent")
+        elif campaign_obj.destination.mounted is False:
+            blockers.append("destination_not_mounted")
     if is_locked(campaign_obj.destination.logical.canonical):
         blockers.append("destination_locked_by_another_campaign")
     if acknowledgment_required and not args.i_have_stopped_the_sync_service:
@@ -1422,6 +1517,7 @@ _HANDLERS = {
     "preflight": cmd_preflight,
     "hash": cmd_hash,
     "stage": cmd_stage,
+    "declare-destination": cmd_declare_destination,
     "execute": cmd_execute,
     "release-source": cmd_release_source,
 }

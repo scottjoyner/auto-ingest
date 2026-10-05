@@ -418,6 +418,37 @@ def _ends_unterminated(path: Path) -> bool:
         return False
 
 
+def accounted_keys_in_ledger(ledger: Path) -> int:
+    """Distinct keys this ledger records as accounted for at the destination.
+
+    Copied, or already present and therefore deliberately skipped. Failed rows do
+    not count: a pass that tried three objects and failed all three has accounted
+    for nothing.
+    """
+    if not ledger.is_file():
+        return 0
+    import json
+
+    keys = set()
+    try:
+        text = ledger.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict) and row.get("status") in (COPIED, SKIPPED):
+            key = row.get("key")
+            if key:
+                keys.add(str(key))
+    return len(keys)
+
+
 def to_evidence(result: CopyProgress, plan: Optional[CopyPlan] = None,
                 *, planned: Optional[int] = None) -> Dict[str, Any]:
     """The evidence fragment an execution pass contributes.
@@ -431,8 +462,19 @@ def to_evidence(result: CopyProgress, plan: Optional[CopyPlan] = None,
     object was handled, not merely when this run's subset was.
     """
     total_planned = planned if planned is not None else (plan.total_objects if plan else result.planned)
-    handled_total = (result.copied + result.skipped_present + result.skipped_verified
-                     + result.failed)
+    handled_this_pass = (result.copied + result.skipped_present + result.skipped_verified
+                         + result.failed)
+    # Cumulative, and read from the ledger rather than summed from this pass.
+    #
+    # A re-run over an already-copied set has nothing to do: plan_copy returns no
+    # `absent` keys because the destination ledger already proves them, so
+    # handled_this_pass is 0. Writing that over a real count regressed a finished
+    # campaign from VERIFIED back to COPYING on every re-run - the same
+    # delta-vs-cumulative bug that `verified_bytes` had.
+    #
+    # max(), not a sum: the ledger already contains this pass's own rows.
+    handled_total = max(handled_this_pass, accounted_keys_in_ledger(
+        Path(result.ledger_path)))
     return {
         "copy": {
             "planned": {"files": total_planned},

@@ -144,12 +144,35 @@ def evaluate_release(
             "set CUSTODY_DESTINATION_ROOT or custody.destination_root",
         ))
 
-    if policy.require_mounted_destination and dest.resolved and dest.mounted is False:
-        blockers.append(Blocker(
-            "destination_not_mounted",
-            f"{dest.host_path} is not a mount point",
-            "mount the canonical destination before release",
-        ))
+    if policy.require_mounted_destination and dest.resolved:
+        # Two different problems, and only one of them is new.
+        #
+        # A destination backed by a mount but missing its subdirectory is a real
+        # and new case - /nas mounted, /nas/fileserver/headcam absent - and
+        # releasing a source on the strength of the mount alone would delete the
+        # only copy of a recording nothing can write to.
+        #
+        # "Nothing backs this path at all" is the original destination_not_mounted,
+        # and it is judged the original way: against the declaration, because that
+        # is all there is when no observation exists. Judging it against an
+        # observation instead makes every hermetic fixture with a synthetic
+        # destination fail, which says nothing true about the storage.
+        backing = dst.observed_backing_mount_point
+        if backing:
+            if dst.observed_usable is False:
+                blockers.append(Blocker(
+                    "destination_path_absent",
+                    f"{dest.host_path} is not present on {backing}, which is "
+                    f"mounted",
+                    "create the destination directory, or point the campaign at "
+                    "one that exists, before release",
+                ))
+        elif dest.mounted is False:
+            blockers.append(Blocker(
+                "destination_not_mounted",
+                f"{dest.host_path} is not a mount point",
+                "mount the canonical destination before release",
+            ))
 
     if policy.require_destination_identity:
         match = match_identity(dest.identity, dst.observed_identity)

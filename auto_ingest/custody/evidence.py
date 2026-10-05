@@ -291,6 +291,18 @@ class DestinationEvidence:
     verification_complete: bool = False
     unverified_present_files: int = 0
     observed_identity: Optional[StorageIdentity] = None
+    #: Whether the destination path was observed reachable on a mounted
+    #: filesystem. Distinct from the identity being proven: a share can be mounted
+    #: and its archive subdirectory absent, and releasing the source on the
+    #: strength of the mount alone would delete the only copy of a recording that
+    #: nothing can currently write to. ``None`` when not observed.
+    observed_usable: Optional[bool] = None
+    #: The mount that backs the destination path, when one does and the path is
+    #: not the mount point itself. This is what lets the release gate tell
+    #: "nothing backs this destination" apart from "a filesystem backs it, but the
+    #: directory the campaign names is not on it" - two different problems that
+    #: both used to read as destination_not_mounted.
+    observed_backing_mount_point: Optional[str] = None
     error_summary: Tuple[str, ...] = ()
     last_checkpoint: Optional[str] = None
 
@@ -312,6 +324,10 @@ class DestinationEvidence:
                                              "destination.unverified_present_files", c),
             observed_identity=StorageIdentity.from_dict(identity_raw)
             if isinstance(identity_raw, Mapping) else None,
+            observed_usable=(raw["observed_usable"]
+                            if isinstance(raw.get("observed_usable"), bool) else None),
+            observed_backing_mount_point=_opt_str(
+                raw.get("observed_backing_mount_point")),
             error_summary=_bounded(raw.get("error_summary"), limit),
             last_checkpoint=_opt_str(raw.get("last_checkpoint")),
         )
@@ -323,6 +339,8 @@ class DestinationEvidence:
             "last_checkpoint": self.last_checkpoint,
             "observed_identity": (self.observed_identity.to_dict()
                                   if self.observed_identity else None),
+            "observed_backing_mount_point": self.observed_backing_mount_point,
+            "observed_usable": self.observed_usable,
             "unverified_present_files": self.unverified_present_files,
             "verification_complete": self.verification_complete,
             "verification_started": self.verification_started,
