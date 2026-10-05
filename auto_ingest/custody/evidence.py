@@ -137,12 +137,20 @@ class InventoryEvidence:
     started: bool = False
     roots: Tuple[str, ...] = ()
     observed_at: Optional[str] = None
+    #: Which card the walk actually ran on. Without it the declared
+    #: ``campaign.source.card.filesystem_uuid`` - the authoritative identity - has
+    #: nothing to be checked against, so the cross-check can only ever report
+    #: `unprovable`. It lives here rather than in a new block because the
+    #: inventory is the source-side evidence: recording which storage it was taken
+    #: from is what makes it attributable.
+    observed_identity: Optional[StorageIdentity] = None
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any], limit: int,
                   coerced: Optional[List[str]] = None) -> "InventoryEvidence":
         raw = raw or {}
         c = coerced if coerced is not None else []
+        identity_raw = raw.get("observed_identity")
         return cls(
             discovered_files=_count(raw.get("discovered_files", raw.get("files")),
                                     "inventory.discovered_files", c),
@@ -153,6 +161,8 @@ class InventoryEvidence:
             started=_bool(raw.get("started", raw.get("complete") or raw.get("verified"))),
             roots=_bounded(raw.get("roots"), limit),
             observed_at=_opt_str(raw.get("observed_at")),
+            observed_identity=(StorageIdentity.from_dict(identity_raw)
+                               if isinstance(identity_raw, Mapping) else None),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -160,6 +170,8 @@ class InventoryEvidence:
             "complete": self.complete,
             "discovered_bytes": self.discovered_bytes,
             "discovered_files": self.discovered_files,
+            "observed_identity": (self.observed_identity.to_dict()
+                                  if self.observed_identity else None),
             "roots": list(self.roots),
             "started": self.started,
             "verified": self.verified,

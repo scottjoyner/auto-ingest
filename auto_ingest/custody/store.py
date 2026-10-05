@@ -310,13 +310,28 @@ def load_status(
     *,
     observed_card: Optional[CardIdentity] = None,
 ) -> CampaignStatus:
-    """Load a bundle and compute its status. Read-only, no mutation."""
+    """Load a bundle and compute its status. Read-only, no mutation.
+
+    With no explicit ``observed_card``, the card recorded in
+    ``inventory.observed_identity`` is used, so the "is this the card the
+    campaign is for?" comparison is available to every consumer rather than only
+    to callers that remember to pass one. Passing ``None`` explicitly still means
+    "no observation", which is what the fixture tests want.
+    """
     root = Path(bundle)
     campaign = load_campaign(root)
     if policy is None:
         policy = load_policy(load_custody_config())
     evidence = load_evidence(root, policy)
     ledgers = summarize_bundle_ledgers(root, max_error_samples=policy.max_summary_entries)
+    if observed_card is None:
+        seen = evidence.inventory.observed_identity
+        if seen is not None:
+            observed_card = CardIdentity(
+                device=seen.device,
+                filesystem_uuid=seen.filesystem_uuid,
+                label=seen.label,
+            )
     return build_status(campaign, evidence, policy, observed_card=observed_card,
                         ledgers=ledgers)
 

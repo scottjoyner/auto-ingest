@@ -24,6 +24,7 @@ from custody_helpers import (
     write_bundle,
 )
 
+from auto_ingest.custody import CampaignEvidence
 from auto_ingest.custody.capacity import (
     DEFAULT_HEADROOM_MIN_BYTES,
     capacity_report,
@@ -33,6 +34,7 @@ from auto_ingest.custody.capacity import (
 from auto_ingest.custody.cli import EXIT_GATE_CLOSED, EXIT_OK, main
 from auto_ingest.custody.mounts import (
     MountObservation,
+    observations_to_evidence,
     observe_campaign,
     observe_mount,
     observe_storage_identity,
@@ -556,3 +558,104 @@ def test_observers_never_touch_the_source_filesystem():
     assert "os.walk" not in inspect.getsource(mounts)
     for banned in ("os.remove", "os.rename", "os.mkdir", "os.rmdir", "os.link"):
         assert banned not in inspect.getsource(mounts)
+
+
+# ---------------------------------------------------------------------------
+# The SOURCE card identity (found by hashing a real card)
+# ---------------------------------------------------------------------------
+# observe_campaign resolved a StorageIdentity for the destination only, so the
+# source's filesystem UUID was never observed. `campaign.source.card` calls that
+# UUID the authoritative card identity, so there was nothing to check it
+# against: the comparison could only ever report `unprovable`, and the question
+# "is this the card the campaign is for?" had no answer on this host.
+
+def test_observe_campaign_records_an_identity_for_the_source_too(tmp_path):
+    by_uuid = tmp_path / "by-uuid"
+    by_uuid.mkdir()
+    device = tmp_path / "dev" / "sdb1"
+    device.parent.mkdir()
+    device.write_bytes(b"")
+    (by_uuid / "4620-180F").symlink_to(device)
+    mounts = fake_mounts(
+        tmp_path,
+        f"{device} /media/scott/UNTITLED vfat ro,relatime 0 0\n",
+    )
+    camp = campaign(mount_point="/media/scott/UNTITLED")
+    report = observe_campaign(camp, mounts_path=mounts, by_uuid_dir=by_uuid)
+    # The source block must carry a resolved identity, not just mount flags.
+    identity = report["source"]["identity"]
+    assert identity is not None, "source identity was never observed"
+    assert identity["filesystem_uuid"] == "4620-180F"
+    assert identity["filesystem_type"] == "vfat"
+
+
+def test_the_observed_source_identity_reaches_evidence_under_inventory():
+    """It must land somewhere import_evidence will keep.
+
+    `merge_evidence_documents` only overlays allowlisted block names, so a
+    fragment keyed to anything else is silently dropped - which is what would
+    have happened to a `source` block that does not exist in the schema. The
+    inventory is the source-side evidence, so that is where it belongs.
+    """
+    report = {
+        "source": {"identity": {"filesystem_uuid": "4620-180F", "device": "/dev/sdb1"}},
+        "destination": {"identity": {"filesystem_uuid": "DEST-1"}},
+    }
+    fragment = observations_to_evidence(report)
+    assert fragment["inventory"] == {"observed_identity": report["source"]["identity"]}
+    assert fragment["destination"] == {"observed_identity": report["destination"]["identity"]}
+
+    from auto_ingest.custody.store import EVIDENCE_BLOCKS, merge_evidence_documents
+    assert "inventory" in EVIDENCE_BLOCKS
+    merged = merge_evidence_documents({}, fragment)
+    assert merged["inventory"]["observed_identity"]["filesystem_uuid"] == "4620-180F"
+
+
+def test_no_observed_source_identity_writes_nothing_rather_than_a_null():
+    """Absent observation stays absent; it is not recorded as a fact."""
+    fragment = observations_to_evidence({"source": {"identity": None},
+                                         "destination": {"identity": None}})
+    assert fragment == {}
+
+
+def test_the_recorded_card_identity_answers_the_cross_check(tmp_path):
+    """The whole point: a confirmed card, and a rejected wrong one.
+
+    Without the recorded source identity `CardIdentity.compare` has nothing to
+    consult and returns `unprovable`. With it, the declared UUID is either
+    confirmed or reported as a conflict - and a wrong card must never read as a
+    match.
+
+    Exercised through `load_status`, because that is where the derivation from
+    evidence lives; `build_status` takes the observation as an argument.
+    """
+    from auto_ingest.custody import CardIdentity
+    from auto_ingest.custody.store import load_status
+
+    camp = campaign()
+    raw = evidence().to_dict()
+    raw["inventory"]["observed_identity"] = {
+        "filesystem_uuid": camp.source.card.filesystem_uuid,
+        "device": camp.source.card.device,
+    }
+    bundle = write_bundle(tmp_path / "b", camp, CampaignEvidence.from_dict(raw))
+
+    confirmed = load_status(bundle, strict_policy())
+    assert confirmed.observed_card_matches is True
+    assert confirmed.card_unprovable_fields == ()
+
+    wrong = CardIdentity(device=camp.source.card.device,
+                         filesystem_uuid="SOME-OTHER-CARD")
+    rejected = load_status(bundle, strict_policy(), observed_card=wrong)
+    assert rejected.observed_card_matches is False
+    assert "filesystem_uuid" in rejected.card_conflict_fields
+
+
+def test_without_the_recorded_identity_the_cross_check_is_unprovable(tmp_path):
+    """The failure this fixes, pinned: no observation means no confirmation."""
+    from auto_ingest.custody.store import load_status
+
+    bundle = write_bundle(tmp_path / "b", campaign(), evidence())
+    status = load_status(bundle, strict_policy())
+    assert status.observed_card_matches is None
+    assert status.card_unprovable_fields == ()

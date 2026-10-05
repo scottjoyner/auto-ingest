@@ -266,24 +266,34 @@ def _policy_from_file(path: Optional[str]) -> Optional[CustodyPolicy]:
     return CustodyPolicy.from_dict(raw.get("policy", raw))
 
 
+_UNSET = object()
+
+
 def _observed(args) -> Optional[CardIdentity]:
-    # Subcommands that do not take --observed-* simply have nothing to compare.
-    if not (getattr(args, "observed_device", None)
-            or getattr(args, "observed_uuid", None)
-            or getattr(args, "observed_label", None)):
-        return None
-    return CardIdentity(
-        device=args.observed_device,
-        filesystem_uuid=args.observed_uuid,
-        label=args.observed_label,
-    )
+    """The card the operator just observed, or ``_UNSET`` to mean "none given".
+
+    The sentinel matters. Returning ``None`` here looked identical to "the caller
+    supplied nothing", but ``load_status`` reads ``None`` as *no observation*
+    while an omitted argument means *use the identity recorded in evidence*. So
+    `custody status` without ``--observed-*`` silently discarded the evidence and
+    reported the comparison as `None` - the card identity was recorded and then
+    ignored. Only an explicit empty ``--observed-*`` triple should suppress it.
+    """
+    device = getattr(args, "observed_device", None)
+    uuid = getattr(args, "observed_uuid", None)
+    label = getattr(args, "observed_label", None)
+    if not (device or uuid or label):
+        return _UNSET
+    return CardIdentity(device=device, filesystem_uuid=uuid, label=label)
 
 
 def _status(args) -> CampaignStatus:
     policy = _policy_from_file(getattr(args, "policy_file", None))
     if policy is None:
         policy = load_policy(load_custody_config())
-    return load_status(args.bundle, policy, observed_card=_observed(args))
+    observed = _observed(args)
+    return load_status(args.bundle, policy,
+                       observed_card=None if observed is _UNSET else observed)
 
 
 def cmd_status(args) -> int:
