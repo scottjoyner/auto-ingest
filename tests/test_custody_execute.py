@@ -571,3 +571,124 @@ def test_execute_help_is_reachable():
     assert proc.returncode == 0, proc.stderr
     assert "--execute" in proc.stdout
     assert "--i-have-stopped-the-sync-service" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# Staged copy: source key != destination path
+# ---------------------------------------------------------------------------
+# The ingest pipeline finds media by filename suffix, so a card copied verbatim
+# lands where nothing will look for it. `staging.py` computes the layout; these
+# tests prove the executor actually honours it, while leaving the pre-staging
+# identity behaviour untouched.
+
+def _staged_campaign(tmp_path):
+    """A card-shaped source tree plus a bundle hashed over it."""
+    src = tmp_path / "card"
+    dest = tmp_path / "dest"
+    src.mkdir()
+    dest.mkdir()
+    names = {
+        "DCIM/2026_0829_123850_F.MP4": b"F" * 1024,
+        "DCIM/2026_0829_123850_R.MP4": b"R" * 1024,
+        "yolo/2024_0713_112243_F_YOLOv8n.csv": b"k,v\n" * 8,
+    }
+    for rel, data in names.items():
+        p = src / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    bundle = tmp_path / "b"
+    from auto_ingest.custody.hashing import hash_source
+
+    keys = {rel: src / rel for rel in names}
+    hash_source(bundle, keys)
+    return bundle, src, dest, names
+
+
+def test_execute_copy_lands_objects_where_staging_said(tmp_path):
+    from auto_ingest.custody.executor import execute_copy
+    from auto_ingest.custody.staging import plan_staging
+
+    bundle, src, dest, names = _staged_campaign(tmp_path)
+    plan = plan_staging(keys := list(names))
+    assert plan.collisions() == ()
+    mapping = {o.source_key: o.destination_key for o in plan.staged}
+
+    result = execute_copy(bundle, src, dest, tuple(keys), staged_destinations=mapping)
+
+    assert result.failed == 0, result.errors
+    assert result.copied == len(keys)
+    for source_key, destination_key in mapping.items():
+        landed = dest / destination_key
+        assert landed.is_file(), f"{source_key} did not land at {destination_key}"
+        assert landed.read_bytes() == names[source_key]
+    # the source tree is untouched: staging must never move media off the card
+    for rel in names:
+        assert (src / rel).is_file()
+
+
+def test_the_source_layout_does_not_survive_at_the_destination(tmp_path):
+    """The point of staging: DCIM/ and yolo/ must not be recreated."""
+    from auto_ingest.custody.executor import execute_copy
+    from auto_ingest.custody.staging import plan_staging
+
+    bundle, src, dest, names = _staged_campaign(tmp_path)
+    plan = plan_staging(list(names))
+    execute_copy(bundle, src, dest, tuple(names),
+                 staged_destinations={o.source_key: o.destination_key
+                                       for o in plan.staged})
+    assert not (dest / "DCIM").exists()
+    assert not (dest / "yolo").exists()
+    assert (dest / "2026" / "08" / "29" / "2026_0829_123850_F.MP4").is_file()
+
+
+def test_the_copy_ledger_records_where_each_object_landed(tmp_path):
+    """Reconciliation joins on the source key, but an operator needs the path."""
+    import json
+
+    from auto_ingest.custody.executor import execute_copy
+    from auto_ingest.custody.staging import plan_staging
+
+    bundle, src, dest, names = _staged_campaign(tmp_path)
+    plan = plan_staging(list(names))
+    execute_copy(bundle, src, dest, tuple(names),
+                 staged_destinations={o.source_key: o.destination_key
+                                       for o in plan.staged})
+    records = [json.loads(line)
+               for line in (bundle / "ledgers" / "copy.jsonl").read_text().splitlines()]
+    assert records
+    for record in records:
+        assert record["key"] in names, "the source key is what reconciliation joins on"
+        assert record["destination_key"], "but the landed path must be recorded too"
+        assert (dest / record["destination_key"]).is_file()
+
+
+def test_plan_copy_judges_presence_at_the_staged_path(tmp_path):
+    """An object already staged must not be re-planned just because its
+    source key is absent from the destination."""
+    from auto_ingest.custody.executor import plan_copy
+    from auto_ingest.custody.staging import plan_staging
+
+    bundle, src, dest, names = _staged_campaign(tmp_path)
+    plan = plan_staging(list(names))
+    mapping = {o.source_key: o.destination_key for o in plan.staged}
+
+    unstage = plan_copy(bundle, dest, mapping)
+    assert unstage.absent == tuple(sorted(names)), "nothing staged yet"
+
+    landed = dest / mapping["DCIM/2026_0829_123850_F.MP4"]
+    landed.parent.mkdir(parents=True, exist_ok=True)
+    landed.write_bytes(names["DCIM/2026_0829_123850_F.MP4"])
+
+    restaged = plan_copy(bundle, dest, mapping)
+    assert "DCIM/2026_0829_123850_F.MP4" in restaged.present_unverified
+    assert "DCIM/2026_0829_123850_F.MP4" not in restaged.absent
+
+
+def test_without_a_map_the_destination_path_is_the_source_key(tmp_path):
+    """The pre-staging behaviour must be untouched by default."""
+    bundle, src, dest, names = _staged_campaign(tmp_path)
+    from auto_ingest.custody.executor import execute_copy
+
+    result = execute_copy(bundle, src, dest, tuple(names))
+    assert result.copied == len(names)
+    assert (dest / "DCIM" / "2026_0829_123850_F.MP4").is_file()

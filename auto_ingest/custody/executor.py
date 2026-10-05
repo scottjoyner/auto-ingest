@@ -44,7 +44,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from .hashing import CHUNK_BYTES, DEFAULT_ALGORITHM
 from .ledger import (
@@ -160,7 +160,8 @@ def _keys_by_status(path: Path, statuses: Tuple[str, ...]) -> Dict[str, str]:
     return out
 
 
-def plan_copy(bundle: str | Path, destination_root: str | Path) -> CopyPlan:
+def plan_copy(bundle: str | Path, destination_root: str | Path,
+              staged_destinations: Optional[Mapping[str, str]] = None) -> CopyPlan:
     """Derive the copy set from the hash and destination ledgers. Read-only.
 
     Three buckets, and the copy set is exactly the third:
@@ -179,10 +180,17 @@ def plan_copy(bundle: str | Path, destination_root: str | Path) -> CopyPlan:
     present_unverified: List[str] = []
     absent: List[str] = []
     root = Path(destination_root)
+    # Staging may place an object at a different relative path than its source
+    # key, so presence is judged against where the bytes would actually LAND.
+    # Absent the map this is the identity, and every existing behaviour is
+    # unchanged.
+    def dest_key(key: str) -> str:
+        return (staged_destinations or {}).get(key, key)
+
     for key in sorted(source):
         if key in dest:
             already_verified.append(key)
-        elif (root / key).exists():
+        elif (root / dest_key(key)).exists():
             present_unverified.append(key)
         else:
             absent.append(key)
@@ -278,12 +286,21 @@ def execute_copy(
     limit: Optional[int] = None,
     max_errors: int = MAX_SUMMARY_ENTRIES,
     progress: Optional[Callable[[CopyProgress], None]] = None,
+    staged_destinations: Optional[Mapping[str, str]] = None,
 ) -> CopyProgress:
     """Copy exactly ``keys`` to the destination and record every outcome.
 
     Never overwrites an existing destination object. Never touches the source
     beyond reading it. Appends one ``copy.jsonl`` record per object, so an
     interrupted pass is resumable and auditable rather than invisible.
+
+    ``staged_destinations`` maps a source key to the relative path it should
+    occupy at the destination - what ``auto_ingest.custody.staging`` computes to
+    put media where the ingest pipeline's suffix-based discovery will find it.
+    Omitted, the destination path equals the source key, which is the pre-staging
+    behaviour. Each ledger record keeps the source ``key`` AND adds
+    ``destination_key``, because reconciliation joins on the source key and an
+    operator reading the ledger needs to know where the bytes went.
     """
     ledgers = ledger_dir(bundle)
     ledgers.mkdir(parents=True, exist_ok=True)
@@ -318,16 +335,19 @@ def execute_copy(
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
+        staged = staged_destinations or {}
         for key in keys:
             refresh_marker()
             if limit is not None and copied + skipped + failed >= limit:
                 break
-            target = _safe_join(dest_root, key)
+            landed = staged.get(key, key)
+            target = _safe_join(dest_root, landed)
             if target is None:
                 failed += 1
                 if len(errors) < max_errors:
                     errors.append(f"{key}:key_escapes_destination")
                 emit({"key": key, "status": FAILED,
+                      "destination_key": landed,
                       "detail": "key_escapes_destination"}, handle)
                 continue
             source = src_root / key
@@ -338,17 +358,19 @@ def execute_copy(
                 if len(errors) < max_errors:
                     errors.append(f"{key}:{exc.strerror or exc}")
                 emit({"key": key, "status": FAILED,
-                      "detail": str(exc)}, handle)
+                      "destination_key": landed, "detail": str(exc)}, handle)
                 continue
             if written < 0:
                 # Already present: never overwrite. Verification decides.
                 skipped += 1
-                emit({"key": key, "status": SKIPPED, "path": str(target)}, handle)
+                emit({"key": key, "status": SKIPPED, "path": str(target),
+                      "destination_key": landed}, handle)
                 continue
             copied += 1
             copied_bytes += written
             emit({"key": key, "status": COPIED, "digest": digest,
-                  "size": written, "path": str(target)}, handle)
+                  "size": written, "path": str(target),
+                  "destination_key": landed}, handle)
             if progress is not None:
                 progress(CopyProgress(
                     ledger_path=str(ledger), copied=copied, copied_bytes=copied_bytes,
