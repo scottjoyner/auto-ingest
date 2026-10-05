@@ -410,3 +410,67 @@ def test_verification_never_imports_a_copy_primitive():
 @pytest.mark.parametrize("status", [MISSING, MISMATCH, FAILED])
 def test_no_failure_status_counts_as_custody(status):
     assert status != VERIFIED
+
+
+# ---------------------------------------------------------------------------
+# Cumulative verification evidence
+# ---------------------------------------------------------------------------
+
+def test_verified_bytes_are_cumulative_like_the_file_count(tmp_path):
+    """A resume must not write `verified_files: 3` beside `verified_bytes: 0`.
+
+    The count has always been cumulative, precisely so a resumed pass cannot
+    regress a campaign out of custody. The byte total did not, so it did exactly
+    that - and the state machine read `files: 3` as custody proven while the
+    evidence said no bytes had ever been verified.
+    """
+    import json
+
+    from auto_ingest.custody.verify import to_evidence, verify_destination
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.MP4").write_bytes(b"a" * 100)
+    (src / "b.MP4").write_bytes(b"b" * 250)
+    bundle = tmp_path / "b"
+
+    from auto_ingest.custody.hashing import hash_source
+
+    hash_source(bundle, {"a.MP4": src / "a.MP4", "b.MP4": src / "b.MP4"})
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "a.MP4").write_bytes(b"a" * 100)
+    (dest / "b.MP4").write_bytes(b"b" * 250)
+
+    first = verify_destination(bundle, dest)
+    evidence = to_evidence(first)
+    assert evidence["destination"]["verified_files"] == 2
+    assert evidence["destination"]["verified_bytes"] == 350
+
+    # Second pass: everything already proven, nothing re-examined.
+    second = verify_destination(bundle, dest)
+    assert second.verified == 0 and second.verified_bytes == 0
+    resumed = to_evidence(second)
+    assert resumed["destination"]["verified_files"] == 2
+    assert resumed["destination"]["verified_bytes"] == 350, (
+        "the byte total regressed to 0 while the file count stayed at 2"
+    )
+
+    # The ledger, not the in-memory result, is the thing that carries this.
+    rows = [json.loads(line) for line
+            in (bundle / "ledgers" / "destination.jsonl").read_text().splitlines()]
+    from auto_ingest.custody.verify import VERIFIED
+
+    verified_rows = [r for r in rows if r["status"] == VERIFIED]
+    assert sum(r.get("size", 0) for r in verified_rows) == 350
+    assert len(verified_rows) == 2
+
+    # A recheck re-proves the same objects and appends more rows for them. The
+    # total must count each object once, not each time it was proven.
+    third = verify_destination(bundle, dest, recheck=True)
+    assert to_evidence(third)["destination"]["verified_bytes"] == 350
+    rows = [json.loads(line) for line
+            in (bundle / "ledgers" / "destination.jsonl").read_text().splitlines()
+            if line.strip()]
+    assert len([r for r in rows if r["status"] == VERIFIED]) == 4, "rows accumulate"
+    assert to_evidence(third)["destination"]["verified_bytes"] == 350, "the total does not"

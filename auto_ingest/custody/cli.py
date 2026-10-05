@@ -132,6 +132,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="refused: verification execution is separately authorized")
     pv.add_argument("--destination", default=None,
                     help="destination root to verify against (default: campaign's)")
+    pv.add_argument("--flat", action="store_true",
+                    help="verify against source-relative paths, ignoring any "
+                         "recorded staged layout")
     pv.add_argument("--recheck", action="store_true",
                     help="re-verify objects already proven at the destination")
     pv.add_argument("--algorithm", default=DEFAULT_ALGORITHM)
@@ -383,9 +386,14 @@ def cmd_verify(args) -> int:
         destination = status.campaign.destination.host_path
     result = None
     if destination:
+        # Same recorded layout `execute` used. Verifying at the source-relative
+        # path would report every staged copy as MISSING, which reads as a failed
+        # transfer rather than a lookup in the wrong place.
         result = verify_destination(
             args.bundle, destination, algorithm=args.algorithm,
             limit=args.limit, recheck=args.recheck,
+            staged_destinations=(None if getattr(args, "flat", False)
+                                 else read_staged_ledger(args.bundle)),
         )
         payload["verification"] = result.to_dict()
         payload["objects_to_verify"] = result.checked
