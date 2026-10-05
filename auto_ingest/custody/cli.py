@@ -66,6 +66,7 @@ from .policy import CustodyPolicy
 from .release_source import execute_release
 from .release_source import to_evidence as release_evidence
 from .report import plan_json, plan_text, status_json, status_text
+from .staging import ORPHAN_PREFIX
 from .store import (
     BundleError,
     CampaignCreationError,
@@ -211,7 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--media-only", dest="include_sidecars",
                     action="store_false",
                     help="stage media only, leaving sidecars for a later pass")
-    ps.add_argument("--orphan-prefix", default=None,
+    ps.add_argument("--orphan-prefix", default=ORPHAN_PREFIX, metavar="PREFIX",
                     help="namespace for detection files whose clip is not on "
                          "the card (default: orphaned-detections; pass an empty "
                          "string to leave them in the date tree)")
