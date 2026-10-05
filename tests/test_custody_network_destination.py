@@ -217,7 +217,8 @@ def test_observations_to_evidence_carries_usable_alongside_identity(tmp_path):
 # Declaring the destination
 # ---------------------------------------------------------------------------
 
-def _bundle_with_destination(tmp_path, *, identity=None, mounted=True):
+def _bundle_with_destination(tmp_path, *, identity=None, mounted=True,
+                             host_path="default"):
     """A campaign on disk, so the declaration command has something to write to."""
     import json
 
@@ -232,7 +233,9 @@ def _bundle_with_destination(tmp_path, *, identity=None, mounted=True):
         "destination": {
             "logical": {"name": "primary", "relative_path": "fileserver/headcam",
                         "canonical": "primary:fileserver/headcam"},
-            "host_path": str(tmp_path / "dest"), "resolved_from": "test",
+            "host_path": (str(tmp_path / "dest") if host_path == "default"
+                          else host_path),
+            "resolved_from": "test",
             "mounted": mounted,
             "identity": identity.to_dict() if identity else None,
         },
@@ -256,16 +259,22 @@ def test_declaring_records_the_identity_in_the_campaign(tmp_path):
 
 def test_a_declaration_is_not_silently_re_pointed(tmp_path):
     """Otherwise a wrong mount could satisfy the gate by being declared after the
-    fact."""
+    fact.
+
+    The existing value is kept and the attempt reported, rather than the whole call
+    being refused: a caller supplying both a host path and an identity should not
+    lose the path because the identity was already on file.
+    """
+    import json
+
     from auto_ingest.custody.destination import StorageIdentity
     from auto_ingest.custody.store import declare_destination_identity
 
     bundle = _bundle_with_destination(
         tmp_path, identity=StorageIdentity(device="//host/share"))
     again = declare_destination_identity(bundle, StorageIdentity(device="//other/thing"))
-    assert again["declared"] is False
-    assert again["reason"] == "already_declared"
-    import json
+    assert again["kept"]["identity"]["device"] == "//host/share"
+    assert again["applied_identity"] is None
     written = json.loads((bundle / "campaign.json").read_text())
     assert written["destination"]["identity"]["device"] == "//host/share", (
         "the original declaration must survive a refused re-point")
@@ -281,7 +290,7 @@ def test_replacing_a_declaration_is_possible_but_explicit(tmp_path):
         tmp_path, identity=StorageIdentity(device="//host/share"))
     result = declare_destination_identity(
         bundle, StorageIdentity(device="//other/thing"), replace=True)
-    assert result["declared"] is True and result["replaced"] is True
+    assert result["declared"] is True and result["applied_identity"] is not None
     written = json.loads((bundle / "campaign.json").read_text())
     assert written["destination"]["identity"]["device"] == "//other/thing"
 
@@ -336,3 +345,47 @@ def test_a_plain_directory_destination_is_not_treated_as_unmounted(tmp_path):
     blockers = evaluate_release(campaign, evidence, CustodyPolicy()).blockers
     assert "destination_not_mounted" not in [b.code for b in blockers]
     assert "destination_path_absent" not in [b.code for b in blockers]
+
+
+def test_an_unset_destination_path_can_be_completed(tmp_path):
+    """A campaign created with no destination env var resolves host_path to null,
+    and the gate then refuses for want of a *path* rather than for want of an
+    identity. Nothing was ever written anywhere, so filling it in is not
+    re-pointing."""
+    import json
+
+    from auto_ingest.custody.destination import StorageIdentity
+    from auto_ingest.custody.store import declare_destination_identity
+
+    bundle = _bundle_with_destination(tmp_path, identity=None, host_path=None)
+    assert json.loads((bundle / "campaign.json").read_text())[
+        "destination"]["host_path"] is None
+    result = declare_destination_identity(
+        bundle, StorageIdentity(device="//h/s"), host_path="/nas/fileserver/dashcam")
+    assert result["applied_host_path"] == "/nas/fileserver/dashcam"
+    assert result["applied_identity"]["device"] == "//h/s"
+
+
+def test_a_set_destination_path_is_not_re_pointed_without_replace(tmp_path):
+    """This is the dangerous one: bytes already written to one archive while the
+    campaign claims another."""
+    from auto_ingest.custody.store import declare_destination_identity
+
+    bundle = _bundle_with_destination(tmp_path)
+    result = declare_destination_identity(bundle, host_path="/somewhere/else")
+    assert result["applied_host_path"] is None
+    assert result["kept"]["host_path"].endswith("/dest")
+
+
+def test_declaring_nothing_is_a_usage_error_not_a_silent_no_op(tmp_path, capsys):
+    import contextlib
+    import io
+
+    from auto_ingest.custody.cli import EXIT_USAGE, main
+
+    bundle = _bundle_with_destination(tmp_path)
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = main(["declare-destination", "--bundle", str(bundle), "--apply"])
+    assert code == EXIT_USAGE
+    assert "nothing to record" in err.getvalue()

@@ -228,6 +228,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="filesystem UUID; block filesystems only")
     pd.add_argument("--filesystem-type", default=None,
                     help="e.g. ext4, vfat, cifs")
+    pd.add_argument("--host-path", default=None,
+                    help="where the destination is on this host; completes a "
+                         "campaign created with no destination configured")
     pd.add_argument("--replace", action="store_true",
                     help="overwrite an existing declaration")
     pd.add_argument("--apply", action="store_true",
@@ -1054,11 +1057,17 @@ def cmd_declare_destination(args) -> int:
         filesystem_uuid=args.filesystem_uuid or None,
         device=args.device or None,
         filesystem_type=args.filesystem_type or None,
-    )
-    if not (identity.filesystem_uuid or identity.device):
+    ) if (args.device or args.filesystem_uuid or args.filesystem_type) else None
+    if identity is None and not args.host_path:
         sys.stderr.write(
-            "custody: declare a --device or a --filesystem-uuid; with neither "
-            "there is nothing for the gate to compare\n"
+            "custody: declare something - a --device, a --filesystem-uuid, or a "
+            "--host-path; with none of them there is nothing to record\n"
+        )
+        return EXIT_USAGE
+    if identity is not None and not (identity.filesystem_uuid or identity.device):
+        sys.stderr.write(
+            "custody: a --filesystem-type alone is not identity; give a --device "
+            "or a --filesystem-uuid the gate can compare\n"
         )
         return EXIT_USAGE
     if args.filesystem_uuid and not args.device:
@@ -1071,26 +1080,35 @@ def cmd_declare_destination(args) -> int:
 
     if not args.apply:
         print(json.dumps({"mode": "dry_run", "applied": False,
-                          "identity": identity.to_dict()},
+                          "identity": identity.to_dict() if identity else None,
+                          "host_path": args.host_path},
                          sort_keys=True, indent=2, default=str))
         return EXIT_OK
 
-    result = declare_destination_identity(args.bundle, identity, replace=args.replace)
+    result = declare_destination_identity(args.bundle, identity,
+                                          host_path=args.host_path,
+                                          replace=args.replace)
     result["applied"] = True
     if not result.get("declared"):
-        sys.stderr.write(
-            f"custody: a destination identity is already declared "
-            f"({result.get('existing')}); refusing to re-point it without "
-            f"--replace\n"
-        )
+        sys.stderr.write(f"custody: nothing to declare ({result.get('reason')})\n")
         print(json.dumps(result, sort_keys=True, indent=2, default=str))
         return EXIT_GATE_CLOSED
+    for field, value in (result.get("kept") or {}).items():
+        # Said out loud: a kept declaration means the request was not honoured,
+        # and silently carrying on would read as success.
+        sys.stderr.write(
+            f"custody: keeping the {field} already declared ({value}); pass "
+            f"--replace to change it\n")
     if args.json:
         print(json.dumps(result, sort_keys=True, indent=2, default=str))
     else:
+        if result.get("identity"):
+            sys.stdout.write(
+                f"identity            {result['identity'].get('device') or ''}"
+                f"{result['identity'].get('filesystem_uuid') or ''}\n")
+        if result.get("host_path"):
+            sys.stdout.write(f"host_path           {result['host_path']}\n")
         sys.stdout.write(
-            f"declared            {result['identity'].get('device') or ''}"
-            f"{result['identity'].get('filesystem_uuid') or ''}\n"
             f"replaced            {str(result.get('replaced', False)).lower()}\n"
             "next                run `custody observe-mount` and re-check status\n"
         )

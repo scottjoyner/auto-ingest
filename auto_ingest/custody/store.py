@@ -243,8 +243,9 @@ def _policy_dict(policy: CustodyPolicy) -> Dict[str, Any]:
 
 def declare_destination_identity(
     bundle: str | Path,
-    identity: StorageIdentity,
+    identity: Optional[StorageIdentity] = None,
     *,
+    host_path: Optional[str] = None,
     replace: bool = False,
 ) -> Dict[str, Any]:
     """Record what the destination storage *is*, as an operator declaration.
@@ -268,23 +269,53 @@ def declare_destination_identity(
     if not path.is_file():
         raise CampaignCreationError(f"no campaign at {path}")
     raw = json.loads(path.read_text(encoding="utf-8"))
-    existing = ((raw.get("destination") or {}).get("identity")) or None
-    if existing and not replace:
-        return {
-            "declared": False,
-            "reason": "already_declared",
-            "existing": existing,
-            "proposed": identity.to_dict(),
-        }
     dest = dict(raw.get("destination") or {})
-    dest["identity"] = identity.to_dict()
+
+    # Two things can be declared, and they are independent: WHERE the destination
+    # is, and WHAT storage it is. A campaign created with no destination env var
+    # resolves host_path to null, and the gate then refuses for want of a path
+    # rather than for want of an identity - so filling one in without the other
+    # leaves the campaign no closer to a decision.
+    if not identity and not host_path:
+        return {"declared": False, "reason": "nothing_to_declare"}
+
+    existing_identity = dest.get("identity") or None
+    existing_path = dest.get("host_path") or None
+
+    # Per field, because the two are independent and a call that supplies both
+    # should not be refused wholesale over one of them. A declaration already on
+    # file is *kept*, not overwritten - that is what makes it a declaration rather
+    # than a value recomputed from whatever is currently mounted.
+    kept: Dict[str, Any] = {}
+    applied_identity = None
+    if identity:
+        if existing_identity and not replace:
+            kept["identity"] = existing_identity
+        else:
+            dest["identity"] = identity.to_dict()
+            applied_identity = identity.to_dict()
+    applied_path = None
+    if host_path:
+        if existing_path and existing_path != host_path and not replace:
+            # Re-pointing a campaign that may already have been written to is how
+            # bytes end up split across two archives with neither ledger complete.
+            # An *unset* path is not this case: there was no destination, so
+            # nothing was written anywhere.
+            kept["host_path"] = existing_path
+        else:
+            dest["host_path"] = host_path
+            applied_path = host_path
+    dest.setdefault("resolved_from", "declared")
     raw["destination"] = dest
     _write_json_atomic(path, raw)
     return {
         "declared": True,
-        "replaced": bool(existing),
-        "identity": identity.to_dict(),
-        "previous": existing,
+        "replaced": bool(applied_identity or applied_path),
+        "applied_identity": applied_identity,
+        "applied_host_path": applied_path,
+        "kept": kept,
+        "identity": dest.get("identity"),
+        "host_path": dest.get("host_path"),
     }
 
 
