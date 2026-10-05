@@ -18,6 +18,8 @@ refuses, because the copy succeeds and the pipeline finds nothing.
 """
 from __future__ import annotations
 
+import datetime
+
 import pytest
 
 from auto_ingest.custody.staging import (
@@ -28,6 +30,7 @@ from auto_ingest.custody.staging import (
     VIDEO_ROLE,
     classify,
     date_directory,
+    date_from_mtime,
     derive_key,
     destination_for,
     in_scope,
@@ -498,3 +501,75 @@ def test_pairing_ignores_per_recording_sidecars():
     ])
     assert plan.pairing()["detections"] == 0
     assert plan.pairing()["clips"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Undated media: the mtime fallback
+# ---------------------------------------------------------------------------
+# A DVR writes MOVI0000.avi with nothing identifying when it was recorded. These
+# three files are the real ones off the card: no creation date in the AVI header,
+# no ID3 chunk, and TAG:date=2010-06-29 identical in all of them because it is
+# the encoder's build stamp. The filesystem mtime is the only date that exists.
+
+def test_undated_media_is_not_staged_unless_the_operator_says_so():
+    """The default matters more than the feature. Inventing a date for footage
+    whose provenance is unknown is a decision, not a fallback."""
+    assert destination_for("VIDEO/MOVI0000.avi").stageable is False
+    assert destination_for("VIDEO/MOVI0000.avi").reason == (
+        "no_YYYY_MMDD_HHMMSS_in_name_or_path")
+
+
+def test_an_mtime_dates_the_group_without_renaming_the_file():
+    mtime = datetime.datetime(2024, 8, 19, 17, 19, tzinfo=datetime.timezone.utc).timestamp()
+    obj = destination_for("VIDEO/MOVI0000.avi", mtime=mtime, allow_mtime_key=True)
+    assert obj.stageable is True
+    assert obj.destination_key == "2024/08/19/MOVI0000.avi"
+    assert obj.key_source == "mtime", "provenance must be recorded, not implied"
+    assert obj.key is None, "no canonical key is claimed for an undated file"
+
+
+def test_a_named_file_never_falls_back_to_its_mtime():
+    """A file that knows its own date must not be re-dated by the filesystem,
+    which on a card records when the copy was written."""
+    mtime = datetime.datetime(1999, 1, 1, tzinfo=datetime.timezone.utc).timestamp()
+    obj = destination_for("DCIM/2026_0829_123850_F.MP4", mtime=mtime,
+                          allow_mtime_key=True)
+    assert obj.destination_key == "2026/08/29/2026_0829_123850_F.MP4"
+    assert obj.key_source == "filename"
+
+
+def test_an_unset_card_clock_is_refused_rather_than_filed_under_1969():
+    """The real card's directories carry 1969-12-31. Filing footage under
+    1969/12/31/ would be a confident, wrong answer."""
+    assert date_from_mtime(0) is None
+    assert date_from_mtime(1) is None
+    assert date_from_mtime(631_152_000 - 1) is None, "just below the floor"
+    # Local, not UTC: this host is UTC-5/-4, so the floor instant is still the
+    # previous evening here. That is the point - the group matches `ls`.
+    local = datetime.datetime.fromtimestamp(631_152_000)
+    assert date_from_mtime(631_152_000) == local.strftime("%Y/%m/%d")
+    assert date_from_mtime(631_152_000) is not None
+
+
+def test_the_mtime_fallback_still_declines_a_non_media_file():
+    mtime = datetime.datetime(2024, 8, 19, tzinfo=datetime.timezone.utc).timestamp()
+    obj = destination_for("overland/locations.json", mtime=mtime, allow_mtime_key=True)
+    assert obj.stageable is False
+    assert obj.reason == "out_of_scope:other"
+
+
+def test_plan_reports_how_many_dates_were_not_camera_written():
+    mtime = datetime.datetime(2024, 8, 19, tzinfo=datetime.timezone.utc).timestamp()
+    plan = plan_staging(
+        ["DCIM/2026_0829_123850_F.MP4", "VIDEO/MOVI0000.avi"],
+        mtimes={"VIDEO/MOVI0000.avi": mtime},
+        allow_mtime_key=True,
+    )
+    assert plan.by_key_source() == {"filename": 1, "mtime": 1}
+    assert plan.collisions() == ()
+
+
+def test_plan_without_the_flag_reports_no_mtime_dates():
+    plan = plan_staging(["VIDEO/MOVI0000.avi"])
+    assert plan.by_key_source() == {}
+    assert len(plan.unstaged) == 1

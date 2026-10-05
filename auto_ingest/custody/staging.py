@@ -127,6 +127,11 @@ class StagedObject:
     recording: Optional[str]
     #: Camera suffix found on the source, e.g. ``_F``. ``None`` when absent.
     camera: Optional[str]
+    #: Where the date came from: ``"filename"``, ``"mtime"``, or ``None`` for an
+    #: unstaged object. Never left implicit - a date taken from the filesystem is
+    #: a weaker claim than one written by the camera, and a plan that cannot say
+    #: which it used cannot be audited.
+    key_source: Optional[str] = None
     #: Why this object cannot be staged. ``None`` when it can.
     reason: Optional[str] = None
 
@@ -139,6 +144,7 @@ class StagedObject:
             "camera": self.camera,
             "destination_key": self.destination_key,
             "key": self.key,
+            "key_source": self.key_source,
             "reason": self.reason,
             "recording": self.recording,
             "role": self.role,
@@ -276,8 +282,32 @@ def staged_filename(stem: str, suffix: str, role: str, *,
     return f"{stem}{suffix}"
 
 
+def date_from_mtime(epoch_seconds: float) -> Optional[str]:
+    """``YYYY/MM/DD`` from a filesystem mtime, in local time.
+
+    Local, not UTC, and deliberately: it matches the existing date-directory
+    convention, which is built from the digits in a filename and therefore local.
+    A group that agrees with ``ls`` is worth more than one that is off by a day.
+
+    Returns ``None`` for a timestamp outside a plausible recording era rather than
+    guessing. A vfat card whose clock was never set yields mtimes near the epoch -
+    the real card's directories carry 1969-12-31 - and filing footage under
+    ``1969/12/31/`` would be a confident, wrong answer.
+    """
+    import datetime
+
+    # 1990-01-01 .. 2100-01-01: wide enough for any real camera, narrow enough
+    # to reject an unset clock.
+    if not 631_152_000 <= epoch_seconds <= 4_102_444_800:
+        return None
+    moment = datetime.datetime.fromtimestamp(epoch_seconds)
+    return f"{moment.year:04d}/{moment.month:02d}/{moment.day:02d}"
+
+
 def destination_for(source_key: str, *, role: Optional[str] = None,
-                    include_sidecars: bool = True) -> StagedObject:
+                    include_sidecars: bool = True,
+                    mtime: Optional[float] = None,
+                    allow_mtime_key: bool = False) -> StagedObject:
     """Plan one source object's place in the pipeline layout.
 
     Pure: reads nothing, writes nothing, and never invents a key. An object with
@@ -306,6 +336,27 @@ def destination_for(source_key: str, *, role: Optional[str] = None,
             reason=f"out_of_scope:{role}",
         )
     key = derive_key(source_key)
+    key_source = "filename" if key is not None else None
+    if key is None and allow_mtime_key and mtime is not None:
+        # A DVR writes MOVI0000.avi with nothing in the name identifying when it
+        # was recorded. The filesystem mtime is the only date that exists, so it
+        # is used - and the filename is left alone. Embedding the mtime in the
+        # name would give the pipeline a proper canonical key, but it would also
+        # dress a last-written time up as a camera-written one, in a name
+        # designed to be quoted as provenance. Grouping by date and saying so is
+        # weaker and true.
+        date_dir = date_from_mtime(mtime)
+        if date_dir is not None:
+            return StagedObject(
+                source_key=source_key,
+                destination_key=f"{date_dir}/{name}",
+                role=role,
+                key=None,
+                recording=None,
+                camera=None,
+                key_source="mtime",
+                reason=None,
+            )
     if key is None:
         return StagedObject(
             source_key=source_key,
@@ -332,6 +383,7 @@ def destination_for(source_key: str, *, role: Optional[str] = None,
         key=key,
         recording=stem,
         camera=camera,
+        key_source=key_source,
         reason=None,
     )
 
@@ -363,6 +415,19 @@ class StagingPlan:
         counts: Dict[str, int] = {}
         for obj in self.staged:
             counts[obj.role] = counts.get(obj.role, 0) + 1
+        return counts
+
+    def by_key_source(self) -> Dict[str, int]:
+        """How each staged object's date was arrived at.
+
+        Split out because "keyed from mtime" is a weaker claim than "keyed from
+        the camera's own filename", and a plan that reported 3,558 staged files
+        without that distinction would be overstating what it knows.
+        """
+        counts: Dict[str, int] = {}
+        for obj in self.staged:
+            source = obj.key_source or "unknown"
+            counts[source] = counts.get(source, 0) + 1
         return counts
 
     def pairing(self) -> Dict[str, int]:
@@ -436,7 +501,9 @@ class StagingPlan:
 
 
 def plan_staging(source_keys: Iterable[str], *,
-                 include_sidecars: bool = True) -> StagingPlan:
+                 include_sidecars: bool = True,
+                 mtimes: Optional[Dict[str, float]] = None,
+                 allow_mtime_key: bool = False) -> StagingPlan:
     """Plan the whole card in one pass.
 
     ``source_keys`` are POSIX-relative paths under the source root, in any order.
@@ -446,7 +513,9 @@ def plan_staging(source_keys: Iterable[str], *,
     staged: List[StagedObject] = []
     unstaged: List[StagedObject] = []
     for source_key in sorted(source_keys):
-        obj = destination_for(source_key, include_sidecars=include_sidecars)
+        obj = destination_for(source_key, include_sidecars=include_sidecars,
+                              mtime=(mtimes or {}).get(source_key),
+                              allow_mtime_key=allow_mtime_key)
         (staged if obj.stageable else unstaged).append(obj)
     return StagingPlan(staged=tuple(staged), unstaged=tuple(unstaged))
 

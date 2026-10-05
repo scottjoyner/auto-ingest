@@ -207,6 +207,11 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--media-only", dest="include_sidecars",
                     action="store_false",
                     help="stage media only, leaving sidecars for a later pass")
+    ps.add_argument("--key-undated-by-mtime", action="store_true",
+                    help="for media with no timestamp in its name, group it by "
+                         "filesystem mtime and keep the original filename. Off by "
+                         "default: an mtime is a last-written time, not a "
+                         "camera-written one, so using it is an operator decision.")
 
     pr = common(sub.add_parser(
         "release-source",
@@ -843,7 +848,20 @@ def cmd_stage(args) -> int:
         args.root = [campaign_obj.source.mount_point]
 
     walked_paths, excluded_by_policy = _discover_keys(args.root, None, policy)
-    plan = plan_staging(walked_paths, include_sidecars=args.include_sidecars)
+
+    # mtimes are collected only when asked for: stat() on 60k objects to derive a
+    # date nobody wanted is wasted work, and the whole card is walked here.
+    mtimes = None
+    if args.key_undated_by_mtime:
+        mtimes = {}
+        for key, path in walked_paths.items():
+            try:
+                mtimes[key] = path.stat().st_mtime
+            except OSError:
+                continue
+    plan = plan_staging(walked_paths, include_sidecars=args.include_sidecars,
+                        mtimes=mtimes,
+                        allow_mtime_key=args.key_undated_by_mtime)
     mapping = {o.source_key: o.destination_key for o in plan.staged}
 
     # Hash only what will be staged, and hash it from its SOURCE path. Hashing
@@ -868,6 +886,7 @@ def cmd_stage(args) -> int:
         "staged": len(plan.staged),
         "unstaged": len(plan.unstaged),
         "by_role": plan.by_role(),
+        "by_key_source": plan.by_key_source(),
         "unstaged_by_reason": plan.by_reason(),
         "destination_collisions": list(plan.collisions()),
         "pairing": plan.pairing(),
@@ -883,6 +902,14 @@ def cmd_stage(args) -> int:
     # Recorded, not recomputed later. `execute` reads this.
     staged_path = write_staged_ledger(args.bundle, plan)
     payload["staged_ledger"] = str(staged_path)
+
+    from_mtime = plan.by_key_source().get("mtime", 0)
+    if from_mtime:
+        sys.stderr.write(
+            f"custody: {from_mtime} object(s) have no timestamp in their name and "
+            f"were grouped by filesystem mtime, not by a camera-written date. "
+            f"Their filenames are unchanged; the date is a last-written time.\n"
+        )
 
     collisions = plan.collisions()
     if args.json:
