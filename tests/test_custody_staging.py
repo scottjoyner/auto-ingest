@@ -37,8 +37,13 @@ from auto_ingest.custody.staging import (
     plan_staging,
     split_camera,
 )
-from auto_ingest.ingest import transcripts as _tx
-from auto_ingest.ingest.transcripts import canonicalize_key
+
+# From `.discovery`, not from `transcripts`: these are the same objects
+# (transcripts re-exports them), but discovery imports no ML stack, so this guard
+# against the real naming contract runs on a machine with no torch and no GPU
+# image - which is exactly where a custody test belongs.
+from auto_ingest.ingest import discovery as _tx
+from auto_ingest.ingest.discovery import canonicalize_key
 
 # ---------------------------------------------------------------------------
 # Classification
