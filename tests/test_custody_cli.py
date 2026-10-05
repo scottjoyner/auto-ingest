@@ -549,8 +549,8 @@ def test_stage_refuses_to_continue_when_two_objects_claim_one_path(
     # Two different source keys that stage onto the same destination path.
     monkeypatch.setattr(
         staging, "staged_filename",
-        lambda stem, suffix, role: ("2026/08/29/same.mp4" if role == "video"
-                                    else f"{stem}{suffix}"))
+        lambda stem, suffix, role, **kw: ("2026/08/29/same.mp4" if role == "video"
+                                          else f"{stem}{suffix}"))
     code, _, err = run(["stage", "--bundle", _bundle(tmp_path), "--root", str(root),
                         "--policy-file", str(_policy_file(tmp_path)),
                         "--json"], capsys)

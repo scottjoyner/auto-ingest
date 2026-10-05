@@ -34,6 +34,8 @@ from auto_ingest.custody.staging import (
     plan_staging,
     split_camera,
 )
+from auto_ingest.ingest import transcripts as _tx
+from auto_ingest.ingest.transcripts import canonicalize_key
 
 # ---------------------------------------------------------------------------
 # Classification
@@ -156,9 +158,13 @@ def test_media_keeps_its_camera_suffix():
 
 
 def test_per_recording_sidecars_drop_the_camera_suffix():
-    """One transcript per moment, shared by both cameras."""
+    """One transcript per moment, shared by both cameras.
+
+    The camera goes; the model tag stays. Dropping the tag as well is the bug
+    this file kept catching - see test_renaming_a_sidecar_into_the_pipeline_is_what_would_break_it.
+    """
     obj = destination_for("2025_0202_171732_F_medium_transcription.txt")
-    assert obj.destination_key == "2025/02/02/2025_0202_171732.txt"
+    assert obj.destination_key == "2025/02/02/2025_0202_171732_medium_transcription.txt"
     assert obj.camera == "_F"
     assert obj.recording == "2025_0202_171732"
 
@@ -262,3 +268,168 @@ def test_a_plan_with_no_objects_is_empty_not_an_error():
     plan = plan_staging(())
     assert plan.staged == () and plan.unstaged == ()
     assert plan.collisions() == ()
+
+
+# ---------------------------------------------------------------------------
+# The destination names must satisfy the pipeline's own patterns
+# ---------------------------------------------------------------------------
+# Asserting against a hand-copied regex proves only that the copy of the regex
+# agrees with itself. These import the real patterns, so a change to discovery
+# that invalidates the layout fails here rather than silently at ingest time.
+
+#: canonicalize_key converts a local filename stamp to UTC, so this is NOT
+#: "2025_0202_171732" and asserting that would encode a bug. Derived from the
+#: pipeline itself rather than hardcoded, so it stays true under any TZ.
+CANONICAL_1717 = canonicalize_key("2025_0202_171732", "2025/02/02/2025_0202_171732_medium_transcription.txt")
+
+
+def _key_as_the_pipeline_computes_it(landed: str) -> str:
+    """Reproduce what discovery does after a pattern matches.
+
+    transcripts.py strips the matched tail and hands the remainder plus the full
+    path to canonicalize_key. Calling it with the whole filename instead would
+    test a call site that does not exist.
+    """
+    import posixpath
+
+    name = posixpath.basename(landed)
+    for pattern in (_tx.PAT_TRANS_JSON_TXT, _tx.PAT_ENTITIES, _tx.PAT_RTTM,
+                    _tx.PAT_META_CSV, _tx.PAT_TRANS_CSV):
+        m = pattern.search(name)
+        if m:
+            return canonicalize_key(name[:m.start()], landed)
+    raise AssertionError(f"no discovery pattern matched {landed}")
+
+
+def test_staged_sidecars_are_matched_by_the_real_discovery_patterns():
+    cases = {
+        "2025_0202_171732_medium_transcription.txt": _tx.PAT_TRANS_JSON_TXT,
+        "2025_0202_171732_transcription.csv": _tx.PAT_TRANS_CSV,
+        "2025_0202_171732_speakers.rttm": _tx.PAT_RTTM,
+        "2025_0202_171732_metadata.csv": _tx.PAT_META_CSV,
+        "2025_0202_171732_transcription_entities.csv": _tx.PAT_ENTITIES,
+        "2026_0829_123850_F.MP4": _tx.PAT_MEDIA,
+    }
+    for source_key, pattern in cases.items():
+        landed = destination_for(source_key).destination_key
+        assert landed, source_key
+        assert pattern.search(landed), (
+            f"{source_key} stages to {landed}, which "
+            f"{pattern.pattern} does not match"
+        )
+
+
+def test_a_staged_sidecar_still_yields_a_canonical_key():
+    """Discovery finds the file, then canonicalize_key must rebuild its key from
+    the staged location - otherwise the sidecar joins nothing."""
+    for source_key in ("2025_0202_171732_medium_transcription.txt",
+                       "2025_0202_171732_speakers.rttm"):
+        landed = destination_for(source_key).destination_key
+        assert _key_as_the_pipeline_computes_it(landed) == CANONICAL_1717
+
+
+def test_renaming_a_sidecar_into_the_pipeline_is_what_would_break_it():
+    """The bug this guards, stated as a negative test.
+
+    Dropping the marker is not a cosmetic choice: `2025_0202_171732.txt` matches
+    nothing at all, and every model that transcribed one moment would claim the
+    same path.
+    """
+    broken = "2026/02/02/2025_0202_171732.txt"
+    assert not _tx.PAT_TRANS_JSON_TXT.search(broken)
+    assert not _tx.PAT_RTTM.search(broken)
+    assert not _tx.PAT_META_CSV.search(broken)
+
+
+def test_per_recording_sidecars_of_both_cameras_share_one_transcript():
+    front = destination_for("2025_0202_171732_F_medium_transcription.txt")
+    rear = destination_for("2025_0202_171732_R_medium_transcription.txt")
+    assert front.destination_key == rear.destination_key
+    assert front.camera == "_F" and rear.camera == "_R"
+    assert _tx.PAT_TRANS_JSON_TXT.search(front.destination_key)
+
+
+def test_per_clip_objects_of_both_cameras_never_share_a_path():
+    """The complementary rule: the detector opens {stem}.MP4 by exact name."""
+    pairs = [
+        ("DCIM/Movie/2026_0829_123850_F.MP4", "yolo/2026_0829_123850_F_YOLOv8n.csv"),
+        ("DCIM/Movie/2026_0829_123850_R.MP4", "yolo/2026_0829_123850_R_YOLOv8n.csv"),
+    ]
+    for media, det in pairs:
+        m = destination_for(media).destination_key
+        d = destination_for(det).destination_key
+        assert m != d
+        stem = d.rsplit("_YOLOv8n", 1)[0]
+        assert stem.endswith(m.rsplit(".", 1)[0]), (
+            f"{d} does not resolve to {m} via the detector's rsplit"
+        )
+
+
+def test_a_path_that_merely_looks_like_a_date_yields_no_key():
+    """`2026/08/29` is not a moment. Folding the directory into a key would
+    invent `2026_0829_29` and stage four unrelated clips onto one path."""
+    obj = destination_for("2026/08/29/plain-name.MP4")
+    assert obj.stageable is False
+    assert obj.reason == "no_YYYY_MMDD_HHMMSS_in_name_or_path"
+
+
+def test_the_date_directory_is_the_one_canonicalize_key_looks_for():
+    """It re-searches the full path for /YYYY/MM/DD/ when the name has no
+    stamp (transcripts.py:236-242), so the layout feeds its date lookup."""
+    landed = destination_for("2026_0829_123850_F.MP4").destination_key
+    assert landed.startswith("2026/08/29/")
+    import re
+    assert re.search(r"/(?P<Y>\d{4})/(?P<M>\d{2})/(?P<D>\d{2})/", "/" + landed)
+
+
+def test_the_model_tag_is_what_distinguishes_two_transcriptions():
+    """Two models, one moment: distinct files, and both discoverable."""
+    small = destination_for("2025_0202_171732_small_transcription.txt")
+    large = destination_for("2025_0202_171732_large-v2_transcription.txt")
+    assert small.destination_key != large.destination_key
+    for obj in (small, large):
+        assert _tx.PAT_TRANS_JSON_TXT.search(obj.destination_key)
+        assert _key_as_the_pipeline_computes_it(obj.destination_key) == CANONICAL_1717
+
+
+# ---------------------------------------------------------------------------
+# Local directory, UTC key
+# ---------------------------------------------------------------------------
+
+def _media_key_as_discovery_computes_it(landed: str) -> str:
+    """Mirror transcripts.py:856, which hands canonicalize_key the basename with
+    its extension removed."""
+    import posixpath
+    return canonicalize_key(posixpath.basename(landed).rsplit(".", 1)[0], landed)
+
+
+def test_the_date_directory_is_local_while_the_canonical_key_is_utc():
+    """An evening clip lands in its local date directory and keys to the next
+    UTC day. Both halves are deliberate and neither is a bug.
+
+    Staging groups by the digits the operator sees on the card, so 23:30 on the
+    29th is filed under the 29th. `canonicalize_key` converts a local stamp to UTC
+    (:222-224), so the same clip joins the rest of the corpus as the 30th.
+
+    This is safe because staging always keeps the whole stamp in the filename.
+    Discovery therefore parses the NAME and never consults the directory - the
+    `/YYYY/MM/DD/` fallback at transcripts.py:236-242 exists for names that carry
+    no stamp at all, which staging never produces.
+    """
+    media = destination_for("DCIM/2026_0829_233033_F.MP4")
+    detection = destination_for("yolo/2026_0829_233033_F_YOLOv8n.csv")
+
+    assert media.destination_key.startswith("2026/08/29/"), "filed by local date"
+    key = _media_key_as_discovery_computes_it(media.destination_key)
+    assert key.startswith("2026_0830"), f"keyed in UTC, got {key}"
+    assert _media_key_as_discovery_computes_it(detection.destination_key) == key, (
+        "media and its CSV must still join despite the local/UTC split"
+    )
+
+
+def test_a_bodily_date_directory_never_becomes_the_key():
+    """`2026/08/29` is not a moment. Folding it in would stage a whole day onto
+    one path and collide it with every other clip from that day."""
+    obj = destination_for("2026/08/29/clip.MP4")
+    assert obj.stageable is False
+    assert obj.reason == "no_YYYY_MMDD_HHMMSS_in_name_or_path"

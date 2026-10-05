@@ -231,22 +231,43 @@ def date_directory(key: str) -> str:
     return f"{year}/{month}/{day}"
 
 
-def staged_filename(stem: str, suffix: str, role: str) -> str:
+def staged_filename(stem: str, suffix: str, role: str, *,
+                    key: Optional[str] = None, base: Optional[str] = None) -> str:
     """The basename this object takes in the pipeline layout.
 
     Two different rules, because the two subsystems pair differently:
 
-    * **Per-recording** sidecars drop the camera suffix, so ``_F`` and ``_R`` of
-      one moment share a transcript.
-    * **Per-clip** objects keep it. The dashcam detector recovers a stem with
-      ``rsplit("_YOLOv8n", 1)`` and then opens ``{stem}.MP4`` by exact name
-      (``yolo_embeddings.py:1695-1697``). Stripping the suffix there would point
-      both cameras' CSVs at one file - a silent collision, which is why
+    * **Per-clip** objects are named from the key. The dashcam detector recovers a
+      stem with ``rsplit("_YOLOv8n", 1)`` and then opens ``{stem}.MP4`` by exact
+      name (``yolo_embeddings.py:1695-1697``), so the camera suffix must survive:
+      stripping it would point both cameras' CSVs at one file, which is why
       `StagingPlan.collisions` exists to surface this class rather than resolve
       it.
+    * **Per-recording** sidecars are named from the source, minus the camera
+      suffix, so ``_F`` and ``_R`` of one moment share a transcript - and the rest
+      of the name is kept exactly as it was.
+
+    That last clause is the whole point, and getting it wrong is invisible from
+    the destination alone. The pipeline finds sidecars by their tails, not their
+    stems: ``_([^_]+)_transcription.txt``, ``_speakers.rttm``, ``_metadata.csv``,
+    ``_transcription_entities.csv`` (``transcripts.py:94-99``). Renaming
+    ``2025_0202_171732_medium_transcription.txt`` to ``2025_0202_171732.txt``
+    lands the file perfectly and makes it undiscoverable, because the model tag
+      *is* the handle. Worse, it is a collision waiting to happen: every model
+      that transcribed one moment would land on the same path.
+
+    So the suffix is rewritten - camera removed - and nothing else is touched.
+    When the key came from the path rather than the basename there is no prefix
+    to rewrite, and the name is kept verbatim.
     """
     if role == DETECTION_CSV_ROLE:
         return f"{stem}_YOLOv8n.csv"
+    if role in PER_RECORDING_ROLES and key and base:
+        # `base` is the source basename without its extension. Rewriting only the
+        # key prefix leaves every marker after it in place.
+        if base.startswith(key):
+            return f"{stem}{base[len(key):]}{suffix}"
+        return f"{base}{suffix}"
     return f"{stem}{suffix}"
 
 
@@ -260,7 +281,10 @@ def destination_for(source_key: str, *, role: Optional[str] = None,
     """
     import posixpath
 
-    role = role or classify(posixpath.basename(source_key))
+    name = posixpath.basename(source_key)
+    stem_only, _, _ = name.rpartition(".")
+    base = stem_only if "." in name else name
+    role = role or classify(name)
     # Scope is judged BEFORE the key. A Python file in overland/ has no
     # timestamp and never will, so "no key" describes a problem that does not
     # exist while hiding the one that does: it is not pipeline content at all.
@@ -289,12 +313,13 @@ def destination_for(source_key: str, *, role: Optional[str] = None,
         )
 
     stem, camera = split_camera(key)
-    # Per-clip roles keep the camera suffix; per-recording roles drop it.
-    name_stem = stem if role in PER_RECORDING_ROLES else key
-    name = posixpath.basename(source_key)
     _, dot, ext = name.rpartition(".")
     suffix = f".{ext}" if dot else ""
-    destination = f"{date_directory(key)}/{staged_filename(name_stem, suffix, role)}"
+    # Per-clip roles keep the camera suffix; per-recording roles drop it. Both
+    # then have their marker-bearing tail preserved (see staged_filename).
+    name_stem = stem if role in PER_RECORDING_ROLES else key
+    destination = (f"{date_directory(key)}/"
+                   f"{staged_filename(name_stem, suffix, role, key=key, base=base)}")
     return StagedObject(
         source_key=source_key,
         destination_key=destination,
