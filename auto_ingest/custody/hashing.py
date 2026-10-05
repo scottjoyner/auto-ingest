@@ -88,13 +88,28 @@ What the model still gets wrong
 Unicode's simple uppercase mappings plus the shipped full-uppercase for every
 character where the two agree. Stated precisely:
 
-* **Turkish locales.** Windows upcases ``i`` to ``U+0130 İ`` in a Turkish
-  locale, which would make ``i.mp4`` and ``İ.mp4`` one name. Neither fold here
-  equates them, because the tables are locale-invariant. That pair is a real,
-  documented blind spot, and it is the one blind spot in the Turkish range.
-* **No normalisation.** NFC and NFD spellings of one name are distinct code-point
-  sequences and are reported as distinct, which is correct for exFAT and wrong for
-  APFS. It needs a normalisation pass of its own, not a guess inside a case fold.
+* **Turkish locale collation is deliberately NOT modelled, because it is not a
+  collision.** Windows maps ``i`` to ``U+0130 İ`` under a Turkish locale, so
+  Explorer *sorts and displays* ``i.mp4`` beside ``İ.mp4``. But that is display
+  collation; the **on-disk** upcase table is locale-invariant, and it maps both
+  ``i`` (U+0069) and ``ı`` (U+0131) to ``U+0049 I`` while leaving ``İ``
+  (U+0130) mapped to itself. So on the actual destination ``i.mp4`` and
+  ``İ.mp4`` are two genuinely different files, and reporting them as a
+  collision would be a false positive - a blocker on a real corpus for no
+  on-disk ambiguity. The locale-equivalent pair, ``ILKAY``/``ılkay``, *is*
+  reported, because there the upcase table really does equate them.
+  Measured on this repository's corpus: 67,644 card filenames and 332
+  destination filenames, zero non-ASCII, so the Turkish range does not arise
+  here at all.
+* **No NFC/NFD normalisation, deliberately.** NFC and NFD spellings of one name
+  are distinct code-point sequences and are reported as distinct. That is
+  **correct for the actual destination** - exFAT and SMB2 store the bytes and
+  compare them through the upcase table, so the two spellings are two files -
+  and wrong only for APFS, which normalises to NFD on write. Folding them here
+  would block every campaign containing a decomposed accented filename against a
+  destination that has no such problem. Same measurement: zero non-ASCII
+  filenames on the card or at the destination. If this host ever targets APFS,
+  that is a separate, deliberate pass - not a guess inside a case fold.
 * **One code point in, one out.** Every character folds to exactly one character,
   verified across all of Unicode, because that is what a one-to-one table does.
 * **Unknown tables are unknowable.** A future exFAT revision, or a filesystem
@@ -930,6 +945,13 @@ def to_evidence(result: HashProgress, *, algorithm: str = DEFAULT_ALGORITHM,
         known = result.hashed + result.skipped_existing
         fragment["inventory"] = {
             "discovered_files": known,
+            # Cumulative for the same reason as hash.verified_files above: a
+            # resumed pass measures the skipped bytes from the ledger it resumed
+            # from, so this is the total across every pass, not this pass's delta.
+            # It was previously absent entirely, which left a resumed campaign
+            # claiming 67,644 files and ZERO bytes - and capacity.py:85 scales
+            # its requirement by discovered_bytes, so the whole copy looked free.
+            "discovered_bytes": result.bytes_read + result.bytes_skipped,
             # Only claim a complete inventory when the pass actually covered
             # everything it walked; a --limit probe leaves it open.
             "complete": result.complete and known == discovered,

@@ -150,3 +150,34 @@ def test_card_01_json_status_contract_keys():
     assert data["source_release_allowed"] is False
     assert data["next_safe_action"] == "reconcile_destination"
     assert json.loads(json.dumps(data)) == data
+
+
+def test_the_fixture_byte_counts_are_physically_possible():
+    """A fixture must not claim more bytes than the volume it models.
+
+    This fixture's file count (67,644) matches a read-only walk of the real card
+    exactly. Its byte count did not: it read 412885402112, which exceeds the
+    card's entire capacity (255,773,278,208 bytes) and is 4.38x the sum of the
+    file sizes - so it was an estimate, not an observation.
+
+    It never caused a wrong decision, because the destination has room either
+    way. But a fixture that overstates its subject by 4.4x is a poor rehearsal,
+    and a future capacity test built on it would start from a fiction. The guard
+    is the cheap invariant: the claimed bytes must fit the volume.
+    """
+    import json
+    from pathlib import Path
+
+    bundle = Path(__file__).resolve().parent / "fixtures" / "custody" / "card-01"
+    evidence = json.loads((bundle / "evidence.json").read_text(encoding="utf-8"))
+
+    claimed = evidence["inventory"]["discovered_bytes"]
+    # The card this fixture models, as reported by stat -f at the time of writing.
+    volume_bytes = 255_773_278_208
+
+    assert claimed <= volume_bytes, (
+        f"fixture claims {claimed:,} bytes but the volume it models holds only "
+        f"{volume_bytes:,}; a file sum cannot exceed the filesystem")
+    # And it must agree with the copy/hash evidence rather than drift from it.
+    assert evidence["hash"]["verified_bytes"] == claimed
+    assert evidence["copy"]["planned"]["bytes"] == claimed

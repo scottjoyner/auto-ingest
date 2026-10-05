@@ -189,16 +189,18 @@ def _read_kg_state() -> bytes | None:
     return KG_STATE.read_bytes() if KG_STATE.exists() else None
 
 
-def _load_watchdog(env_state_file: Path | None):
-    """Load a fresh copy of the watchdog with its state file aimed elsewhere."""
-    if env_state_file is None:
-        os.environ.pop("KG_HEALTH_STATE_FILE", None)
-    else:
-        os.environ["KG_HEALTH_STATE_FILE"] = str(env_state_file)
-    try:
-        return _load_from_path(KG_WATCHDOG, "kg_health_watchdog_hygiene")
-    finally:
-        os.environ.pop("KG_HEALTH_STATE_FILE", None)
+def _load_watchdog(env_state_file: Path | None, monkeypatch):
+    """Load a fresh copy of the watchdog with its state file aimed elsewhere.
+
+    Takes the monkeypatch fixture so the env change is undone even if the module
+    raises during import. A bare os.environ assignment leaks into every later
+    test, and because STATE_FILE is read at IMPORT time, a leak silently changes
+    a subsequent test's subject rather than failing loudly.
+    """
+    monkeypatch.delenv("KG_HEALTH_STATE_FILE", raising=False)
+    if env_state_file is not None:
+        monkeypatch.setenv("KG_HEALTH_STATE_FILE", str(env_state_file))
+    return _load_from_path(KG_WATCHDOG, "kg_health_watchdog_hygiene")
 
 
 def test_kg_health_watchdog_run_leaves_the_repo_state_file_byte_identical(
@@ -215,7 +217,7 @@ def test_kg_health_watchdog_run_leaves_the_repo_state_file_byte_identical(
     before = _read_kg_state()
 
     monkeypatch.setattr(sys, "argv", ["kg_health_watchdog.py"])
-    kg = _load_watchdog(redirected)
+    kg = _load_watchdog(redirected, monkeypatch)
     assert kg.STATE_FILE == redirected, "the override did not take effect"
 
     driver = _FakeDriver(now=datetime.now(tz=timezone.utc).timestamp())
@@ -233,11 +235,11 @@ def test_kg_health_watchdog_run_leaves_the_repo_state_file_byte_identical(
 def test_kg_health_state_file_default_is_unchanged(tmp_path, monkeypatch):
     """The operator's baseline must keep landing where cron expects it."""
     monkeypatch.delenv("KG_HEALTH_STATE_FILE", raising=False)
-    kg = _load_watchdog(None)
+    kg = _load_watchdog(None, monkeypatch)
     assert kg.STATE_FILE == REPO / "scripts" / ".kg_health_state.json"
 
 
-def test_kg_health_save_state_is_atomic_and_leaves_no_residue(tmp_path):
+def test_kg_health_save_state_is_atomic_and_leaves_no_residue(tmp_path, monkeypatch):
     """A failed write must not truncate the state file or strand a temp file.
 
     save_state() used Path.write_text(), which truncates the target in place: a
@@ -247,7 +249,7 @@ def test_kg_health_save_state_is_atomic_and_leaves_no_residue(tmp_path):
     file on disk is always the previous complete state or the new complete state.
     """
     state = tmp_path / "state.json"
-    kg = _load_watchdog(state)
+    kg = _load_watchdog(state, monkeypatch)
 
     kg.save_state({"emb768_count": 7, "emb768_time": 1.0})
     assert json.loads(state.read_text()) == {"emb768_count": 7, "emb768_time": 1.0}
@@ -261,7 +263,7 @@ def test_kg_health_save_state_is_atomic_and_leaves_no_residue(tmp_path):
     assert [p.name for p in tmp_path.iterdir()] == ["state.json"], "temp file stranded"
 
 
-def test_kg_health_save_state_uses_a_unique_temp_name_per_write(tmp_path):
+def test_kg_health_save_state_uses_a_unique_temp_name_per_write(tmp_path, monkeypatch):
     """A fixed ".tmp" suffix is the bug _write_json_atomic exists to avoid.
 
     scripts/neo4j_watchdog.py still has it (see _save_last_action). If the
@@ -269,7 +271,7 @@ def test_kg_health_save_state_uses_a_unique_temp_name_per_write(tmp_path):
     silently lose one update.
     """
     state = tmp_path / "state.json"
-    kg = _load_watchdog(state)
+    kg = _load_watchdog(state, monkeypatch)
 
     seen = []
     real_replace = os.replace
@@ -293,3 +295,38 @@ def test_kg_health_state_file_is_gitignored_as_runtime_state():
         "scripts/.kg_health_state.json is rewritten in full on every watchdog run; "
         "untracked-but-unignored it reappears in git status as an untracked file"
     )
+
+
+def test_runtime_cursors_are_not_tracked():
+    """Runtime state must not be tracked, or every run dirties the tree.
+
+    `.kg_health_state.json` and `.arxiv_kg_cursor.json` are both caches rewritten
+    in full on every run, and nothing but their own watchdog/bridge reads them.
+    Tracked once by accident, they make `git add -A` a way to commit a wall clock.
+    """
+    import subprocess
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    for name in ("scripts/.kg_health_state.json", "scripts/.arxiv_kg_cursor.json"):
+        proc = subprocess.run(["git", "ls-files", "--error-unmatch", name],
+                              cwd=repo, capture_output=True, timeout=30)
+        assert proc.returncode != 0, f"{name} is tracked; it is runtime state"
+        proc = subprocess.run(["git", "check-ignore", "-q", name],
+                              cwd=repo, capture_output=True, timeout=30)
+        assert proc.returncode == 0, f"{name} is not gitignored"
+
+
+def test_the_shared_atomic_helper_is_reachable_as_a_subpackage():
+    """`auto_ingest/util` must be importable and advertised.
+
+    The scripts import `auto_ingest.util.atomic`, but `auto_ingest.__all__`
+    omitted `util`, so the one dependency-free subpackage in the repo was the one
+    a reader could not discover from the package root.
+    """
+    import auto_ingest
+
+    assert "util" in auto_ingest.__all__, (
+        "auto_ingest.__all__ should list util")
+    from auto_ingest.util.atomic import write_json_atomic
+    assert callable(write_json_atomic)

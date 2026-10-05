@@ -55,6 +55,14 @@ jobs:
         run: |
           python -m pytest tests/ -q
 
+      - name: Pytest (auto_ingest/tests/ — the ML-stack-free unit suite)
+        # This directory was previously never run by CI, which is how four tests
+        # sat failing on main for months without anyone noticing - and two of the
+        # bugs they covered were silent data loss. auto_ingest/tests/conftest.py
+        # stubs torch when it is absent, so no ML stack is needed.
+        run: |
+          python -m pytest auto_ingest/tests/ -q
+
       - name: Build venv with moviepy for render/persona tests
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg

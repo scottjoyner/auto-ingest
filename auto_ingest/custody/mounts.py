@@ -217,12 +217,19 @@ def observe_campaign(
     campaign: Any,
     *,
     mounts_path: str | Path = MOUNTS_PATH,
+    by_uuid_dir: str | Path = BY_UUID_DIR,
 ) -> Dict[str, Any]:
     """Observe both ends of a campaign: the source and the destination.
 
     Pure read. The result is a report, not evidence on its own - it carries the
-    observed values next to the declared ones so a mismatch is visible rather
-    than silently resolved in favour of either.
+    observed values next to the declared ones so a mismatch is visible rather than
+    silently resolved in favour of either.
+
+    ``by_uuid_dir`` is overridable so a test can point the UUID lookup at a
+    fixture rather than the host's real ``/dev/disk/by-uuid``. Without it a test
+    asserting on an identity would be asserting on whatever card the machine
+    happens to have plugged in - the same class of bug as a test reading the real
+    mount table.
     """
     table = read_mounts(mounts_path)
     source_point = campaign.source.mount_point
@@ -238,13 +245,17 @@ def observe_campaign(
             "declared_mounted": campaign.destination.mounted,
             "host_path": dest_path,
             "identity": (identity.to_dict()
-                         if (identity := observe_storage_identity(destination)) else None),
+                         if (identity := observe_storage_identity(
+                             destination, by_uuid_dir=by_uuid_dir)) else None),
             "observation": destination.to_dict(),
             "observed_mounted": destination.present,
         },
         "source": {
             "declared_read_only": declared_ro,
             "mount_point": source_point,
+            "identity": (identity.to_dict()
+                         if (identity := observe_storage_identity(
+                             source, by_uuid_dir=by_uuid_dir)) else None),
             "observation": source.to_dict(),
             "observed_read_only": source.read_only,
             "read_only_agrees_with_declaration": source.agrees_with(declared_ro),
@@ -262,12 +273,30 @@ def observations_to_evidence(report: Mapping[str, Any]) -> Dict[str, Any]:
     The destination identity is the important one: without an observed identity
     the release gate stays closed on ``destination_identity_unproven``, so this is
     what turns "the bytes are right" into "the bytes are on the storage we meant".
+
+    The source identity is recorded too. Without it the campaign's declared
+    ``filesystem_uuid`` - the *authoritative* card identity, per CardIdentity -
+    can never be confirmed against anything, so the cross-check reports
+    ``unprovable`` forever and the "is this the card the campaign is for?"
+    question has no answer. Found hashing a real card: ``observe_campaign``
+    resolved an identity for the destination only, so the source UUID was
+    reported as unobservable even though ``uuid_for_device`` resolved it fine
+    from ``/dev/disk/by-uuid``.
+
+    Both go under an ``observed`` key rather than being merged into the declared
+    fields, so importing this can still never turn a claim into a fact.
     """
     destination = report.get("destination") or {}
+    source = report.get("source") or {}
     fragment: Dict[str, Any] = {}
     identity = destination.get("identity")
     if identity:
         fragment["destination"] = {"observed_identity": identity}
+    source_identity = source.get("identity")
+    if source_identity:
+        # Under `inventory`, not a new top-level block: the inventory is the
+        # source-side evidence, and this is what makes it attributable to a card.
+        fragment["inventory"] = {"observed_identity": source_identity}
     return fragment
 
 

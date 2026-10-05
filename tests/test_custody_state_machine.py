@@ -107,9 +107,9 @@ def test_copy_started_and_worker_alive_is_copying():
 # ---------------------------------------------------------------------------
 def test_partial_copy_with_interrupted_worker_is_reconcile_required():
     ev = evidence(
-        inv=inventory(67644, 412_885_402_112, complete=True, verified=True),
-        hsh=hashing(67644, verified_bytes=412_885_402_112, complete=True),
-        cpy=copying(planned_files=67644, planned_bytes=412_885_402_112,
+        inv=inventory(67644, 94_278_672_670, complete=True, verified=True),
+        hsh=hashing(67644, verified_bytes=94_278_672_670, complete=True),
+        cpy=copying(planned_files=67644, planned_bytes=94_278_672_670,
                     started=True, result_complete=False, interrupted=True,
                     ledger_complete=False),
         dst=destination_evidence(verification_started=True, verification_complete=False),

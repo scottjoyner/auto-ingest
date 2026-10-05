@@ -148,3 +148,36 @@ def test_ci_installs_pillow():
     blocks = [b for _, b in run_blocks() if "pip install" in b and "moviepy" not in b]
     for block in blocks:
         assert "Pillow" in block, "a CI environment running pytest lacks Pillow"
+
+
+def test_ci_runs_the_auto_ingest_unit_suite():
+    """`auto_ingest/tests/` must stay in CI.
+
+    It was not run for months, and four tests inside it rotted red without
+    anyone noticing - two of them covering silent data loss (rear-camera clips
+    dropped from vehicle detection, and every YOLO detection dropped at CSV
+    parse time). Nothing about the failure was visible from `tests/` alone.
+
+    So this is not "CI currently passes"; it is that the directory is covered at
+    all. Deleting the step breaks this test.
+    """
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "auto_ingest/tests/" in workflow, (
+        "auto_ingest/tests/ is no longer run by CI")
+    assert "pytest auto_ingest/tests/ -q" in workflow, (
+        "the auto_ingest unit suite must be invoked as its own pytest run")
+
+
+def test_the_auto_ingest_suite_can_run_without_the_ml_stack():
+    """The CI environment installs no torch, so that suite must not need it.
+
+    Guards the reason the suite is runnable there at all: its conftest stubs
+    torch when - and only when - torch is genuinely absent.
+    """
+    conftest = (WORKFLOW.parents[2] / "auto_ingest" / "tests" / "conftest.py")
+    assert conftest.is_file(), "auto_ingest/tests/conftest.py is missing"
+    text = conftest.read_text(encoding="utf-8")
+    assert "_torch_importable" in text, (
+        "the torch stub must be conditional, so a real install is not masked")
+    assert "importorskip" not in text, (
+        "a blanket skip would hide the tests rather than run them")

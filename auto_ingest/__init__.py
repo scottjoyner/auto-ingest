@@ -28,4 +28,4 @@ contract envelope) until the swarm-contracts package is wired in.
 
 from __future__ import annotations
 
-__all__ = ["ingest", "diarize", "dashcam", "content", "outbox", "events"]
+__all__ = ["ingest", "diarize", "dashcam", "content", "outbox", "events", "util"]

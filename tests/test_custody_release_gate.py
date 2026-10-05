@@ -298,3 +298,78 @@ def test_a_fully_verified_campaign_still_passes():
     camp, _ = H.fully_copied_campaign(total_files=3, total_bytes=600)
     result = evaluate_release(camp, ev, CustodyPolicy())
     assert "destination_verification_short" not in {b.code for b in result.blockers}
+
+
+# ---------------------------------------------------------------------------
+# Destination identity must fail closed (found on this host's real share)
+# ---------------------------------------------------------------------------
+# /nas is a CIFS mount: //192.168.1.202/fileserver. It has no block device, so
+# `uuid_for_device` can never supply a filesystem_uuid for it. An operator who
+# recorded a UUID for that share recorded something no observation can confirm -
+# and match_identity used to fall through to the device comparison and report
+# matched=True anyway, presenting an unverifiable claim as a checked one.
+
+def _cifs_shared():
+    from auto_ingest.custody.destination import StorageIdentity
+
+    return StorageIdentity(device="//192.168.1.202/fileserver", filesystem_type="cifs")
+
+
+def test_a_network_share_still_matches_on_device():
+    """The device fallback must keep working, or no CIFS campaign can release."""
+    from auto_ingest.custody.destination import match_identity
+
+    observed = _cifs_shared()
+    declared = StorageIdentity(device="//192.168.1.202/fileserver")
+    result = match_identity(declared, observed)
+    assert result.matched is True
+    assert result.comparable is True
+
+
+def test_a_uuid_the_observation_can_never_supply_is_not_a_match():
+    """Fail closed: a one-sided UUID is unprovable, not satisfied by device."""
+    from auto_ingest.custody.destination import StorageIdentity, match_identity
+
+    observed = _cifs_shared()
+    declared = StorageIdentity(device="//192.168.1.202/fileserver",
+                               filesystem_uuid="FAKE-UUID")
+    result = match_identity(declared, observed)
+    assert result.matched is False, (
+        "a UUID the destination can never report was accepted on the strength of "
+        "a matching device path")
+    assert result.comparable is False
+    assert "unverifiable" in result.reason
+
+
+def test_the_gate_blocks_on_an_unverifiable_destination_uuid(tmp_path):
+    """End to end: the blocker must actually reach the release decision."""
+    import custody_helpers as H
+
+    from auto_ingest.custody import CampaignEvidence
+    from auto_ingest.custody.destination import StorageIdentity
+
+    destination = H.destination(host_path="/nas/fileserver/dashcam", mounted=True,
+                                identity=StorageIdentity(
+                                    device="//192.168.1.202/fileserver",
+                                    filesystem_uuid="FAKE-UUID"))
+    camp = H.campaign(dest=destination)
+    _, ev = H.fully_copied_campaign(total_files=3, total_bytes=600)
+    raw = ev.to_dict()
+    raw["destination"].update({
+        "verification_complete": True,
+        "verification_started": True,
+        "verified_files": 3,
+        "verified_bytes": 600,
+        "observed_identity": _cifs_shared().to_dict(),
+    })
+    result = evaluate_release(camp, CampaignEvidence.from_dict(raw), CustodyPolicy())
+    assert "destination_identity_unproven" in codes(result)
+
+
+def test_equal_uuids_still_match_case_insensitively():
+    """A UUID comparison must stay case-insensitive; FAT/NTFS print upper-case."""
+    from auto_ingest.custody.destination import StorageIdentity, match_identity
+
+    a = StorageIdentity(filesystem_uuid="4620-180F")
+    b = StorageIdentity(filesystem_uuid="4620-180f")
+    assert match_identity(a, b).matched is True

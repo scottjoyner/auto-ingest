@@ -3,7 +3,7 @@
   "observed_at": "2026-10-02T18:20:00Z",
   "inventory": {
     "discovered_files": 67644,
-    "discovered_bytes": 412885402112,
+    "discovered_bytes": 94278672670,
     "complete": true,
     "verified": true,
     "started": true,
@@ -15,7 +15,7 @@
   "hash": {
     "algorithm": "sha256",
     "verified_files": 67644,
-    "verified_bytes": 412885402112,
+    "verified_bytes": 94278672670,
     "errors": 0,
     "complete": true,
     "started": true,
@@ -26,7 +26,7 @@
   "copy": {
     "planned": {
       "files": 67644,
-      "bytes": 412885402112
+      "bytes": 94278672670
     },
     "completed": {
       "files": 0,

@@ -14,7 +14,6 @@ from auto_ingest.shorts import persona
 from auto_ingest.shorts.models import PlannedShort
 
 HAS_MOVIEPY = True
-SMOKE = Path("/tmp/opencode/smoke.mp4")
 try:
     import moviepy  # noqa: F401
 except Exception:
@@ -39,11 +38,13 @@ def test_resolve_persona_variants():
     assert c.source == "video"
 
 
-def test_make_talking_head_unavailable_without_model():
-    # No GPU/model on this host -> PersonaUnavailable, not a crash.
+def test_make_talking_head_unavailable_without_model(tmp_path):
+    # No GPU/model on this host -> PersonaUnavailable, not a crash. Paths under
+    # tmp_path rather than fixed /tmp names, so two concurrent suite runs cannot
+    # collide on the same output file.
     try:
-        persona.make_talking_head(Path("/tmp/x.audio.wav"), Path("/tmp/x.face.jpg"),
-                             Path("/tmp/x.face.mp4"))
+        persona.make_talking_head(tmp_path / "x.audio.wav", tmp_path / "x.face.jpg",
+                             tmp_path / "x.face.mp4")
     except persona.PersonaUnavailable:
         pass
     else:
