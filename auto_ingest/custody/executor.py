@@ -475,6 +475,10 @@ def write_staged_ledger(bundle: str | Path, plan: Any) -> Path:
             "destination_key": obj.destination_key,
             "role": obj.role,
             "key": obj.key,
+            # Provenance of the date, not just its result. A staged path whose
+            # date came from the filesystem is a weaker claim, and the record
+            # that outlives this run has to be able to say so.
+            "key_source": obj.key_source,
             "camera": obj.camera,
         }, sort_keys=True, separators=(",", ":")))
     with open(tmp, "w", encoding="utf-8") as handle:

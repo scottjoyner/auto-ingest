@@ -573,3 +573,25 @@ def test_plan_without_the_flag_reports_no_mtime_dates():
     plan = plan_staging(["VIDEO/MOVI0000.avi"])
     assert plan.by_key_source() == {}
     assert len(plan.unstaged) == 1
+
+
+def test_the_recorded_layout_carries_the_date_provenance(tmp_path):
+    """The record that outlives the run has to distinguish a camera-written date
+    from a filesystem one. Without this the ledger claims a date and not its
+    reliability."""
+    import json
+
+    from auto_ingest.custody.executor import write_staged_ledger
+
+    mtime = datetime.datetime(2024, 8, 19, 17, 19,
+                              tzinfo=datetime.timezone.utc).timestamp()
+    plan = plan_staging(
+        ["DCIM/2026_0829_123850_F.MP4", "VIDEO/MOVI0000.avi"],
+        mtimes={"VIDEO/MOVI0000.avi": mtime},
+        allow_mtime_key=True,
+    )
+    path = write_staged_ledger(tmp_path / "b", plan)
+    rows = {r["source_key"]: r
+            for r in (json.loads(line) for line in path.read_text().splitlines())}
+    assert rows["DCIM/2026_0829_123850_F.MP4"]["key_source"] == "filename"
+    assert rows["VIDEO/MOVI0000.avi"]["key_source"] == "mtime"
