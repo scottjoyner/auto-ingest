@@ -131,6 +131,21 @@ def match_identity(expected: Optional[StorageIdentity],
         if a != b:
             return DestinationMatch(False, f"filesystem_uuid_mismatch:{a}!={b}")
         return DestinationMatch(True, f"filesystem_uuid_match:{a}")
+    # A UUID on one side only is UNPROVABLE, not satisfied by a weaker field.
+    # Network destinations (CIFS/SMB) have no block device, so `uuid_for_device`
+    # can never supply one: an operator who recorded a UUID for such a share
+    # recorded something the observation can never confirm. Falling through to the
+    # device comparison anyway reported `matched=True`, so a claim the system
+    # cannot check was presented as checked. This mirrors CardIdentity.compare's
+    # rule - a field present on one side blocks a match when it is more
+    # authoritative than the deciding field, and a UUID is.
+    if expected.has_uuid != observed.has_uuid:
+        side = "expected" if expected.has_uuid else "observed"
+        return DestinationMatch(
+            False,
+            f"filesystem_uuid_unverifiable:{side}_only",
+            comparable=False,
+        )
     if expected.device and observed.device and expected.device == observed.device:
         return DestinationMatch(True, f"device_match:{expected.device}", comparable=True)
     return DestinationMatch(False, "no_comparable_identity_field", comparable=False)
