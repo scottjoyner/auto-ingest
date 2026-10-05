@@ -48,9 +48,11 @@ from .executor import (
     execute_copy,
     leftover_temp_files,
     plan_copy,
+    write_staged_ledger,
 )
 from .executor import to_evidence as execute_evidence
 from .hashing import DEFAULT_ALGORITHM, hash_source, to_evidence
+from .ledger import read_staged_ledger
 from .lock import (
     campaign_lock,
     clear_active,
@@ -235,6 +237,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="destination root (default: the campaign's host path)")
     pe.add_argument("--execute", action="store_true",
                     help="REQUIRED: without it nothing is copied (dry run)")
+    pe.add_argument("--flat", action="store_true",
+                    help="copy each object to its source-relative path, ignoring "
+                         "any recorded staged layout")
     pe.add_argument("--limit", type=int, default=None,
                     help="stop after N objects (a bounded first pass)")
     pe.add_argument("--apply", action="store_true",
@@ -875,6 +880,10 @@ def cmd_stage(args) -> int:
         payload["applied"] = bool(write_status.get("applied"))
         payload["evidence_result"] = write_status
 
+    # Recorded, not recomputed later. `execute` reads this.
+    staged_path = write_staged_ledger(args.bundle, plan)
+    payload["staged_ledger"] = str(staged_path)
+
     collisions = plan.collisions()
     if args.json:
         print(json.dumps(payload, sort_keys=True, indent=2, default=str))
@@ -1049,15 +1058,25 @@ def cmd_execute(args) -> int:
     # copy rather than the repo, the operator's word is the only evidence
     # available - so there it is a hard gate.
     acknowledgment_required = bool(uncoordinated)
+
+    # The layout `stage` decided, if one was decided. Read from the bundle, never
+    # re-derived: re-deriving here would let a policy edit between the two
+    # commands relocate files with nothing recording the move.
+    staged = None if getattr(args, "flat", False) else read_staged_ledger(args.bundle)
     plan = CopyPlan()
     if destination:
-        plan = plan_copy(args.bundle, destination)
+        plan = plan_copy(args.bundle, destination, staged)
 
     payload = {
         "campaign_id": campaign_obj.campaign_id,
         "state": status.derivation.state.value,
         "source_root": source_root,
         "destination_root": destination,
+        # Which layout the copy below will honour, stated before it runs. The
+        # difference is the difference between an archive the pipeline can read
+        # and a faithful copy of a card it cannot.
+        "layout": "staged" if staged is not None else "source_relative",
+        "staged_objects": len(staged) if staged is not None else 0,
         "plan": plan.to_dict(),
         "leftover_temp_files": list(leftover_temp_files(destination)) if destination else [],
         "uncoordinated_writers": list(uncoordinated),
@@ -1107,12 +1126,13 @@ def cmd_execute(args) -> int:
     set_active()
     try:
         result = execute_copy(args.bundle, source_root, destination, plan.keys,
-                              limit=args.limit)
+                              limit=args.limit, staged_destinations=staged)
     finally:
         lock.release()
         clear_active()
 
     payload["copy"] = result.to_dict()
+    payload["layout"] = "staged" if staged is not None else "source_relative"
     payload["copied"] = result.copied
     payload["executed"] = True
     payload["mode"] = "executed"

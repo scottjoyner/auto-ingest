@@ -243,13 +243,36 @@ def test_no_udev_or_watcher_triggers_are_added_by_this_slice():
 
 
 def test_exactly_four_modules_write_and_nothing_else():
-    """store (evidence), executor (bytes), hashing + verify (their ledgers)."""
+    """store (evidence), executor (bytes + where they land), hashing + verify
+    (their ledgers).
+
+    `executor` grew a second ledger when the staged layout became a recorded
+    decision that `execute` obeys. It is deliberately not a fifth module, and
+    `ledger.py` stays read-only: that module owns formats, not writes. The
+    layout record went where the bytes go, which is where a reader looking for
+    "where was this object told to land" will look first.
+    """
     writers = {
         path.name for path in _module_paths()
         if "os.replace(" in _source(path) or '"w", encoding' in _source(path)
         or '"a", encoding' in _source(path) or '"xb"' in _source(path)
     }
     assert writers == {"store.py", "executor.py", "hashing.py", "verify.py"}, writers
+
+    # hashing and verify append only inside their own bundle's ledgers dir
+    for name in ("hashing.py", "verify.py"):
+        text = _source(CUSTODY_DIR / name)
+        assert "ledger_dir(" in text, name
+        for banned in ("os.remove", "os.rmdir", "shutil", "subprocess"):
+            assert banned not in text, f"{name} references {banned}"
+
+
+def test_the_planner_writes_nothing():
+    """Staging is the module that decides where every byte goes. It must stay a
+    pure function of the source tree, or "stage is read-only" is a claim."""
+    staging = _source(CUSTODY_DIR / "staging.py")
+    for banned in ('open(', "os.replace(", '"w", encoding', '"a", encoding'):
+        assert banned not in staging, f"staging.py references {banned}"
 
     # hashing and verify append only inside their own bundle's ledgers dir
     for name in ("hashing.py", "verify.py"):

@@ -36,6 +36,14 @@ DESTINATION_LEDGER = "destination.jsonl"
 #: destination's filesystem cannot store. Per-file rows live here; the campaign
 #: summary keeps only bounded counters and samples.
 COLLISION_LEDGER = "collisions.jsonl"
+#: The staged layout, written by `custody stage` and read by `custody execute`.
+#:
+#: It is a file rather than something both commands recompute, on purpose. If
+#: `execute` re-derived the layout from the source, then editing the exclusion
+#: policy between the two commands would relocate files with no record of the
+#: decision - and a custody ledger that cannot say where a byte was told to go
+#: cannot answer for it afterwards. Recorded once, consumed once.
+STAGED_LEDGER = "staged.jsonl"
 
 #: Statuses that count as "proven present" on the respective side of the diff.
 SOURCE_VERIFIED_STATUSES = ("verified", "hashed")
@@ -615,3 +623,22 @@ __all__ = [
     "summarize_bundle_ledgers",
     "summarize_ledger",
 ]
+
+
+def read_staged_ledger(bundle: str | Path) -> Optional[Dict[str, str]]:
+    """The recorded ``source_key -> destination_key`` map, or None if absent.
+
+    None means "no layout was decided", which is different from "an empty
+    layout". The caller must not treat them alike: the first means copy source
+    keys verbatim, the second means copy nothing.
+    """
+    path = Path(bundle) / LEDGER_DIRNAME / STAGED_LEDGER
+    if not path.exists():
+        return None
+    mapping: Dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        mapping[row["source_key"]] = row["destination_key"]
+    return mapping

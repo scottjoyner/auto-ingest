@@ -40,6 +40,7 @@ actually streamed, so "copied" means "these bytes were produced and hashed", not
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -51,6 +52,8 @@ from .ledger import (
     COPY_LEDGER,
     DESTINATION_LEDGER,
     HASH_LEDGER,
+    LEDGER_DIRNAME,
+    STAGED_LEDGER,
     ledger_dir,
     read_records,
 )
@@ -449,3 +452,38 @@ __all__ = [
     "stream_copy",
     "to_evidence",
 ]
+
+
+def write_staged_ledger(bundle: str | Path, plan: Any) -> Path:
+    """Record the layout in the campaign bundle, atomically.
+
+    ``custody execute`` reads this rather than re-deriving the layout, so the
+    recorded decision and the copied bytes cannot drift apart. Written whole then
+    replaced: a torn file here would leave ``execute`` copying to paths that were
+    never proposed.
+
+    ``plan`` is a ``custody.staging.StagingPlan``, passed loosely so this module
+    keeps no dependency on the planner that produced it.
+    """
+    ledgers = ledger_dir(bundle)
+    ledgers.mkdir(parents=True, exist_ok=True)
+    path = ledgers / STAGED_LEDGER
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    lines = []
+    for obj in sorted(plan.staged, key=lambda o: o.source_key):
+        lines.append(json.dumps({
+            "source_key": obj.source_key,
+            "destination_key": obj.destination_key,
+            "role": obj.role,
+            "key": obj.key,
+            "camera": obj.camera,
+        }, sort_keys=True, separators=(",", ":")))
+    with open(tmp, "w", encoding="utf-8") as handle:
+        for line in lines:
+            handle.write(line + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    return path
+
+

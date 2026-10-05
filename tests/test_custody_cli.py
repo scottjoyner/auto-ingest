@@ -1,7 +1,10 @@
 """`auto-ingest custody ...` CLI: read-only by default, human and JSON modes."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+from pathlib import Path
 
 import pytest
 from custody_helpers import (
@@ -568,3 +571,116 @@ def test_stage_reports_an_empty_source_without_pretending_to_work(
     assert code == EXIT_OK
     payload = json.loads(out)
     assert payload["walked"] == 0 and payload["staged"] == 0
+
+
+# ---------------------------------------------------------------------------
+# stage decides the layout; execute obeys the record
+# ---------------------------------------------------------------------------
+# The two commands must not each hold their own idea of where a file goes. If
+# they disagreed, the copy ledger would name one path while the bytes sat at
+# another, and reconciliation - which joins on the source key - could not tell.
+
+def _stage(root, bundle, tmp_path):
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        code = _main(["stage", "--bundle", bundle, "--root", str(root),
+                      "--policy-file", str(_policy_file(tmp_path)), "--apply",
+                      "--json"])
+    assert code == EXIT_OK, e.getvalue()
+    return json.loads(o.getvalue())
+
+
+def test_stage_records_the_layout_in_the_bundle(tmp_path):
+    from auto_ingest.custody.ledger import read_staged_ledger
+
+    root = _card(tmp_path)
+    bundle = _bundle(tmp_path)
+    payload = _stage(root, bundle, tmp_path)
+
+    recorded = read_staged_ledger(bundle)
+    assert recorded is not None, "execute would otherwise fall back to card layout"
+    assert len(recorded) == payload["staged"]
+    media = "DCIM/Movie/2026_0829_123850_F.MP4"
+    assert recorded[media] == "2026/08/29/2026_0829_123850_F.MP4"
+    # Nothing source-relative survives in the record.
+    assert not any(v.startswith("DCIM/") or v.startswith("yolo/")
+                   for v in recorded.values())
+
+
+def test_a_bundle_with_no_recorded_layout_reads_as_absent_not_empty(tmp_path):
+    """Absent means "copy source keys verbatim". Empty would mean "copy
+    nothing", and treating them alike silently drops a campaign."""
+    from auto_ingest.custody.ledger import read_staged_ledger
+
+    assert read_staged_ledger(tmp_path / "nothing-here") is None
+
+
+def test_the_recorded_layout_is_replaced_whole_not_appended(tmp_path):
+    """A second, smaller stage must not leave the first stage's paths behind."""
+    from auto_ingest.custody.ledger import read_staged_ledger
+
+    root = _card(tmp_path)
+    bundle = _bundle(tmp_path)
+    _stage(root, bundle, tmp_path)
+    first = read_staged_ledger(bundle)
+
+    (root / "heatmap" / "2026_0829_123850_F.png").unlink()
+    _stage(root, bundle, tmp_path)
+    second = read_staged_ledger(bundle)
+
+    assert second == first, "nothing changed, so the record must be identical"
+    lines = (Path(bundle) / "ledgers" / "staged.jsonl").read_text().splitlines()
+    assert len(lines) == len(second), "no superseded rows left behind"
+
+
+def test_execute_reports_the_layout_it_will_use_before_it_runs(tmp_path):
+    root = _card(tmp_path)
+    bundle = _bundle(tmp_path)
+    payload = _stage(root, bundle, tmp_path)
+
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        _main(["execute", "--bundle", bundle, "--json"])
+    report = json.loads(o.getvalue())
+    assert report["layout"] == "staged", "a recorded layout must be picked up"
+    assert report["staged_objects"] == payload["staged"]
+
+
+def test_flat_ignores_a_recorded_layout_on_purpose(tmp_path):
+    root = _card(tmp_path)
+    bundle = _bundle(tmp_path)
+    _stage(root, bundle, tmp_path)
+
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        _main(["execute", "--bundle", bundle, "--flat", "--json"])
+    assert json.loads(o.getvalue())["layout"] == "source_relative"
+
+
+def test_the_plan_judges_presence_where_the_recorded_layout_says(tmp_path):
+    """plan_copy must consult the recorded path, or an already-staged object is
+    re-copied because its source-relative path is absent."""
+    from auto_ingest.custody.executor import plan_copy
+    from auto_ingest.custody.ledger import read_staged_ledger
+
+    root = _card(tmp_path)
+    bundle = _bundle(tmp_path)
+    _stage(root, bundle, tmp_path)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    mapping = read_staged_ledger(bundle)
+    assert plan_copy(bundle, dest, mapping).absent, "nothing staged at the destination yet"
+
+    landed = dest / mapping["DCIM/Movie/2026_0829_123850_F.MP4"]
+    landed.parent.mkdir(parents=True, exist_ok=True)
+    landed.write_bytes((root / "DCIM/Movie/2026_0829_123850_F.MP4").read_bytes())
+
+    after = plan_copy(bundle, dest, mapping)
+    assert "DCIM/Movie/2026_0829_123850_F.MP4" not in after.absent
