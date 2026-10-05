@@ -1102,3 +1102,61 @@ def test_the_card_01_fixture_keys_are_still_read_as_distinct_objects():
         DESTINATION_CASE_COLLISION
     ]
     assert load_status(CARD_01_BUNDLE).state.value == "RECONCILE_REQUIRED"
+
+
+# ---------------------------------------------------------------------------
+# Pairs that are deliberately NOT reported
+# ---------------------------------------------------------------------------
+# Both were previously described as blind spots. Measurement showed neither is
+# an on-disk collision on the real destination, so "fixing" them would have been
+# adding false positives. These tests pin the decision and its reasoning.
+
+def test_turkish_locale_collation_is_not_an_on_disk_collision():
+    """`i` and `İ` are different files on exFAT/NTFS, so must not be reported.
+
+    Windows maps i -> İ under a Turkish locale, so Explorer sorts them together.
+    That is *display collation*. The on-disk upcase table is locale-invariant:
+    it maps i (U+0069) and ı (U+0131) to I, and leaves İ (U+0130) mapped to
+    itself. So i.mp4 and İ.mp4 are genuinely two files, and reporting them would
+    block a real campaign over nothing.
+    """
+    assert "i".upper() == "I"
+    assert "ı".upper() == "I", "dotless i IS the upcase-equal of ASCII I"
+    assert "İ".upper() == "İ", "dotted İ is NOT - it is its own upcase image"
+
+    assert detect_name_problems(["i.mp4", "İ.mp4"]) == [], (
+        "Turkish locale collation is not an on-disk collision; reporting it would "
+        "be a false positive")
+
+
+def test_the_locale_equivalent_dotless_pair_IS_reported():
+    """The pair the upcase table really does equate must still be caught."""
+    problems = detect_name_problems(["ILKAY.mp4", "ılkay.mp4"])
+    assert [p.kind for p in problems] == [CASE_COLLISION, CASE_COLLISION], (
+        "ILKAY and dotless ılkay are one filename on disk")
+    assert sorted(p.key for p in problems) == sorted(["ILKAY.mp4", "ılkay.mp4"])
+
+
+def test_nfc_and_nfd_are_distinct_on_this_destination():
+    """Correct for exFAT/SMB2; wrong only for APFS.
+
+    The destination stores bytes and compares them through the upcase table, so
+    the two spellings are two files. Folding them would block any campaign with a
+    decomposed accented filename against a destination that has no such problem.
+
+    The two spellings are built from explicit code points rather than pasted
+    literals: an editor or a shell can silently normalise the composed form in
+    the source, which would make the test compare a string with itself and pass
+    for the wrong reason.
+    """
+    import unicodedata
+
+    nfc = "caf\u00e9.mp4"                      # e-acute, one code point
+    nfd = "cafe\u0301.mp4"                     # e + combining acute, two
+    assert nfc != nfd
+    assert len(nfc) == 8 and len(nfd) == 9
+    assert unicodedata.normalize("NFC", nfd) == nfc
+
+    assert detect_name_problems([nfc, nfd]) == [], (
+        "exFAT and SMB2 keep the two spellings apart; reporting them is a false "
+        "positive. APFS would need a separate, deliberate normalisation pass.")
