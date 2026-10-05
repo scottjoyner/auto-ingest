@@ -52,7 +52,6 @@ from .ledger import (
     COPY_LEDGER,
     DESTINATION_LEDGER,
     HASH_LEDGER,
-    LEDGER_DIRNAME,
     STAGED_LEDGER,
     ledger_dir,
     read_records,
