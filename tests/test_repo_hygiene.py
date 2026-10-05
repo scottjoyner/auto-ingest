@@ -189,16 +189,18 @@ def _read_kg_state() -> bytes | None:
     return KG_STATE.read_bytes() if KG_STATE.exists() else None
 
 
-def _load_watchdog(env_state_file: Path | None):
-    """Load a fresh copy of the watchdog with its state file aimed elsewhere."""
-    if env_state_file is None:
-        os.environ.pop("KG_HEALTH_STATE_FILE", None)
-    else:
-        os.environ["KG_HEALTH_STATE_FILE"] = str(env_state_file)
-    try:
-        return _load_from_path(KG_WATCHDOG, "kg_health_watchdog_hygiene")
-    finally:
-        os.environ.pop("KG_HEALTH_STATE_FILE", None)
+def _load_watchdog(env_state_file: Path | None, monkeypatch):
+    """Load a fresh copy of the watchdog with its state file aimed elsewhere.
+
+    Takes the monkeypatch fixture so the env change is undone even if the module
+    raises during import. A bare os.environ assignment leaks into every later
+    test, and because STATE_FILE is read at IMPORT time, a leak silently changes
+    a subsequent test's subject rather than failing loudly.
+    """
+    monkeypatch.delenv("KG_HEALTH_STATE_FILE", raising=False)
+    if env_state_file is not None:
+        monkeypatch.setenv("KG_HEALTH_STATE_FILE", str(env_state_file))
+    return _load_from_path(KG_WATCHDOG, "kg_health_watchdog_hygiene")
 
 
 def test_kg_health_watchdog_run_leaves_the_repo_state_file_byte_identical(
@@ -215,7 +217,7 @@ def test_kg_health_watchdog_run_leaves_the_repo_state_file_byte_identical(
     before = _read_kg_state()
 
     monkeypatch.setattr(sys, "argv", ["kg_health_watchdog.py"])
-    kg = _load_watchdog(redirected)
+    kg = _load_watchdog(redirected, monkeypatch)
     assert kg.STATE_FILE == redirected, "the override did not take effect"
 
     driver = _FakeDriver(now=datetime.now(tz=timezone.utc).timestamp())
@@ -233,11 +235,11 @@ def test_kg_health_watchdog_run_leaves_the_repo_state_file_byte_identical(
 def test_kg_health_state_file_default_is_unchanged(tmp_path, monkeypatch):
     """The operator's baseline must keep landing where cron expects it."""
     monkeypatch.delenv("KG_HEALTH_STATE_FILE", raising=False)
-    kg = _load_watchdog(None)
+    kg = _load_watchdog(None, monkeypatch)
     assert kg.STATE_FILE == REPO / "scripts" / ".kg_health_state.json"
 
 
-def test_kg_health_save_state_is_atomic_and_leaves_no_residue(tmp_path):
+def test_kg_health_save_state_is_atomic_and_leaves_no_residue(tmp_path, monkeypatch):
     """A failed write must not truncate the state file or strand a temp file.
 
     save_state() used Path.write_text(), which truncates the target in place: a
@@ -247,7 +249,7 @@ def test_kg_health_save_state_is_atomic_and_leaves_no_residue(tmp_path):
     file on disk is always the previous complete state or the new complete state.
     """
     state = tmp_path / "state.json"
-    kg = _load_watchdog(state)
+    kg = _load_watchdog(state, monkeypatch)
 
     kg.save_state({"emb768_count": 7, "emb768_time": 1.0})
     assert json.loads(state.read_text()) == {"emb768_count": 7, "emb768_time": 1.0}
@@ -261,7 +263,7 @@ def test_kg_health_save_state_is_atomic_and_leaves_no_residue(tmp_path):
     assert [p.name for p in tmp_path.iterdir()] == ["state.json"], "temp file stranded"
 
 
-def test_kg_health_save_state_uses_a_unique_temp_name_per_write(tmp_path):
+def test_kg_health_save_state_uses_a_unique_temp_name_per_write(tmp_path, monkeypatch):
     """A fixed ".tmp" suffix is the bug _write_json_atomic exists to avoid.
 
     scripts/neo4j_watchdog.py still has it (see _save_last_action). If the
@@ -269,7 +271,7 @@ def test_kg_health_save_state_uses_a_unique_temp_name_per_write(tmp_path):
     silently lose one update.
     """
     state = tmp_path / "state.json"
-    kg = _load_watchdog(state)
+    kg = _load_watchdog(state, monkeypatch)
 
     seen = []
     real_replace = os.replace

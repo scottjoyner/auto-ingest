@@ -284,13 +284,15 @@ def test_live_opt_in_with_creds_allowed(monkeypatch):
     require_live_mode()  # must not raise
 
 
-def test_process_queue_live_blocked_without_opt_in(monkeypatch):
+def test_process_queue_live_blocked_without_opt_in(monkeypatch, tmp_path):
     from auto_ingest.shorts import uploader
     from auto_ingest.shorts.publish_guard import LivePublishForbidden
     for v in ("AUTO_INGEST_LIVE", "YT_TOKEN_JSON", "TIKTOK_ACCESS_TOKEN",
               "IG_ACCESS_TOKEN"):
         monkeypatch.delenv(v, raising=False)
-    tmp = __import__("pathlib").Path("/tmp/opencode/pq_test.jsonl")
+    # tmp_path, not a fixed /tmp name: two concurrent runs of this suite would
+    # otherwise share one queue file and unlink each other's fixture.
+    tmp = tmp_path / "pq_test.jsonl"
     monkeypatch.setenv("SHORTS_PUBLISH_QUEUE", str(tmp))
     if tmp.exists():
         tmp.unlink()

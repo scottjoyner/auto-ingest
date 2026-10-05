@@ -516,7 +516,7 @@ def test_atomic_write_temps_are_gitignored():
         assert proc.returncode == 0, f"{pattern} is not gitignored"
 
 
-def test_kg_health_watchdog_uses_the_shared_helper():
+def test_kg_health_watchdog_uses_the_shared_helper(monkeypatch):
     """No fourth copy of the atomic-write routine.
 
     It had one, written before `auto_ingest/util/` existed. Now that the helper
@@ -526,7 +526,6 @@ def test_kg_health_watchdog_uses_the_shared_helper():
     stall-detector baseline.
     """
     import importlib.util
-    import os
     import tempfile
 
     repo = Path(__file__).resolve().parents[1]
@@ -534,21 +533,21 @@ def test_kg_health_watchdog_uses_the_shared_helper():
     source = script.read_text(encoding="utf-8")
 
     # Behaviour, not just a grep: point the state file at a tmp dir and drive it.
-    with tempfile.TemporaryDirectory() as tmp:
-        os.environ["KG_HEALTH_STATE_FILE"] = str(Path(tmp) / "state.json")
+    # monkeypatch.setenv, not os.environ[...] - a bare assignment leaks into every
+    # later test if this one raises before its cleanup, and the module reads the
+    # variable at IMPORT time, so the leak changes another test's subject.
+    with tempfile.TemporaryDirectory() as tmp, monkeypatch.context() as mp:
+        mp.setenv("KG_HEALTH_STATE_FILE", str(Path(tmp) / "state.json"))
         spec = importlib.util.spec_from_file_location("kg_health_watchdog_probe", script)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        try:
-            module.save_state({"emb768_count": 1, "emb768_time": 2.0})
-            module.save_state({"emb768_count": 2, "emb768_time": 3.0})
-            written = json.loads(Path(module.STATE_FILE).read_text())
-            assert written == {"emb768_count": 2, "emb768_time": 3.0}
-            leftovers = [p.name for p in Path(module.STATE_FILE).parent.iterdir()
-                         if p.name != "state.json"]
-            assert leftovers == [], f"stranded temp files: {leftovers}"
-        finally:
-            os.environ.pop("KG_HEALTH_STATE_FILE", None)
+        module.save_state({"emb768_count": 1, "emb768_time": 2.0})
+        module.save_state({"emb768_count": 2, "emb768_time": 3.0})
+        written = json.loads(Path(module.STATE_FILE).read_text())
+        assert written == {"emb768_count": 2, "emb768_time": 3.0}
+        leftovers = [p.name for p in Path(module.STATE_FILE).parent.iterdir()
+                     if p.name != "state.json"]
+        assert leftovers == [], f"stranded temp files: {leftovers}"
 
     # The private copy is gone; the shared one is what gets called.
     assert "def save_state" in source
