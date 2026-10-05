@@ -659,3 +659,61 @@ def test_without_the_recorded_identity_the_cross_check_is_unprovable(tmp_path):
     status = load_status(bundle, strict_policy())
     assert status.observed_card_matches is None
     assert status.card_unprovable_fields == ()
+
+
+# ---------------------------------------------------------------------------
+# Mount lookup must not do network I/O on the common path
+# ---------------------------------------------------------------------------
+# `observe_mount` used to realpath the query and then every entry in the mount
+# table. `os.path.realpath` performs a network round-trip for any path under a
+# CIFS/SMB mount, and /nas is one. Measured: 28.03s for a single lookup of
+# /nas/fileserver/dashcam, and observe_campaign does it for both ends - which is
+# why one test took 129s and every `status`/`preflight` on a network destination
+# paid for it.
+
+def test_mount_lookup_does_not_realpath_on_the_common_path(tmp_path):
+    """A plain miss must not trigger a realpath over the whole table."""
+    mounts = fake_mounts(
+        tmp_path,
+        "//server/share /nas cifs rw,vers=3.0,relatime 0 0\n"
+        "/dev/sdb1 /media/scott/UNTITLED vfat ro,relatime 0 0\n",
+    )
+    realpath_calls = []
+
+    def counting_realpath(path, *a, **kw):
+        realpath_calls.append(path)
+        return os.path.realpath(path, *a, **kw)
+
+    original = os.path.realpath
+    try:
+        os.path.realpath = counting_realpath
+        # An exact hit must not call realpath at all.
+        observe_mount("/media/scott/UNTITLED", mounts_path=mounts)
+        assert realpath_calls == [], f"exact match did realpath: {realpath_calls}"
+
+        # A lexical variant must also be resolved without realpath.
+        observe_mount("/media/scott/./UNTITLED", mounts_path=mounts)
+        assert realpath_calls == [], f"normpath match did realpath: {realpath_calls}"
+    finally:
+        os.path.realpath = original
+
+
+def test_a_symlinked_alias_still_resolves_via_the_slow_path(tmp_path):
+    """The cheap pass must not lose the realpath fallback it replaced."""
+    by_uuid = tmp_path / "by-uuid"
+    by_uuid.mkdir()
+    device = tmp_path / "dev" / "sdb1"
+    device.parent.mkdir()
+    device.write_bytes(b"")
+    (by_uuid / "ABCD-1234").symlink_to(device)
+
+    real = tmp_path / "real-card"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real)
+
+    mounts = fake_mounts(tmp_path, f"{device} {real} vfat ro,relatime 0 0\n")
+    observed = observe_mount(str(alias), mounts_path=mounts)
+    assert observed.present is True
+    assert observed.device == str(device)
+    assert observed.filesystem_type == "vfat"

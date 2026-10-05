@@ -902,7 +902,8 @@ def _name_counters(problems: Sequence[NameProblem], max_errors: int) -> Dict[str
 
 def to_evidence(result: HashProgress, *, algorithm: str = DEFAULT_ALGORITHM,
                 last_checkpoint: Optional[str] = None,
-                discovered: Optional[int] = None) -> Dict[str, Any]:
+                discovered: Optional[int] = None,
+                excluded: Tuple[str, ...] = ()) -> Dict[str, Any]:
     """The evidence fragments a hash pass contributes.
 
     Only a *complete* pass sets ``complete``. A partial or failing pass records
@@ -957,6 +958,16 @@ def to_evidence(result: HashProgress, *, algorithm: str = DEFAULT_ALGORITHM,
             "complete": result.complete and known == discovered,
             "verified": result.complete and known == discovered,
             "started": True,
+        }
+    if excluded:
+        # Recorded, bounded, and carrying the patterns as well as the keys - so an
+        # exclusion is auditable from the campaign alone, and the release gate can
+        # compare it against what the policy actually declares (an exclusion the
+        # policy does not honour is a blocker, same rule as hash exemptions).
+        fragment["errors"] = {
+            "declared_exclusions": sorted({pattern.split("*")[0].rstrip("/")
+                                           for pattern in excluded}),
+            "excluded_objects": len(excluded),
         }
     if result.name_problem_count:
         fragment["errors"] = {

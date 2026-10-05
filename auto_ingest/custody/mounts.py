@@ -153,9 +153,22 @@ def observe_mount(
     for observation in table:
         if observation.mount_point == mount_point:
             return observation
-    target = _normalize(mount_point)
+    # Cheap pass first. `os.path.normpath` is pure string work with no I/O;
+    # `os.path.realpath` performs a network round-trip for any path under a
+    # CIFS/SMB mount. Measured on this host: realpath over the mount table cost
+    # 28s for a single lookup of /nas/fileserver/dashcam, and `observe_campaign`
+    # does this twice, so every `status`/`preflight` on a network destination paid
+    # it. String comparison resolves the overwhelming majority of lookups.
+    target = os.path.normpath(str(mount_point))
     for observation in table:
-        if _normalize(observation.mount_point) == target:
+        if observation.mount_point and os.path.normpath(observation.mount_point) == target:
+            return observation
+    # Slow path, only when the cheap pass found nothing - i.e. the caller really
+    # did hand us a symlinked alias of a mount point. Correctness is unchanged;
+    # only the cost of the common case is.
+    resolved = _normalize(mount_point)
+    for observation in table:
+        if _normalize(observation.mount_point) == resolved:
             return observation
     return MountObservation(mount_point=mount_point, present=False)
 
