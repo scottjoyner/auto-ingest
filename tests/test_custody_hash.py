@@ -1197,3 +1197,84 @@ def test_a_resumed_pass_reports_cumulative_inventory_bytes(tmp_path):
         "a fully-skipped pass reported zero bytes for a card that holds "
         f"{total}, so capacity planning saw a zero-byte copy")
     assert resumed["hash"]["verified_bytes"] == total
+
+
+# ---------------------------------------------------------------------------
+# Declared source exclusions (found by walking the real card)
+# ---------------------------------------------------------------------------
+# `.Trashes/` and `System Volume Information/` were 3,831 of 67,644 objects on
+# the real card - macOS AppleDouble stubs and empty `locations_*.json`. The walk
+# took them as campaign content. They are filesystem bookkeeping, not content.
+#
+# This is a POLICY field rather than a hard-coded filter, for the same reason
+# hash exemptions are: an exclusion that appears in evidence but is absent from
+# the policy never counts. A typo shrinks nothing silently - the gate reports it.
+
+def test_no_exclusions_are_in_scope_by_default():
+    """Nothing is out of scope until an operator says so."""
+    from auto_ingest.custody.policy import CustodyPolicy
+
+    policy = CustodyPolicy()
+    assert policy.declared_source_exclusions == ()
+    assert policy.excludes_source(".Trashes/501/loc.json") is False
+    assert policy.excludes_source("System Volume Information/x") is False
+
+
+def test_a_declared_directory_pattern_excludes_its_contents():
+    from auto_ingest.custody.policy import CustodyPolicy
+
+    policy = CustodyPolicy(declared_source_exclusions=(".Trashes",))
+    assert policy.excludes_source(".Trashes/501/loc.json") is True
+    assert policy.excludes_source(".Trashes/._501") is True
+    assert policy.excludes_source(".Trashes") is True
+
+
+def test_exclusions_do_not_over_match_a_similar_prefix():
+    """`.Trashes` must not swallow `Trashes2/`."""
+    from auto_ingest.custody.policy import CustodyPolicy
+
+    policy = CustodyPolicy(declared_source_exclusions=(".Trashes",))
+    assert policy.excludes_source("Trashes2/keep.mp4") is False
+    assert policy.excludes_source("DCIM/.TrashesX/a.jpg") is False
+
+
+def test_a_glob_pattern_also_works():
+    from auto_ingest.custody.policy import CustodyPolicy
+
+    policy = CustodyPolicy(declared_source_exclusions=("System Volume Information/*",))
+    assert policy.excludes_source("System Volume Information/idx") is True
+
+
+def test_policy_round_trips_the_exclusion_patterns():
+    from auto_ingest.custody.policy import CustodyPolicy
+
+    raw = {"declared_source_exclusions": [".Trashes", "System Volume Information"]}
+    policy = CustodyPolicy.from_dict(raw)
+    assert policy.declared_source_exclusions == (".Trashes", "System Volume Information")
+    assert CustodyPolicy.from_dict(policy.to_dict()).declared_source_exclusions == \
+        policy.declared_source_exclusions
+    # a bare string must not iterate character by character
+    assert CustodyPolicy.from_dict(
+        {"declared_source_exclusions": ".Trashes"}).declared_source_exclusions == (".Trashes",)
+
+
+def test_the_walk_reports_what_it_excluded_rather_than_hiding_it(tmp_path):
+    """Excluded keys are returned, so the caller can record them."""
+    from auto_ingest.custody.cli import _discover_keys
+    from auto_ingest.custody.policy import CustodyPolicy
+
+    root = tmp_path / "card"
+    for rel in (".Trashes/501/loc.json", "System Volume Information/idx",
+                "DCIM/IMG_0001.JPG", "VIDEO/2026_0101_120000_F.MP4"):
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x" * 16)
+
+    keys, excluded = _discover_keys([str(root)], None, CustodyPolicy())
+    assert len(keys) == 4 and excluded == []
+
+    policy = CustodyPolicy(declared_source_exclusions=(".Trashes", "System Volume Information"))
+    keys, excluded = _discover_keys([str(root)], None, policy)
+    assert sorted(keys) == ["DCIM/IMG_0001.JPG", "VIDEO/2026_0101_120000_F.MP4"]
+    assert len(excluded) == 2
+    assert ".Trashes/501/loc.json" in excluded

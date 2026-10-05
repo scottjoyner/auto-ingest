@@ -35,7 +35,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .campaign import CardIdentity
 from .capacity import (
@@ -695,15 +695,24 @@ def cmd_preflight(args) -> int:
     return EXIT_OK if payload["safe_to_execute"] else EXIT_GATE_CLOSED
 
 
-def _discover_keys(roots: Sequence[str], pattern: Optional[str]) -> Dict[str, Path]:
-    """Map custody key -> source path, sorted.
+def _discover_keys(roots: Sequence[str], pattern: Optional[str],
+                   policy=None) -> Tuple[Dict[str, Path], List[str]]:
+    """Map custody key -> source path, sorted, plus the keys excluded by policy.
 
     The key is the POSIX-relative path: it is stable across runs, unique per
     object, and it is what reconciliation joins on, so both ledgers must use it.
+
+    Exclusions are returned rather than applied silently. This subsystem's whole
+    premise is that nothing vanishes between the source and the archive without a
+    record, so the caller reports what the policy kept out and records it in
+    evidence. On the real card that was `.Trashes/` and
+    `System Volume Information/` - 3,831 of 67,644 objects of macOS
+    AppleDouble stubs, which are filesystem bookkeeping rather than content.
     """
     import fnmatch
 
     found: Dict[str, Path] = {}
+    excluded: List[str] = []
     for root in roots:
         base = Path(root)
         if not base.is_dir():
@@ -714,8 +723,12 @@ def _discover_keys(roots: Sequence[str], pattern: Optional[str]) -> Dict[str, Pa
                 if pattern and not fnmatch.fnmatch(name, pattern):
                     continue
                 full = Path(dirpath) / name
-                found[full.relative_to(base).as_posix()] = full
-    return found
+                key = full.relative_to(base).as_posix()
+                if policy is not None and policy.excludes_source(key):
+                    excluded.append(key)
+                    continue
+                found[key] = full
+    return found, sorted(excluded)
 
 
 def cmd_hash(args) -> int:
@@ -734,15 +747,25 @@ def cmd_hash(args) -> int:
             return EXIT_USAGE
         args.root = [campaign_obj.source.mount_point]
 
-    keys = _discover_keys(args.root, None)
+    keys, excluded = _discover_keys(args.root, None, policy)
     result = hash_source(args.bundle, keys, algorithm=args.algorithm,
                          limit=args.limit)
     payload = dict(result.to_dict())
     payload["discovered"] = len(keys)
+    # Reported, not silently dropped: the operator can see exactly what the
+    # policy kept out of the campaign, and the count is bounded.
+    payload["excluded_by_policy"] = len(excluded)
+    payload["excluded_samples"] = list(excluded)[:policy.max_summary_entries]
     payload["applied"] = False
+    if excluded:
+        sys.stderr.write(
+            f"custody: {len(excluded)} source objects excluded by "
+            f"policy.declared_source_exclusions: {list(policy.declared_source_exclusions)}\n"
+        )
     if args.apply:
         fragment = to_evidence(result, algorithm=args.algorithm,
-                                discovered=len(keys))
+                                discovered=len(keys),
+                                excluded=tuple(excluded))
         write_status = import_evidence(args.bundle, fragment, policy, apply=True)
         payload["applied"] = bool(write_status.get("applied"))
         payload["evidence_result"] = write_status
@@ -752,6 +775,7 @@ def cmd_hash(args) -> int:
         sys.stdout.write(
             f"ledger                {result.ledger_path}\n"
             f"discovered            {len(keys)}\n"
+            f"excluded_by_policy    {len(excluded)}\n"
             f"hashed                {result.hashed}\n"
             f"skipped_existing      {result.skipped_existing}\n"
             f"failed                {result.failed}\n"

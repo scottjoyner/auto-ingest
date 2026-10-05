@@ -44,6 +44,22 @@ class CustodyPolicy:
     #: but absent here never counts toward coverage.
     declared_hash_exemptions: Tuple[str, ...] = ()
 
+    #: Key patterns the operator declares OUT OF SCOPE for this campaign, so the
+    #: walk skips them. Empty by default: nothing is out of scope until someone
+    #: says so.
+    #:
+    #: This exists for filesystem bookkeeping that is not campaign content - on
+    #: the real card, `.Trashes/` and `System Volume Information/` were 3,831 of
+    #: 67,644 objects. Copying macOS AppleDouble stubs into the archive is
+    #: pollution, and hashing them is wasted passes.
+    #:
+    #: The same rule as hash exemptions applies, and it is the reason this is a
+    #: policy field and not a hard-coded filter: an exclusion that appears in
+    #: evidence but is absent here never counts. A typo in a pattern therefore
+    #: cannot quietly shrink the campaign - the gate reports it instead. Patterns
+    #: match custody keys (POSIX-relative paths) with fnmatch semantics.
+    declared_source_exclusions: Tuple[str, ...] = ()
+
     #: Require a recorded operator witness before source release.
     require_operator_witness: bool = False
 
@@ -70,6 +86,7 @@ class CustodyPolicy:
             "required_scope",
             "allow_hash_exemptions",
             "declared_hash_exemptions",
+            "declared_source_exclusions",
             "require_operator_witness",
             "strict_destination_scope",
             "require_destination_identity",
@@ -81,11 +98,12 @@ class CustodyPolicy:
         for key in known:
             if key in raw and raw[key] is not None:
                 kwargs[key] = raw[key]
-        if "declared_hash_exemptions" in kwargs:
-            value = kwargs["declared_hash_exemptions"]
-            if isinstance(value, str):
-                value = [value]
-            kwargs["declared_hash_exemptions"] = tuple(str(v) for v in value)
+        for field_name in ("declared_hash_exemptions", "declared_source_exclusions"):
+            if field_name in kwargs:
+                value = kwargs[field_name]
+                if isinstance(value, str):
+                    value = [value]
+                kwargs[field_name] = tuple(str(v) for v in value)
         scope = str(kwargs.get("required_scope", "all_inventory"))
         if scope not in {"all_inventory", "hashed_set"}:
             raise ValueError(
@@ -97,6 +115,7 @@ class CustodyPolicy:
         return {
             "allow_hash_exemptions": self.allow_hash_exemptions,
             "declared_hash_exemptions": list(self.declared_hash_exemptions),
+            "declared_source_exclusions": list(self.declared_source_exclusions),
             "max_summary_entries": self.max_summary_entries,
             "require_destination_identity": self.require_destination_identity,
             "require_mounted_destination": self.require_mounted_destination,
@@ -126,6 +145,30 @@ class CustodyPolicy:
     def honour_exemption(self, pattern: str) -> bool:
         """True when ``pattern`` is an exemption this policy actually honours."""
         return self.hash_exemptions_allowed and pattern in self.declared_hash_exemptions
+
+    def excludes_source(self, key: str) -> bool:
+        """Whether a custody key is declared out of scope for this campaign.
+
+        fnmatch semantics against POSIX-relative keys, so ``.Trashes/*`` covers
+        the directory's contents. Matching a directory pattern (``.Trashes``)
+        also excludes everything beneath it, because a caller writing that
+        plainly means the whole tree.
+
+        Returns False when nothing is declared: the default campaign covers
+        everything the walk finds.
+        """
+        if not self.declared_source_exclusions:
+            return False
+        import fnmatch
+
+        for pattern in self.declared_source_exclusions:
+            if fnmatch.fnmatch(key, pattern):
+                return True
+            # A bare directory name covers its contents too.
+            prefix = pattern.rstrip("*").rstrip("/")
+            if prefix and (key == prefix or key.startswith(prefix + "/")):
+                return True
+        return False
 
     def undeclared_exemptions(self, observed: Tuple[str, ...]) -> Tuple[str, ...]:
         """Exemptions claimed by evidence that this policy does not honour."""
