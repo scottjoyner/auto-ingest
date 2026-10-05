@@ -173,12 +173,29 @@ def test_a_detection_csv_pairs_with_its_clip_by_exact_stem():
 
 
 def test_out_of_scope_objects_are_reported_not_dropped():
-    obj = destination_for("overland/locations_2024-08-20-08-35-14.json")
-    assert obj.stageable is False
-    assert obj.reason == "no_YYYY_MMDD_HHMMSS_in_name_or_path"
+    # A timestamp is derived here, and it is still refused: content, not timing,
+    # decides scope.
     png = destination_for("heatmap/2024_0101_002438_F_heatmap.png")
     assert png.stageable is False
     assert png.reason == "out_of_scope:other"
+
+
+def test_an_out_of_scope_object_is_reported_as_out_of_scope_not_as_unkeyed():
+    """Both of these have no derivable key. Only one of them has a problem.
+
+    `overland/locations_*.json` would never be staged whatever it were named, so
+    reporting "no timestamp" describes a fault that does not exist and buries the
+    one that does. `VIDEO/MOVI0000.avi` is a different case entirely: genuine
+    dashcam footage that is unstaged only because nothing identifies its moment,
+    and that is a decision an operator needs to see.
+    """
+    location = destination_for("overland/locations_2024-08-20-08-35-14.json")
+    assert location.stageable is False
+    assert location.reason == "out_of_scope:other"
+
+    undated_clip = destination_for("VIDEO/MOVI0000.avi")
+    assert undated_clip.stageable is False
+    assert undated_clip.reason == "no_YYYY_MMDD_HHMMSS_in_name_or_path"
 
 
 # ---------------------------------------------------------------------------

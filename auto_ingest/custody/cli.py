@@ -187,6 +187,25 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--apply", action="store_true",
                     help="record the result as campaign evidence")
 
+    ps = common(sub.add_parser(
+        "stage",
+        help="Classify the source, hash what is in scope, and lay it out where "
+             "the ingest pipeline discovers it (read-only on the source)."),
+        observed=False)
+    ps.add_argument("--root", action="append", default=None,
+                    help="directory to walk; repeatable")
+    ps.add_argument("--limit", type=int, default=None,
+                    help="stop after N new hashes (a bounded probe)")
+    ps.add_argument("--algorithm", default=DEFAULT_ALGORITHM)
+    ps.add_argument("--apply", action="store_true",
+                    help="record the result as campaign evidence")
+    ps.add_argument("--include-sidecars", dest="include_sidecars",
+                    action="store_true", default=True,
+                    help="stage derived sidecars too (the default)")
+    ps.add_argument("--media-only", dest="include_sidecars",
+                    action="store_false",
+                    help="stage media only, leaving sidecars for a later pass")
+
     pr = common(sub.add_parser(
         "release-source",
         help="Propose or perform removal of source objects already in custody "
@@ -789,6 +808,101 @@ def cmd_hash(args) -> int:
     return EXIT_OK
 
 
+def cmd_stage(args) -> int:
+    """Lay the source out where the ingest pipeline will actually find it.
+
+    Three steps, in this order and no other:
+
+    1. **classify** - what is media, what is a sidecar of one, what belongs to
+       something else entirely (`auto_ingest/custody/staging.py`);
+    2. **hash** - only the in-scope objects, so the copy plan cannot inherit a
+       directory that has no business in the archive;
+    3. **report** - what was staged, what was not and why.
+
+    Nothing is copied here. ``custody execute`` does that, with the staged
+    destination map this command's plan implies. Keeping them apart is what lets
+    the layout be inspected, and corrected, before a byte moves.
+
+    The source is only ever read.
+    """
+    from .staging import plan_staging
+
+    policy = _policy_from_file(getattr(args, "policy_file", None))
+    if policy is None:
+        policy = load_policy(load_custody_config())
+    if not args.root:
+        campaign_obj = load_campaign(args.bundle)
+        if not campaign_obj.source.mount_point:
+            print("custody: no source mount recorded; pass --root", file=sys.stderr)
+            return EXIT_USAGE
+        args.root = [campaign_obj.source.mount_point]
+
+    walked_paths, excluded_by_policy = _discover_keys(args.root, None, policy)
+    plan = plan_staging(walked_paths, include_sidecars=args.include_sidecars)
+    mapping = {o.source_key: o.destination_key for o in plan.staged}
+
+    # Hash only what will be staged, and hash it from its SOURCE path. Hashing
+    # the whole walk would put 60k out-of-scope objects into the ledger, and
+    # plan_copy derives the copy set from that ledger. The destination keys are
+    # NOT paths - passing them here silently hashed nothing at all.
+    hash_targets = {key: walked_paths[key] for key in mapping if key in walked_paths}
+    missing = set(mapping) - set(hash_targets)
+    if missing:
+        sys.stderr.write(
+            f"custody: {len(missing)} staged object(s) have no source path; "
+            f"not hashing: {sorted(missing)[:5]}\n"
+        )
+        return EXIT_GATE_CLOSED
+    result = hash_source(args.bundle, hash_targets, algorithm=args.algorithm,
+                         limit=args.limit)
+
+    payload = dict(result.to_dict())
+    payload.update({
+        "walked": len(walked_paths),
+        "excluded_by_policy": len(excluded_by_policy),
+        "staged": len(plan.staged),
+        "unstaged": len(plan.unstaged),
+        "by_role": plan.by_role(),
+        "unstaged_by_reason": plan.by_reason(),
+        "destination_collisions": list(plan.collisions()),
+        "applied": False,
+    })
+    if args.apply:
+        fragment = to_evidence(result, algorithm=args.algorithm,
+                                discovered=len(mapping))
+        write_status = import_evidence(args.bundle, fragment, policy, apply=True)
+        payload["applied"] = bool(write_status.get("applied"))
+        payload["evidence_result"] = write_status
+
+    collisions = plan.collisions()
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, indent=2, default=str))
+    else:
+        sys.stdout.write(
+            f"walked               {len(walked_paths)}\n"
+            f"excluded by policy   {len(excluded_by_policy)}\n"
+            f"staged               {len(plan.staged)}\n"
+            f"unstaged             {len(plan.unstaged)}\n"
+            f"hashed               {result.hashed}\n"
+            f"skipped existing     {result.skipped_existing}\n"
+            f"failed               {result.failed}\n"
+            f"applied              {str(payload['applied']).lower()}\n"
+        )
+        for reason, count in sorted(plan.by_reason().items(), key=lambda kv: -kv[1]):
+            sys.stdout.write(f"  unstaged {count:<8} {reason}\n")
+    if collisions:
+        # Never resolved here. Two sources claiming one staged path means the
+        # layout is wrong, and picking a winner would lose one of them silently.
+        sys.stderr.write(
+            f"custody: {len(collisions)} staged path(s) claimed by more than one "
+            f"source object; not copying until resolved:\n"
+        )
+        for path in collisions[:10]:
+            sys.stderr.write(f"  {path}\n")
+        return EXIT_GATE_CLOSED
+    return EXIT_OK
+
+
 def cmd_release_source(args) -> int:
     """Remove source objects that are already proven to be in custody.
 
@@ -1151,6 +1265,7 @@ _HANDLERS = {
     "capacity": cmd_capacity,
     "preflight": cmd_preflight,
     "hash": cmd_hash,
+    "stage": cmd_stage,
     "execute": cmd_execute,
     "release-source": cmd_release_source,
 }

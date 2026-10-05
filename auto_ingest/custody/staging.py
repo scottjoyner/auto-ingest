@@ -261,6 +261,21 @@ def destination_for(source_key: str, *, role: Optional[str] = None,
     import posixpath
 
     role = role or classify(posixpath.basename(source_key))
+    # Scope is judged BEFORE the key. A Python file in overland/ has no
+    # timestamp and never will, so "no key" describes a problem that does not
+    # exist while hiding the one that does: it is not pipeline content at all.
+    # The order also keeps --media-only honest, since a CSV it declines is
+    # genuinely declined rather than merely unkeyed.
+    if not in_scope(role, include_sidecars=include_sidecars):
+        return StagedObject(
+            source_key=source_key,
+            destination_key=None,
+            role=role,
+            key=None,
+            recording=None,
+            camera=None,
+            reason=f"out_of_scope:{role}",
+        )
     key = derive_key(source_key)
     if key is None:
         return StagedObject(
@@ -271,16 +286,6 @@ def destination_for(source_key: str, *, role: Optional[str] = None,
             recording=None,
             camera=None,
             reason="no_YYYY_MMDD_HHMMSS_in_name_or_path",
-        )
-    if not in_scope(role, include_sidecars=include_sidecars):
-        return StagedObject(
-            source_key=source_key,
-            destination_key=None,
-            role=role,
-            key=key,
-            recording=None,
-            camera=None,
-            reason=f"out_of_scope:{role}",
         )
 
     stem, camera = split_camera(key)
