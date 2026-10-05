@@ -593,3 +593,36 @@ def test_reverting_the_staleness_branch_fails_closed(tmp_path):
     probe_only = tmp_path / "sync.sh"
     probe_only.write_text(without_ttl, encoding="utf-8")
     assert writer_consults_lock(probe_only) is False
+
+
+def test_the_ttl_is_documented_in_env_example():
+    """An undocumented env var is one nobody tunes - and the TTL is safety-critical.
+
+    `CUSTODY_MARKER_TTL_SEC` decides when a writer concludes no campaign is live.
+    Too short and a healthy multi-hour copy gets re-entered; too long (or unset
+    with the wrong value baked in) and a crashed campaign stalls ingest. It ships
+    with a deliberate default, but operators must be able to find it.
+    """
+    env_example = Path(__file__).resolve().parents[1] / ".env.example"
+    text = env_example.read_text(encoding="utf-8")
+    assert "CUSTODY_MARKER_TTL_SEC" in text, "TTL is not documented in .env.example"
+    assert str(DEFAULT_MARKER_TTL_SEC) in text, (
+        f"the shipped default {DEFAULT_MARKER_TTL_SEC} should appear so an "
+        "operator can see what they are changing it from")
+
+
+def test_the_lock_root_documented_value_matches_the_code_default():
+    """The documented path and the code default must be the same string.
+
+    These two are read by different processes - Python on one side, the shell
+    writer on the other - and they only coordinate if they agree.
+    """
+    env_example = Path(__file__).resolve().parents[1] / ".env.example"
+    text = env_example.read_text(encoding="utf-8")
+    match = re.search(r"^CUSTODY_LOCK_ROOT=(.+)$", text, re.M)
+    assert match, "CUSTODY_LOCK_ROOT is not documented in .env.example"
+    documented = match.group(1).strip()
+    assert documented == DEFAULT_LOCK_ROOT, (
+        f".env.example says {documented!r}, the code defaults to "
+        f"{DEFAULT_LOCK_ROOT!r}; a mismatch means the shell writer and "
+        "the Python side check different files and never coordinate")
