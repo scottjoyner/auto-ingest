@@ -30,8 +30,9 @@ import json
 import os
 import sys
 import time
-from itertools import count
 from pathlib import Path
+
+from auto_ingest.util.atomic import write_json_atomic
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
@@ -48,11 +49,6 @@ STATE_FILE = Path(
     os.environ.get("KG_HEALTH_STATE_FILE")
     or REPO / "scripts" / ".kg_health_state.json"
 )
-
-# Unique-per-write temp names, so a failed write cannot eat a concurrent one.
-# See _write_json_atomic() in auto_ingest/custody/store.py for why a FIXED
-# ".tmp" suffix is wrong.
-_WRITE_SEQ = count(1)
 
 
 def log(*a):
@@ -78,21 +74,17 @@ def load_state():
 
 
 def save_state(st):
-    """Persist the state file atomically. Raises if the write cannot complete."""
-    tmp = STATE_FILE.with_name(f"{STATE_FILE.name}.{os.getpid()}.{next(_WRITE_SEQ)}.tmp")
-    try:
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(st, f, default=str)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, STATE_FILE)
-    except BaseException:
-        # Never leave a half-written temp file behind for the next run to trip on.
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+    """Persist the state file atomically. Raises if the write cannot complete.
+
+    This was the fourth copy of this routine. It now delegates to the shared
+    helper, which was extracted from `auto_ingest/custody/store.py`'s
+    `_write_json_atomic` and already used by the arxiv bridge and the neo4j
+    watchdog. The per-process/per-call temp name is what makes two concurrent
+    runs safe: with a fixed suffix they share one inode and the loser's rename
+    publishes the winner's bytes mid-write, leaving invalid JSON - and this
+    file's reader maps a parse failure to {}, silently resetting the baseline.
+    """
+    write_json_atomic(STATE_FILE, st)
 
 
 def main():

@@ -514,3 +514,43 @@ def test_atomic_write_temps_are_gitignored():
         proc = subprocess.run(["git", "check-ignore", "-q", pattern.replace("*", "1")],
                               cwd=repo, capture_output=True, timeout=30)
         assert proc.returncode == 0, f"{pattern} is not gitignored"
+
+
+def test_kg_health_watchdog_uses_the_shared_helper():
+    """No fourth copy of the atomic-write routine.
+
+    It had one, written before `auto_ingest/util/` existed. Now that the helper
+    is shared by the arxiv bridge and the neo4j watchdog, a divergent copy here
+    would be three implementations to keep in step - and this one is the file
+    whose reader maps a parse failure to {}, so a torn write silently resets the
+    stall-detector baseline.
+    """
+    import importlib.util
+    import os
+    import tempfile
+
+    repo = Path(__file__).resolve().parents[1]
+    script = repo / "scripts" / "kg_health_watchdog.py"
+    source = script.read_text(encoding="utf-8")
+
+    # Behaviour, not just a grep: point the state file at a tmp dir and drive it.
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["KG_HEALTH_STATE_FILE"] = str(Path(tmp) / "state.json")
+        spec = importlib.util.spec_from_file_location("kg_health_watchdog_probe", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        try:
+            module.save_state({"emb768_count": 1, "emb768_time": 2.0})
+            module.save_state({"emb768_count": 2, "emb768_time": 3.0})
+            written = json.loads(Path(module.STATE_FILE).read_text())
+            assert written == {"emb768_count": 2, "emb768_time": 3.0}
+            leftovers = [p.name for p in Path(module.STATE_FILE).parent.iterdir()
+                         if p.name != "state.json"]
+            assert leftovers == [], f"stranded temp files: {leftovers}"
+        finally:
+            os.environ.pop("KG_HEALTH_STATE_FILE", None)
+
+    # The private copy is gone; the shared one is what gets called.
+    assert "def save_state" in source
+    assert "write_json_atomic(STATE_FILE" in source
+    assert "os.replace" not in source, "the local copy should be gone, not merged"

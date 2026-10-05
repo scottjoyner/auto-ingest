@@ -293,3 +293,38 @@ def test_kg_health_state_file_is_gitignored_as_runtime_state():
         "scripts/.kg_health_state.json is rewritten in full on every watchdog run; "
         "untracked-but-unignored it reappears in git status as an untracked file"
     )
+
+
+def test_runtime_cursors_are_not_tracked():
+    """Runtime state must not be tracked, or every run dirties the tree.
+
+    `.kg_health_state.json` and `.arxiv_kg_cursor.json` are both caches rewritten
+    in full on every run, and nothing but their own watchdog/bridge reads them.
+    Tracked once by accident, they make `git add -A` a way to commit a wall clock.
+    """
+    import subprocess
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    for name in ("scripts/.kg_health_state.json", "scripts/.arxiv_kg_cursor.json"):
+        proc = subprocess.run(["git", "ls-files", "--error-unmatch", name],
+                              cwd=repo, capture_output=True, timeout=30)
+        assert proc.returncode != 0, f"{name} is tracked; it is runtime state"
+        proc = subprocess.run(["git", "check-ignore", "-q", name],
+                              cwd=repo, capture_output=True, timeout=30)
+        assert proc.returncode == 0, f"{name} is not gitignored"
+
+
+def test_the_shared_atomic_helper_is_reachable_as_a_subpackage():
+    """`auto_ingest/util` must be importable and advertised.
+
+    The scripts import `auto_ingest.util.atomic`, but `auto_ingest.__all__`
+    omitted `util`, so the one dependency-free subpackage in the repo was the one
+    a reader could not discover from the package root.
+    """
+    import auto_ingest
+
+    assert "util" in auto_ingest.__all__, (
+        "auto_ingest.__all__ should list util")
+    from auto_ingest.util.atomic import write_json_atomic
+    assert callable(write_json_atomic)

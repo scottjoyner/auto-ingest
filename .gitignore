@@ -60,6 +60,10 @@ scripts/.kg_health_state.json
 # write; a crash mid-write leaves one behind, and it must not show up as an
 # untracked file in git status.
 scripts/.kg_health_state.json.*.tmp
+# arxiv bridge dedupe cursor: a set of already-ingested paper IDs, rewritten in
+# full on every run. Same category as .kg_health_state.json above - runtime state,
+# tracked once by accident.
+scripts/.arxiv_kg_cursor.json
 scripts/.arxiv_kg_cursor.json.*.tmp
 
 # embed-cache WAL/shm siblings (runtime state, not source)
