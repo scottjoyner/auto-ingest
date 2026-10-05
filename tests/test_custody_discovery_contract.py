@@ -17,6 +17,8 @@ import ast
 import pathlib
 import sys
 
+import pytest
+
 DISCOVERY = pathlib.Path(
     __file__).resolve().parents[1] / "auto_ingest" / "ingest" / "discovery.py"
 
@@ -104,8 +106,52 @@ print("OK")
     assert "OK" in result.stdout
 
 
-def test_transcripts_still_exports_the_contract_for_existing_callers():
-    """The extraction must not break the importers that predate it."""
+def test_transcripts_re_exports_the_contract_by_name():
+    """Checked statically, because the alternative is un-runnable.
+
+    Asserting this at runtime means importing `transcripts`, which needs torch -
+    so the assertion would be skipped exactly where it matters, which is the
+    failure mode this whole module exists to prevent. Reading the import out of
+    the AST instead means it runs everywhere.
+    """
+    transcripts_src = DISCOVERY.parent / "transcripts.py"
+    tree = ast.parse(transcripts_src.read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 1 \
+                and node.module == "discovery":
+            imported |= {alias.name for alias in node.names}
+    required = {
+        "PAT_MEDIA", "PAT_TRANS_JSON_TXT", "PAT_TRANS_CSV", "PAT_ENTITIES",
+        "PAT_RTTM", "PAT_META_CSV", "canonicalize_key",
+        "parse_key_datetime_utc_from_string", "stable_id",
+    }
+    assert required <= imported, (
+        f"transcripts.py must re-export {sorted(required - imported)} from "
+        f".discovery, or every existing importer of those names breaks"
+    )
+
+
+def test_transcripts_no_longer_defines_the_contract_itself():
+    """Two definitions of a pattern means one of them is not the pattern in use."""
+    transcripts_src = DISCOVERY.parent / "transcripts.py"
+    tree = ast.parse(transcripts_src.read_text(encoding="utf-8"))
+    defined = {node.name for node in tree.body
+               if isinstance(node, ast.FunctionDef)}
+    defined |= {t.id for node in tree.body if isinstance(node, ast.Assign)
+                for t in node.targets if isinstance(t, ast.Name)}
+    duplicated = defined & {"canonicalize_key", "parse_key_datetime_utc_from_string",
+                            "stable_id", "PAT_MEDIA", "PAT_RTTM"}
+    assert not duplicated, f"still defined locally: {sorted(duplicated)}"
+
+
+def test_the_reexport_is_the_same_object_where_the_stack_allows():
+    """Identity, so a later edit cannot quietly fork the contract.
+
+    Needs the ML stack, because `transcripts` does. Skipped where it is absent;
+    the two tests above carry the guarantee there.
+    """
+    pytest.importorskip("torch")
     from auto_ingest.ingest import discovery as d
     from auto_ingest.ingest import transcripts as tx
 
