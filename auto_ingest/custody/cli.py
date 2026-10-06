@@ -1414,6 +1414,7 @@ def cmd_execute(args) -> int:
     payload["copy"] = result.to_dict()
     payload["layout"] = "staged" if staged is not None else "source_relative"
     payload["copied"] = result.copied
+    payload["retried"] = result.retried
     payload["executed"] = True
     payload["mode"] = "executed"
     payload["source_release_allowed"] = False
@@ -1453,6 +1454,10 @@ def _emit_execute(payload: dict, args) -> None:
         f"executed               {str(payload['executed']).lower()}",
         f"copied                 {payload['copied']}",
     ]
+    if payload.get("retried"):
+        # Not noise. A share that needed retries is a share worth knowing about
+        # before it becomes an outage.
+        lines.append(f"  retried             {payload['retried']}")
     if payload.get("leftover_temp_files"):
         lines.append("  leftover temp files   "
                      + ", ".join(payload["leftover_temp_files"][:5]))

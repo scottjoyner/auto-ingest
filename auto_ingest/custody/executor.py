@@ -40,8 +40,10 @@ actually streamed, so "copied" means "these bytes were produced and hashed", not
 
 from __future__ import annotations
 
+import errno
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,6 +106,10 @@ class CopyProgress:
     skipped_verified: int = 0
     skipped_present: int = 0
     failed: int = 0
+    #: Transient failures that a retry rode out. Counted rather than swallowed: a
+    #: destination that needed 40 retries across 3,538 objects is a marginal
+    #: destination, and that is worth knowing before an outage makes it obvious.
+    retried: int = 0
     errors: Tuple[str, ...] = ()
     planned: int = 0
     complete: bool = False
@@ -122,6 +128,7 @@ class CopyProgress:
             "copied_bytes": self.copied_bytes,
             "errors": list(self.errors),
             "failed": self.failed,
+            "retried": self.retried,
             "interrupted": self.interrupted,
             "ledger_path": self.ledger_path,
             "limit": self.limit,
@@ -230,6 +237,52 @@ def _safe_join(root: Path, key: str) -> Optional[Path]:
     return root / key
 
 
+#: Errors worth trying again. Everything else is a permanent condition and a
+#: retry just spends the operator's time and the share's bandwidth.
+#:
+#: Drawn from what a network filesystem actually returns. The real case here:
+#: a 3,538-object, 88 GB copy over CIFS finished with 4 objects failing
+#: `[Errno 11] Resource temporarily unavailable` - EAGAIN - which a retry of
+#: those four objects completed in seconds. Without this, a five-hour transfer
+#: that fails at hour four needs a human to notice and re-run it.
+#:
+#: Deliberately NOT retried: ENOSPC (the disk is full; retrying cannot help and
+#: the operator must know), EACCES/EPERM (a permission problem), ENOENT (the
+#: source object is gone - that is a finding, not a hiccup), and EROFS.
+TRANSIENT_ERRNOS: Tuple[int, ...] = (
+    errno.EAGAIN, errno.EBUSY, errno.EINTR,
+    errno.ENETDOWN, errno.ENETRESET, errno.ETIMEDOUT, errno.ECONNRESET,
+    errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EPIPE,
+)
+
+#: Attempts per object, including the first. Three is enough to ride out a busy
+#: share without turning a permanently broken destination into a long stall.
+DEFAULT_COPY_ATTEMPTS = 3
+RETRY_BACKOFF_SEC = 1.5
+
+
+def is_transient(exc: OSError) -> bool:
+    """Whether ``exc`` is worth retrying.
+
+    Some network filesystems report a transient failure with EIO or with a plain
+    errno of 0, so the strerror text is consulted as well. That is a heuristic and
+    is treated as one: a false positive costs a little time, a false negative
+    costs an operator pass over a long transfer.
+    """
+    if isinstance(exc, OSError) and exc.errno in TRANSIENT_ERRNOS:
+        return True
+    text = (getattr(exc, "strerror", None) or str(exc) or "").lower()
+    return any(phrase in text for phrase in (
+        "resource temporarily unavailable",
+        "device or resource busy",
+        "connection reset",
+        "network is unreachable",
+        "host is unreachable",
+        "timed out",
+        "broken pipe",
+    ))
+
+
 def stream_copy(
     source: Path,
     target: Path,
@@ -299,6 +352,7 @@ def execute_copy(
     max_errors: int = MAX_SUMMARY_ENTRIES,
     progress: Optional[Callable[[CopyProgress], None]] = None,
     staged_destinations: Optional[Mapping[str, str]] = None,
+    attempts_limit: Optional[int] = None,
 ) -> CopyProgress:
     """Copy exactly ``keys`` to the destination and record every outcome.
 
@@ -322,6 +376,7 @@ def execute_copy(
 
     copied = skipped = failed = 0
     copied_bytes = 0
+    retried = 0
     errors: List[str] = []
 
     def emit(record: Dict[str, Any], handle) -> None:
@@ -363,14 +418,37 @@ def execute_copy(
                       "detail": "key_escapes_destination"}, handle)
                 continue
             source = src_root / key
-            try:
-                digest, written = stream_copy(source, target, algorithm=algorithm)
-            except OSError as exc:
-                failed += 1
-                if len(errors) < max_errors:
-                    errors.append(f"{key}:{exc.strerror or exc}")
-                emit({"key": key, "status": FAILED,
-                      "destination_key": landed, "detail": str(exc)}, handle)
+            digest = written = None
+            attempts = 0
+            for attempts in range(1, (attempts_limit or DEFAULT_COPY_ATTEMPTS) + 1):
+                try:
+                    digest, written = stream_copy(source, target,
+                                                  algorithm=algorithm)
+                    break
+                except OSError as exc:
+                    if attempts >= (attempts_limit or DEFAULT_COPY_ATTEMPTS) \
+                            or not is_transient(exc):
+                        failed += 1
+                        if len(errors) < max_errors:
+                            errors.append(f"{key}:{exc.strerror or exc}")
+                        emit({"key": key, "status": FAILED,
+                              "destination_key": landed,
+                              "attempts": attempts,
+                              "detail": str(exc)}, handle)
+                        break
+                    # Recorded even when the retry succeeds: an archive built
+                    # without ever mentioning the flakiness is how a marginal
+                    # destination gets discovered months later, by an outage.
+                    sys.stderr.write(
+                        f"custody: {key} failed transiently "
+                        f"({exc.strerror or exc}); retry {attempts} of "
+                        f"{attempts_limit or DEFAULT_COPY_ATTEMPTS}\n")
+                    time.sleep(RETRY_BACKOFF_SEC * attempts)
+            # Counted before the failure check: a retry that did not rescue the
+            # object still happened, and a destination that needed retries and
+            # still failed is the case most worth knowing about.
+            retried += attempts - 1
+            if digest is None:
                 continue
             if written < 0:
                 # Already present: never overwrite. Verification decides.
@@ -386,6 +464,7 @@ def execute_copy(
             if progress is not None:
                 progress(CopyProgress(
                     ledger_path=str(ledger), copied=copied, copied_bytes=copied_bytes,
+                    retried=retried,
                     skipped_verified=skipped, failed=failed, errors=tuple(errors),
                     planned=len(keys), limit=limit,
                 ))
@@ -394,6 +473,7 @@ def execute_copy(
         ledger_path=str(ledger),
         copied=copied,
         copied_bytes=copied_bytes,
+        retried=retried,
         skipped_present=skipped,
         failed=failed,
         errors=tuple(errors),
