@@ -1342,13 +1342,15 @@ def cmd_execute(args) -> int:
     # nothing", which for a destination that is a plain directory says nothing true
     # about the storage - and treating it as authoritative refused every campaign
     # whose destination is an ordinary directory rather than a mount point.
+    # Only the storage, never the directory. `execute` creates the declared tree as
+    # it copies - stream_copy does mkdir(parents=True) - so refusing an absent
+    # subdirectory here blocks every first copy into a new archive, which is the
+    # normal case. The same condition IS a blocker for release, where an absent
+    # destination means the verified copies are not where the campaign says.
     dest_obs = mounts.get("destination") or {}
     if campaign_obj.destination.identity is not None:
         backing = (dest_obs.get("observation") or {}).get("backing_mount_point")
-        if backing:
-            if dest_obs.get("observed_usable") is False:
-                blockers.append("destination_path_absent")
-        elif campaign_obj.destination.mounted is False:
+        if not backing and campaign_obj.destination.mounted is False:
             blockers.append("destination_not_mounted")
     if is_locked(campaign_obj.destination.logical.canonical):
         blockers.append("destination_locked_by_another_campaign")

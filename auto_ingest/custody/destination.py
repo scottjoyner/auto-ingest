@@ -32,6 +32,16 @@ DESTINATION_ENV_VARS: Tuple[str, ...] = (
     "CUSTODY_DESTINATION_PATH",
 )
 
+# Logical destination identity. Needed because "primary" cannot describe two
+# unrelated archives on one host: the dashcam corpus and the DVD-ripper rips are
+# different projects with different landing places, and both resolving to
+# `primary:fileserver/dashcam` made them contend for one campaign lock - so a
+# second campaign was refused as "locked by another campaign" when the only thing
+# they shared was a default.
+DESTINATION_NAME_ENV_VARS: Tuple[str, ...] = ("CUSTODY_DESTINATION_NAME",)
+DESTINATION_RELATIVE_ENV_VARS: Tuple[str, ...] = (
+    "CUSTODY_DESTINATION_RELATIVE_PATH",)
+
 # Declared identity of the destination storage, in the environment so that a
 # committed config.yaml stays portable between hosts. Precedence: env then config.
 DESTINATION_IDENTITY_ENV_VARS: Tuple[str, ...] = (
@@ -320,8 +330,10 @@ def resolve_destination(
             )
 
     logical = LogicalDestination(
-        name=_opt_str(config.get(DESTINATION_NAME_KEY)) or "primary",
-        relative_path=(_opt_str(config.get(DESTINATION_RELATIVE_KEY))
+        name=(_opt_str(env.get(DESTINATION_NAME_ENV_VARS[0]))
+              or _opt_str(config.get(DESTINATION_NAME_KEY)) or "primary"),
+        relative_path=(_opt_str(env.get(DESTINATION_RELATIVE_ENV_VARS[0]))
+                       or _opt_str(config.get(DESTINATION_RELATIVE_KEY))
                        or DESTINATION_DEFAULT_RELATIVE_PATH),
     )
 

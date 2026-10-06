@@ -40,3 +40,27 @@ def real_mounts(monkeypatch):
 
     patch_mount_table(monkeypatch, MOUNTS_PATH)
     return MOUNTS_PATH
+
+
+@pytest.fixture(autouse=True)
+def hermetic_campaign_locks(tmp_path_factory, monkeypatch):
+    """Keep every test out of the shared production campaign lock directory.
+
+    ``CUSTODY_LOCK_ROOT`` defaults to ``/nas/custody-locks``, which is shared
+    across machines and holds a marker for any campaign currently copying. Left
+    alone, a test that shells out to the CLI observes live production state: it is
+    refused as ``destination_locked_by_another_campaign`` while a real campaign
+    runs and passes when none does.
+
+    That is worse than a flaky test, because it is invisible in CI - which has no
+    campaign running - and shows up only on a workstation mid-copy, where it reads
+    as a product bug. Two tests failed exactly this way during a live 91 GB
+    campaign; both passed in isolation and in CI.
+
+    Autouse and session-wide rather than part of ``hermetic_mounts``, because the
+    tests that shell out to the real CLI do not request that fixture and were the
+    ones that broke.
+    """
+    root = tmp_path_factory.mktemp("custody-locks")
+    monkeypatch.setenv("CUSTODY_LOCK_ROOT", str(root))
+    return root
