@@ -259,11 +259,66 @@ def test_neither_wired_entry_point_reintroduces_the_unpruned_walk():
         fn = next(node for node in tree.body
                   if isinstance(node, ast.FunctionDef)
                   and node.name == "walk_date_dirs")
-        walked = any(isinstance(node, ast.Call)
-                     and isinstance(node.func, ast.Attribute)
-                     and node.func.attr == "walk"
-                     for node in ast.walk(fn))
-        assert not walked, (
-            f"{rel} open-codes the walk again and will descend into quarantines")
-        assert "media_pairing" in ast.unparse(fn), (
+        body = ast.unparse(fn)
+        walks = [n for n in ast.walk(fn)
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "walk"]
+        if walks:
+            # A fallback walk is acceptable - the flat script must not crash an
+            # ingest run because a shared import failed. But it has to prune:
+            # falling back to the OLD unpruned walk would reintroduce this bug
+            # silently, on the one path with no test coverage.
+            assert "dirs[:]" in body, (
+                f"{rel} has an inline os.walk that does not prune `dirs`, so it "
+                f"would descend into quarantines")
+        assert "media_pairing" in body, (
             f"{rel} must delegate to the shared walker")
+
+
+def test_the_flat_script_fallback_walk_also_prunes(tmp_path):
+    """Proved by running it, not by reading it.
+
+    The flat script is what `runall.sh` invokes and cannot be imported here - its
+    venv has no pandas - so its delegation is unrunnable in CI and in this
+    checkout. Its fallback is therefore extracted and executed, with the shared
+    import forced to fail, so the branch that would otherwise reintroduce the bug
+    silently is actually exercised.
+    """
+    import ast
+    import builtins
+    import pathlib
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    source = (repo / "dashcam_yolo_embeddings_ents.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    fn = next(node for node in tree.body
+              if isinstance(node, ast.FunctionDef)
+              and node.name == "walk_date_dirs")
+    quarantine = [n for n in tree.body
+                  if isinstance(n, ast.Assign)
+                  and any(getattr(t, "id", None) == "QUARANTINE_DIRNAMES"
+                          for t in n.targets)]
+    assert quarantine, "the fallback needs the names it prunes on"
+
+    namespace: dict = {"os": os, "List": list}
+    exec(compile(ast.Module(body=quarantine + [fn], type_ignores=[]),
+                 "<flat-script-fallback>", "exec"), namespace)
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name.startswith("auto_ingest.dashcam.media_pairing"):
+            raise ImportError("simulated: shared walker unavailable")
+        return real_import(name, *args, **kwargs)
+
+    _tree(tmp_path)
+    builtins.__import__ = blocked
+    try:
+        found = namespace["walk_date_dirs"](str(tmp_path))
+    finally:
+        builtins.__import__ = real_import
+
+    assert [p.split("/")[-3:] for p in found] == [["2026", "08", "29"],
+                                                  ["2026", "08", "30"]], (
+        "the fallback walked quarantined date trees")
