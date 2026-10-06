@@ -718,6 +718,32 @@ def cmd_preflight(args) -> int:
         "none" if not blockers_ else ",".join(blockers_),
         "stop sync-service / ingest-worker for the campaign, or teach them to "
         "consult the campaign lock as a separate change")
+    # What a copy would actually do, not merely whether one could run. An operator
+    # about to move 91 GB needs to know the layout is staged, how much of it is
+    # quarantined orphan detections, and how many dates are filesystem-derived
+    # rather than camera-written - and `plan` is not consulted before `execute`.
+    from .ledger import read_staged_meta
+
+    staged_meta = read_staged_meta(args.bundle)
+    add("staged_layout_recorded", staged_meta is not None,
+        ("no recorded layout; execute would copy to source-relative paths"
+         if staged_meta is None
+         else f"{staged_meta.get('staged_objects')} objects, "
+              f"roots={staged_meta.get('source_roots')}"),
+        "run `custody stage` so the layout is decided and recorded before copying")
+    orphans = (staged_meta or {}).get("orphaned_detections")
+    if staged_meta is not None:
+        add("orphaned_detections_preserved", True,
+            f"{orphans or 0} detection file(s) have no clip on this card and are "
+            f"routed to a quarantine namespace rather than dropped",
+            "informational: these describe recordings not on this card")
+        from_mtime = (staged_meta or {}).get("keyed_from_mtime") or 0
+        add("dates_camera_written", from_mtime == 0,
+            f"{from_mtime} object(s) dated from filesystem mtime, not a "
+            f"camera-written timestamp",
+            "if any, the mtime is a last-written time; see `custody stage "
+            "--key-undated-by-mtime`")
+
     add("release_gate_open", status.release.allowed,
         "blockers=" + ",".join(b.code for b in status.release.blockers),
         "resolve the release blockers; see `custody status`")

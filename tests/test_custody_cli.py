@@ -780,3 +780,68 @@ def test_release_refuses_a_wrong_root_before_deleting_anything(tmp_path):
                       str(tmp_path / "card"), "--json"])
     assert code == EXIT_GATE_CLOSED
     assert any("does not contain" in b for b in json.loads(o.getvalue())["blockers"])
+
+
+# ---------------------------------------------------------------------------
+# preflight: what a copy would do, not only whether one could run
+# ---------------------------------------------------------------------------
+# An operator about to move 91 GB can learn the layout is staged, how much of it
+# is quarantined orphan detections, and how many dates are filesystem-derived -
+# from `preflight`, which they run first. `plan` is not consulted before
+# `execute`, so anything preflight omits is something they find out afterwards.
+
+def _staged_bundle(tmp_path):
+    root = _card(tmp_path)
+    bundle = _bundle(tmp_path)
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        assert _main(["stage", "--bundle", bundle, "--root", str(root),
+                      "--policy-file", str(_policy_file(tmp_path)),
+                      "--apply", "--json"]) == EXIT_OK, e.getvalue()
+    return root, bundle
+
+
+def _checks(bundle):
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        _main(["preflight", "--bundle", str(bundle), "--json"])
+    return {c["name"]: c for c in json.loads(o.getvalue())["checks"]}
+
+
+def test_preflight_reports_the_layout_it_would_copy(tmp_path):
+    root, bundle = _staged_bundle(tmp_path)
+    checks = _checks(bundle)
+    assert checks["staged_layout_recorded"]["ok"] is True
+    assert "objects" in checks["staged_layout_recorded"]["detail"]
+
+
+def test_preflight_counts_the_orphans_and_says_they_are_preserved(tmp_path):
+    root, bundle = _staged_bundle(tmp_path)
+    checks = _checks(bundle)
+    orphan = checks["orphaned_detections_preserved"]
+    assert orphan["ok"] is True, "quarantining is not a failure"
+    assert "quarantine" in orphan["detail"]
+    # The fixture has unpaired detections under yolo/.
+    assert "detection file(s) have no clip" in orphan["detail"]
+
+
+def test_preflight_names_dates_that_are_not_camera_written(tmp_path):
+    """An mtime is a last-written time. An operator should be told which dates
+    rest on that before the archive is built on them."""
+    root, bundle = _staged_bundle(tmp_path)
+    check = _checks(bundle)["dates_camera_written"]
+    assert check["ok"] is True, "every object in this fixture is camera-dated"
+
+
+def test_preflight_says_so_when_no_layout_was_decided(tmp_path):
+    """The failure that matters: without a recorded layout, execute copies to
+    source-relative paths and recreates the camera's directory layout."""
+    bundle = _bundle(tmp_path)
+    check = _checks(bundle)["staged_layout_recorded"]
+    assert check["ok"] is False
+    assert "source-relative" in check["detail"]
+    assert "custody stage" in check["remedy"]

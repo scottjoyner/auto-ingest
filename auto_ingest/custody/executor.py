@@ -549,6 +549,10 @@ def write_staged_ledger(bundle: str | Path, plan: Any, *,
             "source_roots": sorted({str(r) for r in (source_roots or ())}),
             "staged_objects": len(plan.staged),
             "keyed_from_mtime": plan.by_key_source().get("mtime", 0),
+            # Detections preserved but not paired with a clip on this card. Counted
+            # here so `preflight` can tell an operator what a copy will contain
+            # before the copy runs, rather than after.
+            "orphaned_detections": len(plan.unpaired_detections()),
         }, sort_keys=True, indent=2))
         handle.write("\n")
         handle.flush()
