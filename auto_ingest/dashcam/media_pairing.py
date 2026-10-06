@@ -106,3 +106,55 @@ def missing_media(directory: str) -> List[Tuple[str, str]]:
         if find_sibling_media(directory, key) is None:
             out.append((key, name))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Finding the trees worth processing
+# ---------------------------------------------------------------------------
+
+#: Directory names that hold preserved artifacts rather than work to do.
+#:
+#: `custody stage` routes detection files whose clip is absent into
+#: `orphaned-detections/`, and that path is a YYYY/MM/DD shape - so a walker that
+#: recognises date directories descends into it and then finds no clip for any of
+#: them. On the real card that is 2,934 directories and one "missing media"
+#: warning each, on every pass, forever. The files are meant to be kept, not
+#: processed.
+QUARANTINE_DIRNAMES: Tuple[str, ...] = ("orphaned-detections",)
+
+
+def is_quarantined(path: str, names: Tuple[str, ...] = QUARANTINE_DIRNAMES) -> bool:
+    """Whether any component of ``path`` is a quarantine directory."""
+    if not names:
+        return False
+    parts = {p for p in os.path.normpath(str(path)).split("/") if p}
+    return any(name in parts for name in names)
+
+
+def walk_date_dirs(
+    base: str,
+    *,
+    exclude: Tuple[str, ...] = QUARANTINE_DIRNAMES,
+) -> List[str]:
+    """Date-shaped directories under ``base``, minus any quarantine namespace.
+
+    Quarantined trees are pruned at the walk rather than filtered afterwards, so
+    their contents are never even stat()ed - which matters when the excluded tree
+    is 2,934 directories on a CIFS share.
+    """
+    out: List[str] = []
+    for root, dirs, _files in os.walk(base):
+        # Prune in place; os.walk honours the mutation of `dirs`.
+        dirs[:] = [d for d in dirs if d not in exclude]
+        parts = [p for p in os.path.normpath(root).split("/") if p]
+        if len(parts) < 3:
+            continue
+        y, m, d = parts[-3], parts[-2], parts[-1]
+        if not (len(y) == 4 and len(m) == 2 and len(d) == 2):
+            continue
+        if not (y.isdigit() and m.isdigit() and d.isdigit()):
+            continue
+        if is_quarantined(root, exclude):
+            continue
+        out.append(root)
+    return sorted(out)
