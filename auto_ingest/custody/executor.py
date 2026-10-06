@@ -40,17 +40,31 @@ actually streamed, so "copied" means "these bytes were produced and hashed", not
 
 from __future__ import annotations
 
+import errno
+import json
 import os
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from .hashing import CHUNK_BYTES, DEFAULT_ALGORITHM
 from .ledger import (
     COPY_LEDGER,
     DESTINATION_LEDGER,
     HASH_LEDGER,
+    STAGED_LEDGER,
+    STAGED_META,
     ledger_dir,
     read_records,
 )
@@ -92,6 +106,10 @@ class CopyProgress:
     skipped_verified: int = 0
     skipped_present: int = 0
     failed: int = 0
+    #: Transient failures that a retry rode out. Counted rather than swallowed: a
+    #: destination that needed 40 retries across 3,538 objects is a marginal
+    #: destination, and that is worth knowing before an outage makes it obvious.
+    retried: int = 0
     errors: Tuple[str, ...] = ()
     planned: int = 0
     complete: bool = False
@@ -110,6 +128,7 @@ class CopyProgress:
             "copied_bytes": self.copied_bytes,
             "errors": list(self.errors),
             "failed": self.failed,
+            "retried": self.retried,
             "interrupted": self.interrupted,
             "ledger_path": self.ledger_path,
             "limit": self.limit,
@@ -160,7 +179,8 @@ def _keys_by_status(path: Path, statuses: Tuple[str, ...]) -> Dict[str, str]:
     return out
 
 
-def plan_copy(bundle: str | Path, destination_root: str | Path) -> CopyPlan:
+def plan_copy(bundle: str | Path, destination_root: str | Path,
+              staged_destinations: Optional[Mapping[str, str]] = None) -> CopyPlan:
     """Derive the copy set from the hash and destination ledgers. Read-only.
 
     Three buckets, and the copy set is exactly the third:
@@ -179,10 +199,17 @@ def plan_copy(bundle: str | Path, destination_root: str | Path) -> CopyPlan:
     present_unverified: List[str] = []
     absent: List[str] = []
     root = Path(destination_root)
+    # Staging may place an object at a different relative path than its source
+    # key, so presence is judged against where the bytes would actually LAND.
+    # Absent the map this is the identity, and every existing behaviour is
+    # unchanged.
+    def dest_key(key: str) -> str:
+        return (staged_destinations or {}).get(key, key)
+
     for key in sorted(source):
         if key in dest:
             already_verified.append(key)
-        elif (root / key).exists():
+        elif (root / dest_key(key)).exists():
             present_unverified.append(key)
         else:
             absent.append(key)
@@ -208,6 +235,52 @@ def _safe_join(root: Path, key: str) -> Optional[Path]:
     except ValueError:
         return None
     return root / key
+
+
+#: Errors worth trying again. Everything else is a permanent condition and a
+#: retry just spends the operator's time and the share's bandwidth.
+#:
+#: Drawn from what a network filesystem actually returns. The real case here:
+#: a 3,538-object, 88 GB copy over CIFS finished with 4 objects failing
+#: `[Errno 11] Resource temporarily unavailable` - EAGAIN - which a retry of
+#: those four objects completed in seconds. Without this, a five-hour transfer
+#: that fails at hour four needs a human to notice and re-run it.
+#:
+#: Deliberately NOT retried: ENOSPC (the disk is full; retrying cannot help and
+#: the operator must know), EACCES/EPERM (a permission problem), ENOENT (the
+#: source object is gone - that is a finding, not a hiccup), and EROFS.
+TRANSIENT_ERRNOS: Tuple[int, ...] = (
+    errno.EAGAIN, errno.EBUSY, errno.EINTR,
+    errno.ENETDOWN, errno.ENETRESET, errno.ETIMEDOUT, errno.ECONNRESET,
+    errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EPIPE,
+)
+
+#: Attempts per object, including the first. Three is enough to ride out a busy
+#: share without turning a permanently broken destination into a long stall.
+DEFAULT_COPY_ATTEMPTS = 3
+RETRY_BACKOFF_SEC = 1.5
+
+
+def is_transient(exc: OSError) -> bool:
+    """Whether ``exc`` is worth retrying.
+
+    Some network filesystems report a transient failure with EIO or with a plain
+    errno of 0, so the strerror text is consulted as well. That is a heuristic and
+    is treated as one: a false positive costs a little time, a false negative
+    costs an operator pass over a long transfer.
+    """
+    if isinstance(exc, OSError) and exc.errno in TRANSIENT_ERRNOS:
+        return True
+    text = (getattr(exc, "strerror", None) or str(exc) or "").lower()
+    return any(phrase in text for phrase in (
+        "resource temporarily unavailable",
+        "device or resource busy",
+        "connection reset",
+        "network is unreachable",
+        "host is unreachable",
+        "timed out",
+        "broken pipe",
+    ))
 
 
 def stream_copy(
@@ -278,12 +351,22 @@ def execute_copy(
     limit: Optional[int] = None,
     max_errors: int = MAX_SUMMARY_ENTRIES,
     progress: Optional[Callable[[CopyProgress], None]] = None,
+    staged_destinations: Optional[Mapping[str, str]] = None,
+    attempts_limit: Optional[int] = None,
 ) -> CopyProgress:
     """Copy exactly ``keys`` to the destination and record every outcome.
 
     Never overwrites an existing destination object. Never touches the source
     beyond reading it. Appends one ``copy.jsonl`` record per object, so an
     interrupted pass is resumable and auditable rather than invisible.
+
+    ``staged_destinations`` maps a source key to the relative path it should
+    occupy at the destination - what ``auto_ingest.custody.staging`` computes to
+    put media where the ingest pipeline's suffix-based discovery will find it.
+    Omitted, the destination path equals the source key, which is the pre-staging
+    behaviour. Each ledger record keeps the source ``key`` AND adds
+    ``destination_key``, because reconciliation joins on the source key and an
+    operator reading the ledger needs to know where the bytes went.
     """
     ledgers = ledger_dir(bundle)
     ledgers.mkdir(parents=True, exist_ok=True)
@@ -293,6 +376,7 @@ def execute_copy(
 
     copied = skipped = failed = 0
     copied_bytes = 0
+    retried = 0
     errors: List[str] = []
 
     def emit(record: Dict[str, Any], handle) -> None:
@@ -318,40 +402,69 @@ def execute_copy(
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
+        staged = staged_destinations or {}
         for key in keys:
             refresh_marker()
             if limit is not None and copied + skipped + failed >= limit:
                 break
-            target = _safe_join(dest_root, key)
+            landed = staged.get(key, key)
+            target = _safe_join(dest_root, landed)
             if target is None:
                 failed += 1
                 if len(errors) < max_errors:
                     errors.append(f"{key}:key_escapes_destination")
                 emit({"key": key, "status": FAILED,
+                      "destination_key": landed,
                       "detail": "key_escapes_destination"}, handle)
                 continue
             source = src_root / key
-            try:
-                digest, written = stream_copy(source, target, algorithm=algorithm)
-            except OSError as exc:
-                failed += 1
-                if len(errors) < max_errors:
-                    errors.append(f"{key}:{exc.strerror or exc}")
-                emit({"key": key, "status": FAILED,
-                      "detail": str(exc)}, handle)
+            digest = written = None
+            attempts = 0
+            for attempts in range(1, (attempts_limit or DEFAULT_COPY_ATTEMPTS) + 1):
+                try:
+                    digest, written = stream_copy(source, target,
+                                                  algorithm=algorithm)
+                    break
+                except OSError as exc:
+                    if attempts >= (attempts_limit or DEFAULT_COPY_ATTEMPTS) \
+                            or not is_transient(exc):
+                        failed += 1
+                        if len(errors) < max_errors:
+                            errors.append(f"{key}:{exc.strerror or exc}")
+                        emit({"key": key, "status": FAILED,
+                              "destination_key": landed,
+                              "attempts": attempts,
+                              "detail": str(exc)}, handle)
+                        break
+                    # Recorded even when the retry succeeds: an archive built
+                    # without ever mentioning the flakiness is how a marginal
+                    # destination gets discovered months later, by an outage.
+                    sys.stderr.write(
+                        f"custody: {key} failed transiently "
+                        f"({exc.strerror or exc}); retry {attempts} of "
+                        f"{attempts_limit or DEFAULT_COPY_ATTEMPTS}\n")
+                    time.sleep(RETRY_BACKOFF_SEC * attempts)
+            # Counted before the failure check: a retry that did not rescue the
+            # object still happened, and a destination that needed retries and
+            # still failed is the case most worth knowing about.
+            retried += attempts - 1
+            if digest is None:
                 continue
             if written < 0:
                 # Already present: never overwrite. Verification decides.
                 skipped += 1
-                emit({"key": key, "status": SKIPPED, "path": str(target)}, handle)
+                emit({"key": key, "status": SKIPPED, "path": str(target),
+                      "destination_key": landed}, handle)
                 continue
             copied += 1
             copied_bytes += written
             emit({"key": key, "status": COPIED, "digest": digest,
-                  "size": written, "path": str(target)}, handle)
+                  "size": written, "path": str(target),
+                  "destination_key": landed}, handle)
             if progress is not None:
                 progress(CopyProgress(
                     ledger_path=str(ledger), copied=copied, copied_bytes=copied_bytes,
+                    retried=retried,
                     skipped_verified=skipped, failed=failed, errors=tuple(errors),
                     planned=len(keys), limit=limit,
                 ))
@@ -360,6 +473,7 @@ def execute_copy(
         ledger_path=str(ledger),
         copied=copied,
         copied_bytes=copied_bytes,
+        retried=retried,
         skipped_present=skipped,
         failed=failed,
         errors=tuple(errors),
@@ -384,6 +498,37 @@ def _ends_unterminated(path: Path) -> bool:
         return False
 
 
+def accounted_keys_in_ledger(ledger: Path) -> int:
+    """Distinct keys this ledger records as accounted for at the destination.
+
+    Copied, or already present and therefore deliberately skipped. Failed rows do
+    not count: a pass that tried three objects and failed all three has accounted
+    for nothing.
+    """
+    if not ledger.is_file():
+        return 0
+    import json
+
+    keys = set()
+    try:
+        text = ledger.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict) and row.get("status") in (COPIED, SKIPPED):
+            key = row.get("key")
+            if key:
+                keys.add(str(key))
+    return len(keys)
+
+
 def to_evidence(result: CopyProgress, plan: Optional[CopyPlan] = None,
                 *, planned: Optional[int] = None) -> Dict[str, Any]:
     """The evidence fragment an execution pass contributes.
@@ -397,8 +542,19 @@ def to_evidence(result: CopyProgress, plan: Optional[CopyPlan] = None,
     object was handled, not merely when this run's subset was.
     """
     total_planned = planned if planned is not None else (plan.total_objects if plan else result.planned)
-    handled_total = (result.copied + result.skipped_present + result.skipped_verified
-                     + result.failed)
+    handled_this_pass = (result.copied + result.skipped_present + result.skipped_verified
+                         + result.failed)
+    # Cumulative, and read from the ledger rather than summed from this pass.
+    #
+    # A re-run over an already-copied set has nothing to do: plan_copy returns no
+    # `absent` keys because the destination ledger already proves them, so
+    # handled_this_pass is 0. Writing that over a real count regressed a finished
+    # campaign from VERIFIED back to COPYING on every re-run - the same
+    # delta-vs-cumulative bug that `verified_bytes` had.
+    #
+    # max(), not a sum: the ledger already contains this pass's own rows.
+    handled_total = max(handled_this_pass, accounted_keys_in_ledger(
+        Path(result.ledger_path)))
     return {
         "copy": {
             "planned": {"files": total_planned},
@@ -427,3 +583,61 @@ __all__ = [
     "stream_copy",
     "to_evidence",
 ]
+
+
+def write_staged_ledger(bundle: str | Path, plan: Any, *,
+                       source_roots: Optional[Sequence[str]] = None) -> Path:
+    """Record the layout in the campaign bundle, atomically.
+
+    ``custody execute`` reads this rather than re-deriving the layout, so the
+    recorded decision and the copied bytes cannot drift apart. Written whole then
+    replaced: a torn file here would leave ``execute`` copying to paths that were
+    never proposed.
+
+    ``plan`` is a ``custody.staging.StagingPlan``, passed loosely so this module
+    keeps no dependency on the planner that produced it.
+    """
+    ledgers = ledger_dir(bundle)
+    ledgers.mkdir(parents=True, exist_ok=True)
+    path = ledgers / STAGED_LEDGER
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    lines = []
+    for obj in sorted(plan.staged, key=lambda o: o.source_key):
+        lines.append(json.dumps({
+            "source_key": obj.source_key,
+            "destination_key": obj.destination_key,
+            "role": obj.role,
+            "key": obj.key,
+            # Provenance of the date, not just its result. A staged path whose
+            # date came from the filesystem is a weaker claim, and the record
+            # that outlives this run has to be able to say so.
+            "key_source": obj.key_source,
+            "camera": obj.camera,
+        }, sort_keys=True, separators=(",", ":")))
+    with open(tmp, "w", encoding="utf-8") as handle:
+        for line in lines:
+            handle.write(line + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+    # The roots, recorded next to the layout they produced.
+    meta_path = ledgers / STAGED_META
+    meta_tmp = meta_path.with_suffix(meta_path.suffix + ".tmp")
+    with open(meta_tmp, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "source_roots": sorted({str(r) for r in (source_roots or ())}),
+            "staged_objects": len(plan.staged),
+            "keyed_from_mtime": plan.by_key_source().get("mtime", 0),
+            # Detections preserved but not paired with a clip on this card. Counted
+            # here so `preflight` can tell an operator what a copy will contain
+            # before the copy runs, rather than after.
+            "orphaned_detections": len(plan.unpaired_detections()),
+        }, sort_keys=True, indent=2))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(meta_tmp, meta_path)
+    return path
+
+

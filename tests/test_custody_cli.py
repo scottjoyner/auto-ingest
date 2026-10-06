@@ -1,7 +1,10 @@
 """`auto-ingest custody ...` CLI: read-only by default, human and JSON modes."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+from pathlib import Path
 
 import pytest
 from custody_helpers import (
@@ -46,7 +49,7 @@ def test_parser_exposes_the_documented_subcommands():
     assert set(sub.choices) == {
         "status", "plan", "verify", "import", "new", "reconcile",
         "observe-mount", "capacity", "preflight", "hash", "execute",
-        "release-source",
+        "release-source", "stage", "declare-destination",
     }
 
 
@@ -413,3 +416,432 @@ def test_status_writes_nothing_even_with_a_missing_policy_override(capsys):
                       "--observed-uuid", "7A3E-2C19"], capsys)
     assert code == EXIT_OK
     assert sorted(p.name for p in CARD_01_BUNDLE.iterdir()) == before
+
+
+# ---------------------------------------------------------------------------
+# stage: classify -> hash the in-scope set -> report
+# ---------------------------------------------------------------------------
+# The bug this section exists for: `staging` produces a key -> DESTINATION map,
+# and `hash_source` wants key -> SOURCE path. Passing the map hashed nothing at
+# all and still exited 0 - a green run over zero objects. Every test here checks
+# the ledger has the objects in it, not merely that the command returned.
+
+CARD_TREE = {
+    # in scope, and stageable
+    "DCIM/Movie/2026_0829_123850_F.MP4": b"F" * 512,
+    "DCIM/Movie/2026_0829_123850_R.MP4": b"R" * 512,
+    "DCIM/Movie/2026_0829_124157_F.MP4": b"F2" * 512,
+    "yolo/2026_0829_123850_F_YOLOv8n.csv": b"k,v\n" * 4,
+    "yolo/2026_0829_124157_F_YOLOv8n.csv": b"k,v\n" * 4,
+    # a per-recording sidecar: must keep its suffix to stay discoverable
+    "transcripts/2026_0829_123850_medium_transcription.txt": b"words\n",
+    # out of scope entirely
+    "overland/locations_0001.json": b"{}" * 32,
+    "heatmap/2026_0829_123850_F.png": b"\x89PNG" * 8,
+    ".Trashes/._junk": b"junk",
+}
+
+
+def _card(tmp_path):
+    root = tmp_path / "card"
+    for rel, data in CARD_TREE.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    return root
+
+
+def _bundle(tmp_path):
+    """A real bundle: hash_source reads campaign metadata, so staging cannot run
+    against a bare directory."""
+    return str(write_bundle(tmp_path / "b", campaign(), evidence()))
+
+
+def _policy_file(tmp_path):
+    f = tmp_path / "policy.json"
+    f.write_text(json.dumps({"declared_source_exclusions": [".Trashes"]}))
+    return f
+
+
+def test_stage_hashes_exactly_the_objects_it_stages(tmp_path, capsys):
+    """The load-bearing assertion: real ledger records exist for real bytes."""
+    root = _card(tmp_path)
+    code, out, _ = run(["stage", "--bundle", _bundle(tmp_path), "--root", str(root),
+                        "--policy-file", str(_policy_file(tmp_path)),
+                        "--apply", "--json"], capsys)
+    assert code == EXIT_OK, out
+    payload = json.loads(out)
+    assert payload["hashed"] == payload["staged"], payload
+    assert payload["hashed"] > 0
+
+    rows = [json.loads(line) for line
+            in (tmp_path / "b" / "ledgers" / "hash.jsonl").read_text().splitlines()]
+    keys = {r["key"] for r in rows}
+    assert "DCIM/Movie/2026_0829_123850_F.MP4" in keys
+    assert "yolo/2026_0829_123850_F_YOLOv8n.csv" in keys
+    assert sum(r["size"] for r in rows) > 0
+
+
+def test_stage_never_puts_out_of_scope_objects_in_the_ledger(tmp_path, capsys):
+    """Hashing the whole walk would hand plan_copy a Python package to copy."""
+    root = _card(tmp_path)
+    code, out, _ = run(["stage", "--bundle", _bundle(tmp_path), "--root", str(root),
+                        "--policy-file", str(_policy_file(tmp_path)), "--json"], capsys)
+    assert code == EXIT_OK, out
+    rows = [json.loads(line) for line
+            in (tmp_path / "b" / "ledgers" / "hash.jsonl").read_text().splitlines()]
+    keys = {r["key"] for r in rows}
+    assert not any(k.startswith("overland/") for k in keys)
+    assert not any(k.startswith("heatmap/") for k in keys)
+    assert not any(k.startswith(".Trashes/") for k in keys)
+    payload = json.loads(out)
+    assert payload["excluded_by_policy"] == 1
+    assert payload["unstaged"] == 2  # the overland json and the heatmap png
+
+
+def test_stage_does_not_modify_the_source(tmp_path, capsys):
+    root = _card(tmp_path)
+    before = {rel: (root / rel).read_bytes() for rel in CARD_TREE}
+    before_paths = sorted(p.relative_to(root).as_posix() for p in root.rglob("*"))
+    run(["stage", "--bundle", _bundle(tmp_path), "--root", str(root),
+         "--policy-file", str(_policy_file(tmp_path)), "--apply", "--json"], capsys)
+    assert sorted(p.relative_to(root).as_posix() for p in root.rglob("*")) == before_paths
+    for rel, data in before.items():
+        assert (root / rel).read_bytes() == data
+
+
+def test_stage_records_what_it_declined_to_stage_and_why(tmp_path, capsys):
+    """Silence here would read as "nothing was skipped"."""
+    root = _card(tmp_path)
+    _, out, _ = run(["stage", "--bundle", _bundle(tmp_path), "--root", str(root),
+                     "--policy-file", str(_policy_file(tmp_path)), "--json"], capsys)
+    reasons = json.loads(out)["unstaged_by_reason"]
+    # Scope is reported ahead of the key: a Python file is not pipeline content,
+    # whatever its name, and saying "no timestamp" would be a false problem.
+    assert reasons == {"out_of_scope:other": 2}
+
+
+def test_stage_is_the_layout_contract_not_a_copy(tmp_path, capsys):
+    """stage lays out and hashes. Copying is `execute`, deliberately."""
+    root = _card(tmp_path)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    _, out, _ = run(["stage", "--bundle", _bundle(tmp_path), "--root", str(root),
+                     "--policy-file", str(_policy_file(tmp_path)), "--json"], capsys)
+    assert list(dest.iterdir()) == [], "stage must not write to the destination"
+    assert not (tmp_path / "b" / "ledgers" / "copy.jsonl").exists()
+    assert json.loads(out)["staged"] > 0
+
+
+def test_stage_media_only_drops_derived_sidecars(tmp_path, capsys):
+    root = _card(tmp_path)
+    _, out, _ = run(["stage", "--bundle", _bundle(tmp_path), "--root", str(root),
+                     "--policy-file", str(_policy_file(tmp_path)),
+                     "--media-only", "--json"], capsys)
+    payload = json.loads(out)
+    assert payload["by_role"] == {"video": 3}, payload["by_role"]
+    assert "detection_csv" not in payload["by_role"]
+
+
+def test_stage_refuses_to_continue_when_two_objects_claim_one_path(
+        tmp_path, capsys, monkeypatch):
+    """A collision means the layout is wrong. Picking a winner loses a file."""
+    from auto_ingest.custody import staging
+
+    root = _card(tmp_path)
+    # Two different source keys that stage onto the same destination path.
+    monkeypatch.setattr(
+        staging, "staged_filename",
+        lambda stem, suffix, role, **kw: ("2026/08/29/same.mp4" if role == "video"
+                                          else f"{stem}{suffix}"))
+    code, _, err = run(["stage", "--bundle", _bundle(tmp_path), "--root", str(root),
+                        "--policy-file", str(_policy_file(tmp_path)),
+                        "--json"], capsys)
+    assert code == EXIT_GATE_CLOSED
+    assert "more than one source object" in err
+
+
+def test_stage_reports_an_empty_source_without_pretending_to_work(
+        tmp_path, capsys):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    code, out, _ = run(["stage", "--bundle", _bundle(tmp_path), "--root", str(empty),
+                        "--policy-file", str(_policy_file(tmp_path)),
+                        "--json"], capsys)
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["walked"] == 0 and payload["staged"] == 0
+
+
+# ---------------------------------------------------------------------------
+# stage decides the layout; execute obeys the record
+# ---------------------------------------------------------------------------
+# The two commands must not each hold their own idea of where a file goes. If
+# they disagreed, the copy ledger would name one path while the bytes sat at
+# another, and reconciliation - which joins on the source key - could not tell.
+
+def _stage(root, bundle, tmp_path):
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        code = _main(["stage", "--bundle", bundle, "--root", str(root),
+                      "--policy-file", str(_policy_file(tmp_path)), "--apply",
+                      "--json"])
+    assert code == EXIT_OK, e.getvalue()
+    return json.loads(o.getvalue())
+
+
+def test_stage_records_the_layout_in_the_bundle(tmp_path):
+    from auto_ingest.custody.ledger import read_staged_ledger
+
+    root = _card(tmp_path)
+    bundle = _bundle(tmp_path)
+    payload = _stage(root, bundle, tmp_path)
+
+    recorded = read_staged_ledger(bundle)
+    assert recorded is not None, "execute would otherwise fall back to card layout"
+    assert len(recorded) == payload["staged"]
+    media = "DCIM/Movie/2026_0829_123850_F.MP4"
+    assert recorded[media] == "2026/08/29/2026_0829_123850_F.MP4"
+    # Nothing source-relative survives in the record.
+    assert not any(v.startswith("DCIM/") or v.startswith("yolo/")
+                   for v in recorded.values())
+
+
+def test_a_bundle_with_no_recorded_layout_reads_as_absent_not_empty(tmp_path):
+    """Absent means "copy source keys verbatim". Empty would mean "copy
+    nothing", and treating them alike silently drops a campaign."""
+    from auto_ingest.custody.ledger import read_staged_ledger
+
+    assert read_staged_ledger(tmp_path / "nothing-here") is None
+
+
+def test_the_recorded_layout_is_replaced_whole_not_appended(tmp_path):
+    """A second, smaller stage must not leave the first stage's paths behind."""
+    from auto_ingest.custody.ledger import read_staged_ledger
+
+    root = _card(tmp_path)
+    bundle = _bundle(tmp_path)
+    _stage(root, bundle, tmp_path)
+    first = read_staged_ledger(bundle)
+
+    (root / "heatmap" / "2026_0829_123850_F.png").unlink()
+    _stage(root, bundle, tmp_path)
+    second = read_staged_ledger(bundle)
+
+    assert second == first, "nothing changed, so the record must be identical"
+    lines = (Path(bundle) / "ledgers" / "staged.jsonl").read_text().splitlines()
+    assert len(lines) == len(second), "no superseded rows left behind"
+
+
+def test_execute_reports_the_layout_it_will_use_before_it_runs(tmp_path):
+    root = _card(tmp_path)
+    bundle = _bundle(tmp_path)
+    payload = _stage(root, bundle, tmp_path)
+
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        _main(["execute", "--bundle", bundle, "--json"])
+    report = json.loads(o.getvalue())
+    assert report["layout"] == "staged", "a recorded layout must be picked up"
+    assert report["staged_objects"] == payload["staged"]
+
+
+def test_flat_ignores_a_recorded_layout_on_purpose(tmp_path):
+    root = _card(tmp_path)
+    bundle = _bundle(tmp_path)
+    _stage(root, bundle, tmp_path)
+
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        _main(["execute", "--bundle", bundle, "--flat", "--json"])
+    assert json.loads(o.getvalue())["layout"] == "source_relative"
+
+
+def test_the_plan_judges_presence_where_the_recorded_layout_says(tmp_path):
+    """plan_copy must consult the recorded path, or an already-staged object is
+    re-copied because its source-relative path is absent."""
+    from auto_ingest.custody.executor import plan_copy
+    from auto_ingest.custody.ledger import read_staged_ledger
+
+    root = _card(tmp_path)
+    bundle = _bundle(tmp_path)
+    _stage(root, bundle, tmp_path)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    mapping = read_staged_ledger(bundle)
+    assert plan_copy(bundle, dest, mapping).absent, "nothing staged at the destination yet"
+
+    landed = dest / mapping["DCIM/Movie/2026_0829_123850_F.MP4"]
+    landed.parent.mkdir(parents=True, exist_ok=True)
+    landed.write_bytes((root / "DCIM/Movie/2026_0829_123850_F.MP4").read_bytes())
+
+    after = plan_copy(bundle, dest, mapping)
+    assert "DCIM/Movie/2026_0829_123850_F.MP4" not in after.absent
+
+
+# ---------------------------------------------------------------------------
+# The source root that stage walked is the one execute must use
+# ---------------------------------------------------------------------------
+# Custody keys are relative to the root the walk started from. The campaign only
+# remembers the card's mount point, so staging UNTITLED/VIDEO and copying without
+# restating the root produced "No such file or directory" once per object - which
+# reads as a lost card rather than as two commands disagreeing about a path. It
+# cost a real 1.9 GB copy before anyone noticed.
+
+def _staged_subdirectory_campaign(tmp_path):
+    """A campaign staged against a subdirectory of the card."""
+    root = _card(tmp_path) / "DCIM"
+    bundle = _bundle(tmp_path)
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        assert _main(["stage", "--bundle", bundle, "--root", str(root),
+                      "--policy-file", str(_policy_file(tmp_path)),
+                      "--apply", "--json"]) == EXIT_OK, e.getvalue()
+    return root, bundle
+
+
+def test_stage_records_the_root_it_walked(tmp_path):
+    from auto_ingest.custody.ledger import read_staged_meta
+
+    root, bundle = _staged_subdirectory_campaign(tmp_path)
+    meta = read_staged_meta(bundle)
+    assert meta is not None
+    assert meta["source_roots"] == [str(root)]
+    assert meta["staged_objects"] > 0
+
+
+def test_execute_uses_the_recorded_root_without_being_told(tmp_path):
+    """The footgun, closed: no --source-root, and it still finds the objects."""
+    root, bundle = _staged_subdirectory_campaign(tmp_path)
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        code = _main(["execute", "--bundle", bundle, "--json"])
+    assert code == EXIT_OK, e.getvalue()
+    report = json.loads(o.getvalue())
+    assert report["source_root"] == str(root)
+    # The original symptom, asserted directly rather than inferred from success.
+    assert "No such file" not in o.getvalue()
+    assert "No such file" not in e.getvalue()
+
+
+def test_execute_refuses_a_wrong_root_by_explicit_flag(tmp_path):
+    """An explicit --source-root still wins, and a wrong one is refused before
+    any bytes move rather than once per object."""
+    root, bundle = _staged_subdirectory_campaign(tmp_path)
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        code = _main(["execute", "--bundle", bundle, "--source-root",
+                      str(tmp_path / "card"), "--execute", "--json"])
+    assert code == EXIT_GATE_CLOSED
+    # Legible to a machine caller, which is the point of --json.
+    report = json.loads(o.getvalue())
+    assert report["mode"] == "refused"
+    assert report["executed"] is False
+    assert report["source_root"] == str(tmp_path / "card")
+    assert any("does not contain" in b for b in report["blockers"])
+
+
+def test_the_same_refusal_reaches_a_human_on_stderr(tmp_path):
+    """Without --json there is no payload to carry it, so the diagnostic must
+    actually be printed rather than silently returned as an exit code."""
+    root, bundle = _staged_subdirectory_campaign(tmp_path)
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        code = _main(["execute", "--bundle", bundle, "--source-root",
+                      str(tmp_path / "card"), "--execute"])
+    assert code == EXIT_GATE_CLOSED
+    assert "does not contain" in e.getvalue()
+    assert "--source-root" in e.getvalue()
+
+
+def test_release_refuses_a_wrong_root_before_deleting_anything(tmp_path):
+    """Same check, and the stakes are higher: release removes the source."""
+    root, bundle = _staged_subdirectory_campaign(tmp_path)
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        code = _main(["release-source", "--bundle", bundle, "--source-root",
+                      str(tmp_path / "card"), "--json"])
+    assert code == EXIT_GATE_CLOSED
+    assert any("does not contain" in b for b in json.loads(o.getvalue())["blockers"])
+
+
+# ---------------------------------------------------------------------------
+# preflight: what a copy would do, not only whether one could run
+# ---------------------------------------------------------------------------
+# An operator about to move 91 GB can learn the layout is staged, how much of it
+# is quarantined orphan detections, and how many dates are filesystem-derived -
+# from `preflight`, which they run first. `plan` is not consulted before
+# `execute`, so anything preflight omits is something they find out afterwards.
+
+def _staged_bundle(tmp_path):
+    root = _card(tmp_path)
+    bundle = _bundle(tmp_path)
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        assert _main(["stage", "--bundle", bundle, "--root", str(root),
+                      "--policy-file", str(_policy_file(tmp_path)),
+                      "--apply", "--json"]) == EXIT_OK, e.getvalue()
+    return root, bundle
+
+
+def _checks(bundle):
+    from auto_ingest.custody.cli import main as _main
+
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        _main(["preflight", "--bundle", str(bundle), "--json"])
+    return {c["name"]: c for c in json.loads(o.getvalue())["checks"]}
+
+
+def test_preflight_reports_the_layout_it_would_copy(tmp_path):
+    root, bundle = _staged_bundle(tmp_path)
+    checks = _checks(bundle)
+    assert checks["staged_layout_recorded"]["ok"] is True
+    assert "objects" in checks["staged_layout_recorded"]["detail"]
+
+
+def test_preflight_counts_the_orphans_and_says_they_are_preserved(tmp_path):
+    root, bundle = _staged_bundle(tmp_path)
+    checks = _checks(bundle)
+    orphan = checks["orphaned_detections_preserved"]
+    assert orphan["ok"] is True, "quarantining is not a failure"
+    assert "quarantine" in orphan["detail"]
+    # The fixture has unpaired detections under yolo/.
+    assert "detection file(s) have no clip" in orphan["detail"]
+
+
+def test_preflight_names_dates_that_are_not_camera_written(tmp_path):
+    """An mtime is a last-written time. An operator should be told which dates
+    rest on that before the archive is built on them."""
+    root, bundle = _staged_bundle(tmp_path)
+    check = _checks(bundle)["dates_camera_written"]
+    assert check["ok"] is True, "every object in this fixture is camera-dated"
+
+
+def test_preflight_says_so_when_no_layout_was_decided(tmp_path):
+    """The failure that matters: without a recorded layout, execute copies to
+    source-relative paths and recreates the camera's directory layout."""
+    bundle = _bundle(tmp_path)
+    check = _checks(bundle)["staged_layout_recorded"]
+    assert check["ok"] is False
+    assert "source-relative" in check["detail"]
+    assert "custody stage" in check["remedy"]

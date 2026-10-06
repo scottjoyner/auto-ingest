@@ -62,6 +62,36 @@ class MountObservation:
     device: Optional[str] = None
     filesystem_type: Optional[str] = None
     options: Tuple[str, ...] = ()
+    #: When the observed path is not itself a mount point but is backed by one,
+    #: the mount that backs it. ``None`` when the path is the mount point or when
+    #: nothing backs it.
+    #:
+    #: A destination is routinely a *subdirectory* of a mount - the CIFS share
+    #: here is mounted at /nas and the archive lives at /nas/fileserver/headcam.
+    #: Reporting that as "not mounted" is true of the path and useless as an
+    #: answer about the storage, which is what custody needs to know.
+    backing_mount_point: Optional[str] = None
+    #: Whether the observed path itself exists. ``None`` when not checked.
+    #:
+    #: Kept apart from ``present`` because the two come apart for a destination:
+    #: /nas is mounted, and /nas/fileserver/headcam may still not exist. Reporting
+    #: "mounted" for a path that is not there answers a question nobody asked and
+    #: hides the one they did.
+    path_exists: Optional[bool] = None
+
+    @property
+    def is_mount_point(self) -> bool:
+        """Whether the observed path is itself the mount point."""
+        return self.present and self.backing_mount_point is None
+
+    @property
+    def usable(self) -> bool:
+        """Mounted, and the path is actually there.
+
+        The conjunction the release gate wants: the storage being mounted does not
+        by itself make a subdirectory destination reachable.
+        """
+        return bool(self.present) and self.path_exists is not False
 
     @property
     def read_only(self) -> Optional[bool]:
@@ -76,10 +106,13 @@ class MountObservation:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "backing_mount_point": self.backing_mount_point,
             "device": self.device,
             "filesystem_type": self.filesystem_type,
+            "is_mount_point": self.is_mount_point,
             "mount_point": self.mount_point,
             "options": list(self.options),
+            "path_exists": self.path_exists,
             "present": self.present,
             "read_only": self.read_only,
         }
@@ -132,11 +165,46 @@ def _normalize(path: Optional[str]) -> Optional[str]:
         return str(path)
 
 
+def containing_mount(target: str, table: Tuple[MountObservation, ...],
+                      ) -> Optional[MountObservation]:
+    """The deepest mount that contains ``target``, or None.
+
+    Longest match wins, because mounts nest: /nas, /nas/fileserver and
+    /nas/fileserver/headcam can all be mount points at once, and the nearest
+    enclosing one is the filesystem actually holding the path. Comparing on
+    path *segments* rather than a string prefix, so /nasx is not "inside" /nas.
+
+    The root filesystem is excluded, and that exclusion is the whole reason this
+    function is not simply "any prefix". ``/`` is in every mount table and
+    contains every path, so including it makes the answer to "is this destination
+    backed by a mount?" true for every ordinary directory on the machine - which
+    is not a statement about any mount, and made `mounted` true for a destination
+    path that did not exist.
+    """
+    target_parts = [p for p in os.path.normpath(target).split("/") if p]
+    best: Optional[MountObservation] = None
+    for observation in table:
+        if not observation.mount_point or not observation.present:
+            continue
+        mount_parts = [p for p in os.path.normpath(
+            observation.mount_point).split("/") if p]
+        if not mount_parts:
+            continue        # the root filesystem backs everything; says nothing
+        if len(mount_parts) >= len(target_parts):
+            continue
+        if target_parts[:len(mount_parts)] == mount_parts:
+            if best is None or len(mount_parts) > len(
+                    [p for p in best.mount_point.split("/") if p]):
+                best = observation
+    return best
+
+
 def observe_mount(
     mount_point: Optional[str],
     *,
     mounts_path: str | Path = MOUNTS_PATH,
     observations: Optional[Tuple[MountObservation, ...]] = None,
+    allow_containing: bool = False,
 ) -> MountObservation:
     """Observe one mount point.
 
@@ -144,6 +212,15 @@ def observe_mount(
     symlinked mount is still recognised. A path that is not a mount point comes
     back ``present=False`` - which for a custody source is the answer "the card is
     not there", not an error.
+
+    ``allow_containing`` extends the answer to "not a mount point itself, but
+    backed by one". It is opt-in and **only ever right for a destination**. A
+    custody source is the thing being proven present: if the card is unmounted and
+    its mount point is an empty directory that happens to sit inside some other
+    filesystem, then claiming the card is there is exactly the false positive this
+    subsystem exists to prevent. For a destination the question is different - not
+    "is this path a mount" but "is the storage behind this path mounted", and for
+    a network share those come apart.
     """
     if not mount_point:
         return MountObservation(mount_point="", present=False)
@@ -170,6 +247,18 @@ def observe_mount(
     for observation in table:
         if _normalize(observation.mount_point) == resolved:
             return observation
+    if allow_containing:
+        backing = containing_mount(str(mount_point), table)
+        if backing is not None:
+            from dataclasses import replace as _replace
+
+            try:
+                exists: Optional[bool] = os.path.exists(mount_point)
+            except OSError:  # pragma: no cover - e.g. EIO on a dead network mount
+                exists = None
+            return _replace(backing, mount_point=str(mount_point),
+                            backing_mount_point=backing.mount_point,
+                            path_exists=exists)
     return MountObservation(mount_point=mount_point, present=False)
 
 
@@ -248,8 +337,11 @@ def observe_campaign(
     source_point = campaign.source.mount_point
     dest_path = campaign.destination.host_path
 
+    # The source gets no containing-mount fallback, ever: "is the card there" must
+    # not be answered by "is some filesystem here". The destination does get it,
+    # because a network share's archive is routinely a subdirectory of the mount.
     source = observe_mount(source_point, observations=table)
-    destination = observe_mount(dest_path, observations=table)
+    destination = observe_mount(dest_path, observations=table, allow_containing=True)
 
     declared_ro = campaign.source.read_only
     return {
@@ -262,6 +354,9 @@ def observe_campaign(
                              destination, by_uuid_dir=by_uuid_dir)) else None),
             "observation": destination.to_dict(),
             "observed_mounted": destination.present,
+            # Distinct from observed_mounted: the share can be mounted while the
+            # subdirectory the campaign names does not exist.
+            "observed_usable": destination.usable,
         },
         "source": {
             "declared_read_only": declared_ro,
@@ -303,8 +398,20 @@ def observations_to_evidence(report: Mapping[str, Any]) -> Dict[str, Any]:
     source = report.get("source") or {}
     fragment: Dict[str, Any] = {}
     identity = destination.get("identity")
-    if identity:
-        fragment["destination"] = {"observed_identity": identity}
+    if identity or isinstance(destination.get("observed_usable"), bool):
+        # Only what was actually observed. Writing `observed_usable: null` into
+        # evidence would record the absence of an observation as though it were an
+        # observation - the same reason the `errors` block is written only when
+        # there is something to say.
+        dest_fragment: Dict[str, Any] = {}
+        if identity:
+            dest_fragment["observed_identity"] = identity
+        if isinstance(destination.get("observed_usable"), bool):
+            dest_fragment["observed_usable"] = destination["observed_usable"]
+        backing = (destination.get("observation") or {}).get("backing_mount_point")
+        if backing:
+            dest_fragment["observed_backing_mount_point"] = backing
+        fragment["destination"] = dest_fragment
     source_identity = source.get("identity")
     if source_identity:
         # Under `inventory`, not a new top-level block: the inventory is the

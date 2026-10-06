@@ -87,16 +87,28 @@ AUDIO_BASE = Path(get_fileserver_path("audio"))
 #: `[A-Za-z0-9\-\._]+` did, which swallowed the key prefix: for
 #: `2025_0202_171732_large-v3_transcription.txt` it captured
 #: `0202_171732_large-v3`, so MODEL_PREF.index() never matched and large-v3,
+# The discovery patterns and the key canonicalisation live in `.discovery`, which
+# imports nothing from the ML stack. They are re-exported here because this module
+# is where callers have always obtained them from - and because a test guarding the
+# naming contract must import that contract from somewhere importable without a GPU
+# image. See auto_ingest/ingest/discovery.py for why that is load-bearing.
+from .discovery import (  # noqa: F401
+    _to_utc,
+    PAT_ENTITIES,
+    PAT_MEDIA,
+    PAT_META_CSV,
+    PAT_RTTM,
+    PAT_TRANS_CSV,
+    PAT_TRANS_JSON_TXT,
+    canonicalize_key,
+    parse_key_datetime_utc_from_string,
+    stable_id,
+)
+
 #: large-v2 and large ALL fell through to the substring fallback at rank 100 -
 #: a three-way tie, and the model preference was ignored for every dashcam
 #: transcript. No entry in MODEL_PREF contains `_`, so "no underscore in the tag"
 #: is the discriminator, derived from that list rather than guessed.
-PAT_TRANS_JSON_TXT = re.compile(r"_([^_]+)_transcription\.txt$", re.IGNORECASE)
-PAT_TRANS_CSV      = re.compile(r"_transcription\.csv$", re.IGNORECASE)
-PAT_ENTITIES       = re.compile(r"_transcription_(entites|entities)\.csv$", re.IGNORECASE)
-PAT_RTTM           = re.compile(r"_speakers\.rttm$", re.IGNORECASE)
-PAT_MEDIA          = re.compile(r"\.(wav|mp3|m4a|flac|mp4|mov|mkv|MP4|MOV|MKV)$", re.IGNORECASE)
-PAT_META_CSV       = re.compile(r"_metadata\.csv$", re.IGNORECASE)
 
 # Model quality preference
 DEFAULT_MODEL_PREF = [
@@ -185,20 +197,6 @@ def _chunks(seq, size):
     for i in range(0, len(seq), size):
         yield seq[i:i+size]
 
-def stable_id(*parts: str) -> str:
-    h = hashlib.md5()
-    for p in parts:
-        h.update((p or "").encode("utf-8", errors="ignore")); h.update(b"|")
-    return h.hexdigest()
-
-def _to_localized(dt: datetime) -> datetime:
-    if ZoneInfo: return dt.replace(tzinfo=ZoneInfo(LOCAL_TZ))
-    return dt.replace(tzinfo=timezone.utc)
-
-def _to_utc(dt: datetime) -> datetime:
-    if dt.tzinfo is None: dt = _to_localized(dt)
-    return dt.astimezone(timezone.utc)
-
 def iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.astimezone(timezone.utc).isoformat() if dt else None
 
@@ -215,38 +213,6 @@ def _parse_any_iso_or_epoch(v: Any) -> Optional[datetime]:
         return _to_utc(datetime.fromisoformat(s.replace("Z","+00:00")))
     except Exception:
         return None
-
-def parse_key_datetime_utc_from_string(s: str) -> Optional[datetime]:
-    s = s.strip()
-    m = re.search(r"(?P<dt14>\d{14})", s)
-    if m:
-        try: return _to_utc(_to_localized(datetime.strptime(m.group("dt14"), "%Y%m%d%H%M%S")))
-        except Exception: pass
-    for pat, fmt in [
-        (r"(\d{4})_(\d{4})_(\d{6})", "%Y_%m%d_%H%M%S"),
-        (r"(\d{8})_(\d{6})", "%Y%m%d_%H%M%S"),
-        (r"(\d{8})(\d{6})", "%Y%m%d%H%M%S"),
-        (r"(\d{4})-(\d{2})-(\d{2})[_\-](\d{2})-(\d{2})-(\d{2})", "%Y-%m-%d_%H-%M-%S"),
-        (r"(\d{4})_(\d{2})_(\d{2})[_\-](\d{2})_(\d{2})_(\d{2})", "%Y_%m_%d_%H_%M_%S"),
-    ]:
-        m2 = re.search(pat, s)
-        if m2:
-            try: return _to_utc(_to_localized(datetime.strptime(m2.group(0), fmt)))
-            except Exception: pass
-    m = re.search(r"/(?P<Y>\d{4})/(?P<M>\d{2})/(?P<D>\d{2})/", s)
-    if m:
-        Y, M, D = m.group("Y"), m.group("M"), m.group("D")
-        m2 = re.search(r"(?<!\d)(\d{6})(?!\d)", os.path.basename(s))
-        if m2:
-            try: return _to_utc(_to_localized(datetime.strptime(f"{Y}{M}{D}{m2.group(1)}", "%Y%m%d%H%M%S")))
-            except Exception: pass
-    return None
-
-def canonicalize_key(name_without_suffix: str, full_path: str) -> str:
-    dt = parse_key_datetime_utc_from_string(name_without_suffix) or parse_key_datetime_utc_from_string(full_path)
-    if dt: return dt.astimezone(timezone.utc).strftime("%Y_%m%d_%H%M%S")
-    base = re.sub(r"[^\w\-]+", "_", name_without_suffix).strip("_")
-    return base or stable_id(full_path)
 
 #: Model ids this repo's transcribers actually write into a sidecar filename as
 #: ``<stem>_<model-id>_transcription.{txt,json}``. Derived from the producers, not

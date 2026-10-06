@@ -40,10 +40,22 @@ def status_text(status: CampaignStatus) -> str:
     )
     lines.append(f"source_read_only   {str(card['read_only']).lower()}")
     dest = data["destination"]
+    # The observation, not the creation-time snapshot. Reporting `mounted=false`
+    # for a destination whose gate has demonstrably just passed is worse than
+    # useless - and for a network destination the snapshot is always false, because
+    # the archive is a subdirectory of the mount rather than the mount point.
+    observed = data.get("destination_observed") or {}
+    if observed.get("observed_usable") is not None:
+        mounted = str(observed["observed_usable"]).lower()
+        backing = observed.get("observation", {}).get("backing_mount_point")
+        if backing and not observed.get("observation", {}).get("is_mount_point", False):
+            mounted += f" (on {backing})"
+    else:
+        mounted = str(dest["mounted"]).lower() + " (unobserved)"
     lines.append(
         "destination        "
         f"logical={dest['canonical']} host_path={dest['host_path'] or 'UNRESOLVED'} "
-        f"from={dest['resolved_from']} mounted={dest['mounted']}"
+        f"from={dest['resolved_from']} mounted={mounted}"
     )
     identity = dest.get("identity") or {}
     lines.append(

@@ -2225,16 +2225,46 @@ def is_yyyymmdd_dir(path: str) -> bool:
     try: pd.Timestamp(f"{y}-{m}-{d}"); return True
     except Exception: return False
 
+#: Preserved artifacts, not work. Mirrors
+#: auto_ingest.dashcam.media_pairing.QUARANTINE_DIRNAMES, repeated here so the
+#: fallback below still prunes if the shared import is unavailable.
+QUARANTINE_DIRNAMES = ("orphaned-detections",)
+
+
 def walk_date_dirs(base: str) -> List[str]:
-    targets=[]
-    for root, dirs, files in os.walk(base):
-        if is_yyyymmdd_dir(root): targets.append(root)
-    return sorted(targets)
+    """Date trees worth processing.
 
+    Delegates to `auto_ingest.dashcam.media_pairing.walk_date_dirs`, which prunes
+    quarantine namespaces - principally `orphaned-detections/`, where custody
+    stage puts detection files whose clip is not on the card. Those are preserved,
+    not processed, and the path is a YYYY/MM/DD shape, so without the prune every
+    pass descends into them and logs a missing-media warning for each. This is the
+    script `runall.sh` invokes, so fixing the packaged module alone would not have
+    covered the scheduled run.
 
-# =========================
-# CLI
-# =========================
+    The fallback deliberately prunes as well. Falling back to the old unpruned
+    walk would reintroduce exactly the bug this change exists to remove, and it
+    would do so silently, on the one path nobody tests.
+    """
+    try:
+        from auto_ingest.dashcam.media_pairing import walk_date_dirs as _shared
+    except Exception:
+        _shared = None
+    if _shared is not None:
+        return _shared(base)
+
+    out: List[str] = []
+    for root, dirs, _files in os.walk(base):
+        dirs[:] = [d for d in dirs if d not in QUARANTINE_DIRNAMES]
+        parts = [p for p in os.path.normpath(root).split("/") if p]
+        if len(parts) < 3:
+            continue
+        y, m, d = parts[-3], parts[-2], parts[-1]
+        if len(y) == 4 and len(m) == 2 and len(d) == 2 \
+                and y.isdigit() and m.isdigit() and d.isdigit():
+            out.append(root)
+    return sorted(out)
+
 def main():
     parser = argparse.ArgumentParser(description="YOLO structure embeddings with location augmentation → Neo4j")
     parser.add_argument("--bases", nargs="+", default=[

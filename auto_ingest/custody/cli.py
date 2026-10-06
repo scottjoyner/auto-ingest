@@ -48,9 +48,11 @@ from .executor import (
     execute_copy,
     leftover_temp_files,
     plan_copy,
+    write_staged_ledger,
 )
 from .executor import to_evidence as execute_evidence
 from .hashing import DEFAULT_ALGORITHM, hash_source, to_evidence
+from .ledger import read_staged_ledger
 from .lock import (
     campaign_lock,
     clear_active,
@@ -64,11 +66,13 @@ from .policy import CustodyPolicy
 from .release_source import execute_release
 from .release_source import to_evidence as release_evidence
 from .report import plan_json, plan_text, status_json, status_text
+from .staging import ORPHAN_PREFIX
 from .store import (
     BundleError,
     CampaignCreationError,
     CampaignStatus,
     _write_json_atomic,
+    declare_destination_identity,
     import_evidence,
     load_campaign,
     load_custody_config,
@@ -130,6 +134,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="refused: verification execution is separately authorized")
     pv.add_argument("--destination", default=None,
                     help="destination root to verify against (default: campaign's)")
+    pv.add_argument("--flat", action="store_true",
+                    help="verify against source-relative paths, ignoring any "
+                         "recorded staged layout")
     pv.add_argument("--recheck", action="store_true",
                     help="re-verify objects already proven at the destination")
     pv.add_argument("--algorithm", default=DEFAULT_ALGORITHM)
@@ -187,6 +194,53 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--apply", action="store_true",
                     help="record the result as campaign evidence")
 
+    ps = common(sub.add_parser(
+        "stage",
+        help="Classify the source, hash what is in scope, and lay it out where "
+             "the ingest pipeline discovers it (read-only on the source)."),
+        observed=False)
+    ps.add_argument("--root", action="append", default=None,
+                    help="directory to walk; repeatable")
+    ps.add_argument("--limit", type=int, default=None,
+                    help="stop after N new hashes (a bounded probe)")
+    ps.add_argument("--algorithm", default=DEFAULT_ALGORITHM)
+    ps.add_argument("--apply", action="store_true",
+                    help="record the result as campaign evidence")
+    ps.add_argument("--include-sidecars", dest="include_sidecars",
+                    action="store_true", default=True,
+                    help="stage derived sidecars too (the default)")
+    ps.add_argument("--media-only", dest="include_sidecars",
+                    action="store_false",
+                    help="stage media only, leaving sidecars for a later pass")
+    ps.add_argument("--orphan-prefix", default=ORPHAN_PREFIX, metavar="PREFIX",
+                    help="namespace for detection files whose clip is not on "
+                         "the card (default: orphaned-detections; pass an empty "
+                         "string to leave them in the date tree)")
+    ps.add_argument("--key-undated-by-mtime", action="store_true",
+                    help="for media with no timestamp in its name, group it by "
+                         "filesystem mtime and keep the original filename. Off by "
+                         "default: an mtime is a last-written time, not a "
+                         "camera-written one, so using it is an operator decision.")
+
+    pd = common(sub.add_parser(
+        "declare-destination",
+        help="Record what the destination storage is, as an operator declaration "
+             "(the release gate compares this against what the kernel reports)."),
+        observed=False)
+    pd.add_argument("--device", default=None,
+                    help="device or share string, e.g. //host/share for CIFS")
+    pd.add_argument("--filesystem-uuid", default=None,
+                    help="filesystem UUID; block filesystems only")
+    pd.add_argument("--filesystem-type", default=None,
+                    help="e.g. ext4, vfat, cifs")
+    pd.add_argument("--host-path", default=None,
+                    help="where the destination is on this host; completes a "
+                         "campaign created with no destination configured")
+    pd.add_argument("--replace", action="store_true",
+                    help="overwrite an existing declaration")
+    pd.add_argument("--apply", action="store_true",
+                    help="write campaign.json")
+
     pr = common(sub.add_parser(
         "release-source",
         help="Propose or perform removal of source objects already in custody "
@@ -216,6 +270,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="destination root (default: the campaign's host path)")
     pe.add_argument("--execute", action="store_true",
                     help="REQUIRED: without it nothing is copied (dry run)")
+    pe.add_argument("--flat", action="store_true",
+                    help="copy each object to its source-relative path, ignoring "
+                         "any recorded staged layout")
     pe.add_argument("--limit", type=int, default=None,
                     help="stop after N objects (a bounded first pass)")
     pe.add_argument("--apply", action="store_true",
@@ -354,9 +411,14 @@ def cmd_verify(args) -> int:
         destination = status.campaign.destination.host_path
     result = None
     if destination:
+        # Same recorded layout `execute` used. Verifying at the source-relative
+        # path would report every staged copy as MISSING, which reads as a failed
+        # transfer rather than a lookup in the wrong place.
         result = verify_destination(
             args.bundle, destination, algorithm=args.algorithm,
             limit=args.limit, recheck=args.recheck,
+            staged_destinations=(None if getattr(args, "flat", False)
+                                 else read_staged_ledger(args.bundle)),
         )
         payload["verification"] = result.to_dict()
         payload["objects_to_verify"] = result.checked
@@ -656,6 +718,32 @@ def cmd_preflight(args) -> int:
         "none" if not blockers_ else ",".join(blockers_),
         "stop sync-service / ingest-worker for the campaign, or teach them to "
         "consult the campaign lock as a separate change")
+    # What a copy would actually do, not merely whether one could run. An operator
+    # about to move 91 GB needs to know the layout is staged, how much of it is
+    # quarantined orphan detections, and how many dates are filesystem-derived
+    # rather than camera-written - and `plan` is not consulted before `execute`.
+    from .ledger import read_staged_meta
+
+    staged_meta = read_staged_meta(args.bundle)
+    add("staged_layout_recorded", staged_meta is not None,
+        ("no recorded layout; execute would copy to source-relative paths"
+         if staged_meta is None
+         else f"{staged_meta.get('staged_objects')} objects, "
+              f"roots={staged_meta.get('source_roots')}"),
+        "run `custody stage` so the layout is decided and recorded before copying")
+    orphans = (staged_meta or {}).get("orphaned_detections")
+    if staged_meta is not None:
+        add("orphaned_detections_preserved", True,
+            f"{orphans or 0} detection file(s) have no clip on this card and are "
+            f"routed to a quarantine namespace rather than dropped",
+            "informational: these describe recordings not on this card")
+        from_mtime = (staged_meta or {}).get("keyed_from_mtime") or 0
+        add("dates_camera_written", from_mtime == 0,
+            f"{from_mtime} object(s) dated from filesystem mtime, not a "
+            f"camera-written timestamp",
+            "if any, the mtime is a last-written time; see `custody stage "
+            "--key-undated-by-mtime`")
+
     add("release_gate_open", status.release.allowed,
         "blockers=" + ",".join(b.code for b in status.release.blockers),
         "resolve the release blockers; see `custody status`")
@@ -789,6 +877,294 @@ def cmd_hash(args) -> int:
     return EXIT_OK
 
 
+def _resolve_source_root(args, campaign_obj, keys) -> "tuple[str | None, list[str]]":
+    """Where the objects behind ``keys`` actually are, and what to complain about.
+
+    Custody keys are relative to whatever root the walk started from, but the
+    campaign only remembers the card's mount point. Staging ``UNTITLED/VIDEO`` and
+    then copying without restating the root produced "No such file or directory"
+    once per object, which reads as a lost card rather than as two commands
+    disagreeing about a path.
+
+    So: prefer what `stage` recorded, fall back to the mount point, and check the
+    answer before any bytes move rather than after the first failure.
+
+    Returns ``(source_root, problems)``. A non-empty ``problems`` means the root
+    does not hold the objects and the caller must stop.
+    """
+    from .ledger import read_staged_meta
+
+    explicit = getattr(args, "source_root", None)
+    recorded = read_staged_meta(args.bundle) or {}
+    roots = [r for r in (recorded.get("source_roots") or []) if r]
+
+    source_root = explicit
+    if source_root is None and len(roots) == 1:
+        source_root = roots[0]
+    if source_root is None:
+        source_root = campaign_obj.source.mount_point
+
+    problems: List[str] = []
+    sample = keys[0] if keys else None
+    if sample and source_root:
+        if not (Path(source_root) / sample).exists():
+            problems.append(
+                f"source root {source_root!r} does not contain {sample!r}")
+            if roots and len(roots) > 1:
+                problems.append(
+                    f"stage walked several roots: {roots}; pass --source-root "
+                    f"to say which one these keys are relative to")
+            elif roots:
+                problems.append(
+                    f"stage recorded root {roots[0]!r}; pass --source-root to "
+                    f"override it")
+            else:
+                problems.append(
+                    "no staged layout was recorded for this bundle, so the "
+                    "source root defaulted to the campaign's mount point; pass "
+                    "--source-root")
+    return source_root, problems
+
+
+def cmd_stage(args) -> int:
+    """Lay the source out where the ingest pipeline will actually find it.
+
+    Three steps, in this order and no other:
+
+    1. **classify** - what is media, what is a sidecar of one, what belongs to
+       something else entirely (`auto_ingest/custody/staging.py`);
+    2. **hash** - only the in-scope objects, so the copy plan cannot inherit a
+       directory that has no business in the archive;
+    3. **report** - what was staged, what was not and why.
+
+    Nothing is copied here. ``custody execute`` does that, with the staged
+    destination map this command's plan implies. Keeping them apart is what lets
+    the layout be inspected, and corrected, before a byte moves.
+
+    The source is only ever read.
+    """
+    from .staging import plan_staging
+
+    policy = _policy_from_file(getattr(args, "policy_file", None))
+    if policy is None:
+        policy = load_policy(load_custody_config())
+    if not args.root:
+        campaign_obj = load_campaign(args.bundle)
+        if not campaign_obj.source.mount_point:
+            print("custody: no source mount recorded; pass --root", file=sys.stderr)
+            return EXIT_USAGE
+        args.root = [campaign_obj.source.mount_point]
+
+    walked_paths, excluded_by_policy = _discover_keys(args.root, None, policy)
+
+    # mtimes are collected only when asked for: stat() on 60k objects to derive a
+    # date nobody wanted is wasted work, and the whole card is walked here.
+    mtimes = None
+    if args.key_undated_by_mtime:
+        mtimes = {}
+        for key, path in walked_paths.items():
+            try:
+                mtimes[key] = path.stat().st_mtime
+            except OSError:
+                continue
+    plan = plan_staging(walked_paths, include_sidecars=args.include_sidecars,
+                        mtimes=mtimes,
+                        allow_mtime_key=args.key_undated_by_mtime,
+                        orphan_prefix=args.orphan_prefix)
+    mapping = {o.source_key: o.destination_key for o in plan.staged}
+
+    # Hash only what will be staged, and hash it from its SOURCE path. Hashing
+    # the whole walk would put 60k out-of-scope objects into the ledger, and
+    # plan_copy derives the copy set from that ledger. The destination keys are
+    # NOT paths - passing them here silently hashed nothing at all.
+    hash_targets = {key: walked_paths[key] for key in mapping if key in walked_paths}
+    missing = set(mapping) - set(hash_targets)
+    if missing:
+        sys.stderr.write(
+            f"custody: {len(missing)} staged object(s) have no source path; "
+            f"not hashing: {sorted(missing)[:5]}\n"
+        )
+        return EXIT_GATE_CLOSED
+    result = hash_source(args.bundle, hash_targets, algorithm=args.algorithm,
+                         limit=args.limit)
+
+    payload = dict(result.to_dict())
+    payload.update({
+        "walked": len(walked_paths),
+        "excluded_by_policy": len(excluded_by_policy),
+        "staged": len(plan.staged),
+        "unstaged": len(plan.unstaged),
+        "by_role": plan.by_role(),
+        "by_key_source": plan.by_key_source(),
+        "unstaged_by_reason": plan.by_reason(),
+        "destination_collisions": list(plan.collisions()),
+        "pairing": plan.pairing(),
+        "orphaned_detections": len(plan.unpaired_detections()),
+        "orphan_prefix": args.orphan_prefix or "",
+        "applied": False,
+    })
+    if args.apply:
+        fragment = to_evidence(result, algorithm=args.algorithm,
+                                discovered=len(mapping))
+        write_status = import_evidence(args.bundle, fragment, policy, apply=True)
+        payload["applied"] = bool(write_status.get("applied"))
+        payload["evidence_result"] = write_status
+
+    # Recorded, not recomputed later. `execute` reads this.
+    staged_path = write_staged_ledger(args.bundle, plan,
+                                       source_roots=list(args.root))
+    payload["staged_ledger"] = str(staged_path)
+
+    from_mtime = plan.by_key_source().get("mtime", 0)
+    if from_mtime:
+        sys.stderr.write(
+            f"custody: {from_mtime} object(s) have no timestamp in their name and "
+            f"were grouped by filesystem mtime, not by a camera-written date. "
+            f"Their filenames are unchanged; the date is a last-written time.\n"
+        )
+
+    collisions = plan.collisions()
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, indent=2, default=str))
+    else:
+        sys.stdout.write(
+            f"walked               {len(walked_paths)}\n"
+            f"excluded by policy   {len(excluded_by_policy)}\n"
+            f"staged               {len(plan.staged)}\n"
+            f"unstaged             {len(plan.unstaged)}\n"
+            f"hashed               {result.hashed}\n"
+            f"skipped existing     {result.skipped_existing}\n"
+            f"failed               {result.failed}\n"
+            f"applied              {str(payload['applied']).lower()}\n"
+        )
+        for reason, count in sorted(plan.by_reason().items(), key=lambda kv: -kv[1]):
+            sys.stdout.write(f"  unstaged {count:<8} {reason}\n")
+        pairing = plan.pairing()
+        if pairing["clips"] or pairing["detections"]:
+            sys.stdout.write(
+                f"clips {pairing['clips']}, detections {pairing['detections']}, "
+                f"paired {pairing['paired']}\n"
+            )
+            orphans = plan.unpaired_detections()
+            if orphans:
+                # Preserved, and said out loud. These describe recordings that are
+                # not here and may not exist anywhere - on the real card they were
+                # the only surviving record of 2024 footage that is otherwise gone.
+                # They are routed to a labelled namespace rather than dropped, and
+                # the count is reported so the set is auditable.
+                sys.stdout.write(
+                    f"orphaned detections {len(orphans)}, routed to "
+                    f"{args.orphan_prefix or '(date tree)'}/\n")
+                sys.stderr.write(
+                    f"custody: {len(orphans)} staged detection file(s) have no "
+                    f"clip on this card. They are preserved, not dropped, and "
+                    f"routed to {args.orphan_prefix or 'the date tree'}/ - they "
+                    f"describe recordings that are not on the card and may not "
+                    f"exist anywhere.\n")
+            if pairing["detections_without_clip"] and not orphans:
+                # Said plainly, because the alternative reading is "naming bug".
+                sys.stderr.write(
+                    f"custody: {pairing['detections_without_clip']} staged detection "
+                    f"file(s) have no clip on this card - leftovers from an "
+                    f"already-archived session, or detections for media that was "
+                    f"never on this card. They will stage without pairing.\n"
+                )
+            if pairing["clips_without_detection"]:
+                sys.stderr.write(
+                    f"custody: {pairing['clips_without_detection']} staged clip(s) "
+                    f"have no detection file yet - expected for fresh footage; the "
+                    f"detector writes those after ingest.\n"
+                )
+    if collisions:
+        # Never resolved here. Two sources claiming one staged path means the
+        # layout is wrong, and picking a winner would lose one of them silently.
+        sys.stderr.write(
+            f"custody: {len(collisions)} staged path(s) claimed by more than one "
+            f"source object; not copying until resolved:\n"
+        )
+        for path in collisions[:10]:
+            sys.stderr.write(f"  {path}\n")
+        return EXIT_GATE_CLOSED
+    return EXIT_OK
+
+
+def cmd_declare_destination(args) -> int:
+    """State what the destination storage is. Not an observation.
+
+    The release gate compares a declaration against what the kernel reports and
+    refuses when they differ, or when either side is missing. This supplies the
+    left-hand side, which otherwise only ever comes from config at campaign
+    creation - so a campaign made before the operator knew which share backed it
+    had no way to satisfy the gate at all.
+
+    Recording the *observed* identity here would be worse than the closed gate it
+    replaces: the gate would be comparing the filesystem to itself and would pass
+    for whatever happened to be mounted.
+    """
+    from .destination import StorageIdentity
+
+    identity = StorageIdentity(
+        filesystem_uuid=args.filesystem_uuid or None,
+        device=args.device or None,
+        filesystem_type=args.filesystem_type or None,
+    ) if (args.device or args.filesystem_uuid or args.filesystem_type) else None
+    if identity is None and not args.host_path:
+        sys.stderr.write(
+            "custody: declare something - a --device, a --filesystem-uuid, or a "
+            "--host-path; with none of them there is nothing to record\n"
+        )
+        return EXIT_USAGE
+    if identity is not None and not (identity.filesystem_uuid or identity.device):
+        sys.stderr.write(
+            "custody: a --filesystem-type alone is not identity; give a --device "
+            "or a --filesystem-uuid the gate can compare\n"
+        )
+        return EXIT_USAGE
+    if args.filesystem_uuid and not args.device:
+        sys.stderr.write(
+            "custody: a UUID with no device is a claim the observation may be "
+            "unable to confirm. For a network share there is no block device and "
+            "no UUID will ever be observed - name the share with --device\n"
+        )
+        return EXIT_USAGE
+
+    if not args.apply:
+        print(json.dumps({"mode": "dry_run", "applied": False,
+                          "identity": identity.to_dict() if identity else None,
+                          "host_path": args.host_path},
+                         sort_keys=True, indent=2, default=str))
+        return EXIT_OK
+
+    result = declare_destination_identity(args.bundle, identity,
+                                          host_path=args.host_path,
+                                          replace=args.replace)
+    result["applied"] = True
+    if not result.get("declared"):
+        sys.stderr.write(f"custody: nothing to declare ({result.get('reason')})\n")
+        print(json.dumps(result, sort_keys=True, indent=2, default=str))
+        return EXIT_GATE_CLOSED
+    for field, value in (result.get("kept") or {}).items():
+        # Said out loud: a kept declaration means the request was not honoured,
+        # and silently carrying on would read as success.
+        sys.stderr.write(
+            f"custody: keeping the {field} already declared ({value}); pass "
+            f"--replace to change it\n")
+    if args.json:
+        print(json.dumps(result, sort_keys=True, indent=2, default=str))
+    else:
+        if result.get("identity"):
+            sys.stdout.write(
+                f"identity            {result['identity'].get('device') or ''}"
+                f"{result['identity'].get('filesystem_uuid') or ''}\n")
+        if result.get("host_path"):
+            sys.stdout.write(f"host_path           {result['host_path']}\n")
+        sys.stdout.write(
+            f"replaced            {str(result.get('replaced', False)).lower()}\n"
+            "next                run `custody observe-mount` and re-check status\n"
+        )
+    return EXIT_OK
+
+
 def cmd_release_source(args) -> int:
     """Remove source objects that are already proven to be in custody.
 
@@ -815,7 +1191,22 @@ def cmd_release_source(args) -> int:
         policy = load_policy(load_custody_config())
     campaign_obj = load_campaign(args.bundle)
     status = load_status(args.bundle, policy)
-    source_root = args.source_root or campaign_obj.source.mount_point
+    from .verify import source_digests
+
+    source_root, root_problems = _resolve_source_root(
+        args, campaign_obj, sorted(source_digests(args.bundle)))
+    if root_problems:
+        # Structured, not just a diagnostic: a --json caller gets a parseable
+        # refusal rather than empty stdout and an exit code to guess from.
+        if getattr(args, "json", False):
+            print(json.dumps({"mode": "refused", "executed": False,
+                              "blockers": root_problems,
+                              "source_root": source_root},
+                             sort_keys=True, indent=2, default=str))
+        else:
+            for problem in root_problems:
+                sys.stderr.write(f"custody: {problem}\n")
+        return EXIT_GATE_CLOSED
     destination = args.destination or campaign_obj.destination.host_path
 
     if not destination:
@@ -898,7 +1289,22 @@ def cmd_execute(args) -> int:
     status = load_status(args.bundle, policy)
     mounts = observe_campaign(campaign_obj)
 
-    source_root = args.source_root or campaign_obj.source.mount_point
+    from .verify import source_digests
+
+    source_root, root_problems = _resolve_source_root(
+        args, campaign_obj, sorted(source_digests(args.bundle)))
+    if root_problems:
+        # Structured, not just a diagnostic: a --json caller gets a parseable
+        # refusal rather than empty stdout and an exit code to guess from.
+        if getattr(args, "json", False):
+            print(json.dumps({"mode": "refused", "executed": False,
+                              "blockers": root_problems,
+                              "source_root": source_root},
+                             sort_keys=True, indent=2, default=str))
+        else:
+            for problem in root_problems:
+                sys.stderr.write(f"custody: {problem}\n")
+        return EXIT_GATE_CLOSED
     destination = args.destination or campaign_obj.destination.host_path
 
     activity = competing_activity(
@@ -914,15 +1320,25 @@ def cmd_execute(args) -> int:
     # copy rather than the repo, the operator's word is the only evidence
     # available - so there it is a hard gate.
     acknowledgment_required = bool(uncoordinated)
+
+    # The layout `stage` decided, if one was decided. Read from the bundle, never
+    # re-derived: re-deriving here would let a policy edit between the two
+    # commands relocate files with nothing recording the move.
+    staged = None if getattr(args, "flat", False) else read_staged_ledger(args.bundle)
     plan = CopyPlan()
     if destination:
-        plan = plan_copy(args.bundle, destination)
+        plan = plan_copy(args.bundle, destination, staged)
 
     payload = {
         "campaign_id": campaign_obj.campaign_id,
         "state": status.derivation.state.value,
         "source_root": source_root,
         "destination_root": destination,
+        # Which layout the copy below will honour, stated before it runs. The
+        # difference is the difference between an archive the pipeline can read
+        # and a faithful copy of a card it cannot.
+        "layout": "staged" if staged is not None else "source_relative",
+        "staged_objects": len(staged) if staged is not None else 0,
         "plan": plan.to_dict(),
         "leftover_temp_files": list(leftover_temp_files(destination)) if destination else [],
         "uncoordinated_writers": list(uncoordinated),
@@ -942,8 +1358,26 @@ def cmd_execute(args) -> int:
     observed_ro = mounts["source"]["observed_read_only"]
     if observed_ro is not True:
         blockers.append("source_not_observed_read_only")
-    if campaign_obj.destination.identity is not None and not campaign_obj.destination.mounted:
-        blockers.append("destination_not_mounted")
+    # The snapshot `campaign.destination.mounted` is taken at creation, so it is
+    # False for every network destination: the archive is a subdirectory of the
+    # mount, not the mount point. This check only became reachable once a
+    # destination identity was declared, which is why it never fired before.
+    #
+    # The observation may only make the answer *stricter* when it positively found
+    # a backing mount. `observed_usable: false` on its own means "I looked and saw
+    # nothing", which for a destination that is a plain directory says nothing true
+    # about the storage - and treating it as authoritative refused every campaign
+    # whose destination is an ordinary directory rather than a mount point.
+    # Only the storage, never the directory. `execute` creates the declared tree as
+    # it copies - stream_copy does mkdir(parents=True) - so refusing an absent
+    # subdirectory here blocks every first copy into a new archive, which is the
+    # normal case. The same condition IS a blocker for release, where an absent
+    # destination means the verified copies are not where the campaign says.
+    dest_obs = mounts.get("destination") or {}
+    if campaign_obj.destination.identity is not None:
+        backing = (dest_obs.get("observation") or {}).get("backing_mount_point")
+        if not backing and campaign_obj.destination.mounted is False:
+            blockers.append("destination_not_mounted")
     if is_locked(campaign_obj.destination.logical.canonical):
         blockers.append("destination_locked_by_another_campaign")
     if acknowledgment_required and not args.i_have_stopped_the_sync_service:
@@ -972,13 +1406,15 @@ def cmd_execute(args) -> int:
     set_active()
     try:
         result = execute_copy(args.bundle, source_root, destination, plan.keys,
-                              limit=args.limit)
+                              limit=args.limit, staged_destinations=staged)
     finally:
         lock.release()
         clear_active()
 
     payload["copy"] = result.to_dict()
+    payload["layout"] = "staged" if staged is not None else "source_relative"
     payload["copied"] = result.copied
+    payload["retried"] = result.retried
     payload["executed"] = True
     payload["mode"] = "executed"
     payload["source_release_allowed"] = False
@@ -1018,6 +1454,10 @@ def _emit_execute(payload: dict, args) -> None:
         f"executed               {str(payload['executed']).lower()}",
         f"copied                 {payload['copied']}",
     ]
+    if payload.get("retried"):
+        # Not noise. A share that needed retries is a share worth knowing about
+        # before it becomes an outage.
+        lines.append(f"  retried             {payload['retried']}")
     if payload.get("leftover_temp_files"):
         lines.append("  leftover temp files   "
                      + ", ".join(payload["leftover_temp_files"][:5]))
@@ -1113,6 +1553,7 @@ def cmd_reconcile(args) -> int:
             f"destination_only           {result.destination_only}",
             f"mismatched                 {result.mismatched}",
             f"unverifiable               {result.unverifiable}",
+            f"foreign_at_destination     {result.foreign_objects}",
             f"state_now                  {status.derivation.state.value}",
             f"state_if_imported          {payload['state_if_imported']}",
             f"source_release_allowed_if_imported  "
@@ -1127,6 +1568,7 @@ def cmd_reconcile(args) -> int:
             ("destination_only", result.destination_only_samples),
             ("mismatched", result.mismatched_samples),
             ("unverifiable", result.unverifiable_samples),
+            ("foreign", result.foreign_samples),
         ):
             if samples:
                 lines.append(f"  {name:<21} {', '.join(samples)}")
@@ -1151,6 +1593,8 @@ _HANDLERS = {
     "capacity": cmd_capacity,
     "preflight": cmd_preflight,
     "hash": cmd_hash,
+    "stage": cmd_stage,
+    "declare-destination": cmd_declare_destination,
     "execute": cmd_execute,
     "release-source": cmd_release_source,
 }

@@ -30,6 +30,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 from .campaign import Campaign, CardIdentity, SourceRef, resolve_campaign
 from .destination import (
     DestinationRef,
+    StorageIdentity,
     load_custody_config,
     load_policy,
     resolve_destination,
@@ -238,6 +239,84 @@ class CampaignStatus:
 
 def _policy_dict(policy: CustodyPolicy) -> Dict[str, Any]:
     return dict(sorted(policy.to_dict().items()))
+
+
+def declare_destination_identity(
+    bundle: str | Path,
+    identity: Optional[StorageIdentity] = None,
+    *,
+    host_path: Optional[str] = None,
+    replace: bool = False,
+) -> Dict[str, Any]:
+    """Record what the destination storage *is*, as an operator declaration.
+
+    Needed because the declaration is otherwise only ever made at campaign
+    creation, from whatever was configured then. A campaign created before the
+    operator knew which share backs it - or created with only an env var set for
+    the root, no identity alongside - otherwise can never satisfy
+    ``require_destination_identity``, because the gate compares a declaration
+    against an observation and there is nothing on the left to compare.
+
+    A declaration, not an observation. Recording what the kernel currently reports
+    here would make the gate compare the filesystem to itself and always pass,
+    which is worse than the closed gate it replaces.
+
+    Refuses to overwrite an existing declaration without ``replace``: silently
+    re-pointing a campaign's destination identity at whatever is currently
+    mounted would let a wrong mount satisfy the gate.
+    """
+    path = Path(bundle) / CAMPAIGN_FILE
+    if not path.is_file():
+        raise CampaignCreationError(f"no campaign at {path}")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    dest = dict(raw.get("destination") or {})
+
+    # Two things can be declared, and they are independent: WHERE the destination
+    # is, and WHAT storage it is. A campaign created with no destination env var
+    # resolves host_path to null, and the gate then refuses for want of a path
+    # rather than for want of an identity - so filling one in without the other
+    # leaves the campaign no closer to a decision.
+    if not identity and not host_path:
+        return {"declared": False, "reason": "nothing_to_declare"}
+
+    existing_identity = dest.get("identity") or None
+    existing_path = dest.get("host_path") or None
+
+    # Per field, because the two are independent and a call that supplies both
+    # should not be refused wholesale over one of them. A declaration already on
+    # file is *kept*, not overwritten - that is what makes it a declaration rather
+    # than a value recomputed from whatever is currently mounted.
+    kept: Dict[str, Any] = {}
+    applied_identity = None
+    if identity:
+        if existing_identity and not replace:
+            kept["identity"] = existing_identity
+        else:
+            dest["identity"] = identity.to_dict()
+            applied_identity = identity.to_dict()
+    applied_path = None
+    if host_path:
+        if existing_path and existing_path != host_path and not replace:
+            # Re-pointing a campaign that may already have been written to is how
+            # bytes end up split across two archives with neither ledger complete.
+            # An *unset* path is not this case: there was no destination, so
+            # nothing was written anywhere.
+            kept["host_path"] = existing_path
+        else:
+            dest["host_path"] = host_path
+            applied_path = host_path
+    dest.setdefault("resolved_from", "declared")
+    raw["destination"] = dest
+    _write_json_atomic(path, raw)
+    return {
+        "declared": True,
+        "replaced": bool(applied_identity or applied_path),
+        "applied_identity": applied_identity,
+        "applied_host_path": applied_path,
+        "kept": kept,
+        "identity": dest.get("identity"),
+        "host_path": dest.get("host_path"),
+    }
 
 
 def load_campaign(bundle: str | Path) -> Campaign:
@@ -593,8 +672,13 @@ def reconcile_preview(
     # this card has, so it is what a partially-written hash ledger is checked
     # against. Zero (nothing inventoried yet) means "no cross-check available".
     expected = current.inventory.discovered_files or None
-    result = reconcile_bundle(root, max_samples=samples,
-                              expected_source_objects=expected)
+    # The destination walk is the one part of reconciliation that touches the
+    # destination filesystem, so it is opt-in by root: without a destination there
+    # is nothing to scope against, and on a large share the walk is not free.
+    result = reconcile_bundle(
+        root, max_samples=samples, expected_source_objects=expected,
+        destination_root=campaign.destination.host_path,
+        tolerate_foreign=policy.tolerated_foreign_subtrees)
     proposal = result.proposal()
     # Preview and import MUST agree, so both go through the same merge: an
     # unusable proposal (absent ledger) leaves the current evidence alone rather

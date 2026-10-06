@@ -73,6 +73,13 @@ custody:
     declared_hash_exemptions: []
     require_operator_witness: false
     strict_destination_scope: false
+    # Relative subtrees at the destination root owned by a DIFFERENT campaign.
+    # Without somewhere to declare these, strict_destination_scope is permanently
+    # red and therefore permanently ignored - worse than not having the knob. The
+    # live destination root holds one: a 332-file, ~47.7GB campaign from an
+    # earlier attempt, in the camera's own DCIM/Movie layout.
+    tolerated_foreign_subtrees:
+      - 20260824_205409-x1-370
     require_destination_identity: true
     require_read_only_source: true
     require_mounted_destination: true

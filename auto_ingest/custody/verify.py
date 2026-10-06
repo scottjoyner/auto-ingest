@@ -29,7 +29,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from .hashing import DEFAULT_ALGORITHM, digest_file
 from .ledger import DESTINATION_LEDGER, HASH_LEDGER, ledger_dir, read_records
@@ -143,6 +143,42 @@ def already_verified(ledger: Path) -> Dict[str, str]:
     return done
 
 
+def verified_bytes_in_ledger(ledger: Path) -> int:
+    """Bytes already proven at the destination, summed from the ledger.
+
+    ``already_verified`` returns digests because that is what a resume needs to
+    decide what to skip. Evidence additionally needs the *size* of what was
+    already proven, or the campaign records a file count with no bytes beside it.
+    """
+    import json
+
+    if not ledger.is_file():
+        return 0
+    try:
+        text = ledger.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    # Per key, not per row. A `--recheck` pass re-proves objects it already
+    # proved and appends fresh rows for them, so summing rows counts the same
+    # bytes twice - which is how a verified_bytes of 3,835,406,336 appeared
+    # beside a verified_files of 3.
+    sizes: Dict[str, int] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict) or row.get("status") != VERIFIED:
+            continue
+        key, size = row.get("key"), row.get("size")
+        if key and isinstance(size, int) and size > 0:
+            sizes[str(key)] = size
+    return sum(sizes.values())
+
+
 def ends_unterminated(ledger: Path) -> bool:
     if not ledger.is_file():
         return False
@@ -165,6 +201,7 @@ def verify_destination(
     recheck: bool = False,
     max_errors: int = MAX_SUMMARY_ENTRIES,
     progress: Optional[Callable[[VerifyProgress], None]] = None,
+    staged_destinations: Optional[Mapping[str, str]] = None,
 ) -> VerifyProgress:
     """Verify every source object against the destination tree.
 
@@ -175,6 +212,12 @@ def verify_destination(
 
     ``recheck`` forces re-verification of keys already proven; by default they are
     skipped, so the pass is resumable.
+
+    ``staged_destinations`` maps a source key to the relative path it was copied
+    to. Without it this looks for the file at ``destination_root / key``, which is
+    right for a flat copy and wrong for every staged one - and it fails in the
+    worst direction, reporting a completed copy as MISSING. Omitted, the behaviour
+    is unchanged.
     """
     expected = source_digests(bundle)
     root = ledger_dir(bundle)
@@ -188,6 +231,7 @@ def verify_destination(
     verified_bytes = 0
     errors: List[str] = []
     base = Path(destination_root)
+    staged = staged_destinations or {}
 
     with ledger.open("a", encoding="utf-8") as handle:
         if pending and ends_unterminated(ledger):
@@ -198,7 +242,7 @@ def verify_destination(
             if limit is not None and (verified + missing + mismatched + failed) >= limit:
                 break
             want_digest, size = expected[key]
-            target = base / key
+            target = base / staged.get(key, key)
             if not target.exists():
                 missing += 1
                 handle.write(_record(key, MISSING, size=size,
@@ -253,6 +297,18 @@ def verify_destination(
     return result
 
 
+def _proven_bytes(result: "VerifyProgress") -> int:
+    """Bytes the destination ledger proves, falling back to the pass's own count.
+
+    The fallback exists only for a pass whose ledger was never written - an
+    unwritable bundle directory, say. A zero that is real stays zero.
+    """
+    path = Path(result.ledger_path)
+    if path.is_file():
+        return verified_bytes_in_ledger(path)
+    return result.verified_bytes
+
+
 def to_evidence(result: VerifyProgress, *,
                 reconciled_at: Optional[str] = None) -> Dict[str, Any]:
     """The evidence fragment a verification pass contributes.
@@ -270,7 +326,17 @@ def to_evidence(result: VerifyProgress, *,
     return {
         "destination": {
             "verified_files": result.verified + result.skipped_existing,
-            "verified_bytes": result.verified_bytes,
+            # Cumulative for the same reason as the count directly above. Leaving
+            # this as the pass's own delta wrote `verified_files: 3` beside
+            # `verified_bytes: 0` on every resume - a campaign claiming three
+            # proven objects and no bytes at all, which the state machine then
+            # read as custody.
+            #
+            # Read from the ledger, not summed from the result: the ledger already
+            # contains this pass's own records, so adding the two counts the same
+            # bytes twice. The ledger is the one place that survives a resume, so
+            # it is the one place the total comes from.
+            "verified_bytes": _proven_bytes(result),
             "failures": result.failed,
             "verification_started": True,
             "verification_complete": result.complete,

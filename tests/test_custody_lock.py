@@ -356,11 +356,41 @@ def test_preflight_is_clear_once_nothing_else_is_wrong(tmp_path, capsys, monkeyp
         "auto_ingest.custody.cli.competing_activity",
         lambda **kw: (),
     )
+    # A recorded layout is now part of "nothing else is wrong": without one,
+    # `execute` copies to source-relative paths and recreates the camera's
+    # directory layout, which preflight refuses to call clear. The fixture is
+    # given a staged layout so the assertion below keeps testing what it says -
+    # that the release gate is the ONLY failure - rather than quietly widening to
+    # two.
+    from auto_ingest.custody.executor import write_staged_ledger
+    from auto_ingest.custody.staging import plan_staging
+
+    write_staged_ledger(bundle, plan_staging(["DCIM/2026_0829_123850_F.MP4"]),
+                        source_roots=["/media/scott/UNTITLED"])
     code = main(["preflight", "--bundle", str(bundle), "--json"])
     payload = json.loads(capsys.readouterr().out)
-    assert payload["failed"] == ["release_gate_open"]
+    assert payload["failed"] == ["release_gate_open"], payload["failed"]
     assert payload["safe_to_execute"] is False
     assert code == EXIT_GATE_CLOSED
+
+
+def test_preflight_is_not_clear_without_a_recorded_layout(tmp_path, capsys,
+                                                          monkeypatch):
+    """The other half of the contract above, and the reason the fixture needed
+    one: an undecided layout is a preflight failure of its own."""
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    bundle = write_bundle(
+        tmp_path / "b",
+        campaign(dest=destination(host_path=str(dest), mounted=True)),
+        evidence(),
+    )
+    monkeypatch.setattr("auto_ingest.custody.cli.competing_activity",
+                        lambda **kw: ())
+    main(["preflight", "--bundle", str(bundle), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert "staged_layout_recorded" in payload["failed"]
+    assert "release_gate_open" in payload["failed"]
 
 
 def test_preflight_text_names_the_competing_writer(tmp_path, capsys):
