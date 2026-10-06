@@ -28,6 +28,7 @@ from auto_ingest.custody.ledger import (
     ReconciliationUnavailable,
     reconcile_bundle,
     reconcile_ledgers,
+    scan_foreign_objects,
 )
 from auto_ingest.custody.store import load_status, reconcile_preview
 
@@ -611,3 +612,104 @@ def test_preview_agrees_with_import(tmp_path):
     main(["import", "--bundle", str(bundle), "--evidence", str(doc), "--apply", "--json"])
     after = load_status(bundle, strict_policy())
     assert after.to_dict() == preview.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# Files at the destination that this campaign never put there
+# ---------------------------------------------------------------------------
+# Reconciliation is a ledger-to-ledger set difference, so it cannot see a file the
+# campaign never recorded. That is invisible in testing and obvious in production:
+# the real destination root holds 332 files / 47.7 GB from a *different*, already
+# archived campaign, and reconcile reported destination_only=0 - which reads as
+# "the destination holds exactly this campaign and nothing else".
+
+def test_a_foreign_file_at_the_destination_is_invisible_to_ledger_reconciliation(tmp_path):
+    """The gap, stated as a test.
+
+    Reconciliation is a set difference between the campaign's own two ledgers, so a
+    file the campaign never recorded cannot appear in it. In production the live
+    destination root holds 332 files / 47.7 GB from a *different*, already
+    archived campaign, and reconcile reported destination_only=0 - which reads as
+    "the destination holds exactly this campaign and nothing else".
+
+    Both halves are asserted: the ledger difference really does miss it, and the
+    filesystem scan really does find it.
+    """
+    dest = tmp_path / "dest"
+    (dest / "someone-elses-campaign").mkdir(parents=True)
+    (dest / "someone-elses-campaign" / "clip.MP4").write_bytes(b"not ours")
+
+    h = write_ledger(tmp_path / "h.jsonl", [src("ours.MP4", "A1")])
+    d = write_ledger(tmp_path / "d.jsonl", [dst("ours.MP4", "A1")])
+    result = reconcile_ledgers(h, d)
+
+    assert result.destination_only == 0, "the ledger difference cannot see it"
+    foreign, samples = scan_foreign_objects(dest, d)
+    assert foreign == 1, "the filesystem walk does"
+    assert samples == ("someone-elses-campaign/clip.MP4",)
+
+
+def test_objects_this_campaign_verified_are_not_foreign(tmp_path):
+    dest = tmp_path / "dest"
+    (dest / "2026" / "08" / "29").mkdir(parents=True)
+    landed = dest / "2026" / "08" / "29" / "a.MP4"
+    landed.write_bytes(b"ours")
+    # The destination ledger records absolute destination paths, which is what the
+    # scan matches on - staging may put an object somewhere other than its key.
+    d = write_ledger(tmp_path / "d.jsonl", [dst("DCIM/a.MP4", "A1", path=str(landed))])
+    assert scan_foreign_objects(dest, d) == (0, ())
+
+
+def test_a_declared_sibling_campaign_is_not_foreign(tmp_path):
+    """A shared destination root has to be representable, or the strict check is
+    permanently red and therefore permanently ignored."""
+    dest = tmp_path / "dest"
+    (dest / "other-campaign").mkdir(parents=True)
+    (dest / "other-campaign" / "x.MP4").write_bytes(b"theirs")
+    (dest / "stray.MP4").write_bytes(b"nobodys")
+    d = write_ledger(tmp_path / "d.jsonl", [dst("a.MP4", "A1", path=str(dest / "a.MP4"))])
+
+    undeclared, samples = scan_foreign_objects(dest, d)
+    assert undeclared == 2
+
+    declared, samples = scan_foreign_objects(dest, d, tolerate=("other-campaign",))
+    assert declared == 1
+    assert samples == ("stray.MP4",)
+
+
+def test_reconcile_bundle_carries_the_foreign_count_when_given_a_destination(tmp_path):
+    from auto_ingest.custody.ledger import ledger_dir
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "stray.MP4").write_bytes(b"x")
+    bundle = tmp_path / "b"
+    write_ledger(ledger_dir(bundle) / "hash.jsonl", [src("a.MP4", "A1")])
+    write_ledger(ledger_dir(bundle) / "destination.jsonl", [dst("a.MP4", "A1")])
+
+    without = reconcile_bundle(bundle)
+    assert without.foreign_objects == 0, "no destination given, no walk"
+
+    with_root = reconcile_bundle(bundle, destination_root=dest)
+    assert with_root.foreign_objects == 1
+    assert with_root.to_dict()["foreign_objects"] == 1
+
+
+def test_the_foreign_count_is_complete_not_truncated(tmp_path):
+    """A count that stops early and is reported as the total is worse than no
+    count: it reads as "a couple of stray files" when it is a whole second
+    campaign.
+
+    The first version of the scan did exactly that - reported 25 for a tree
+    holding 332 - by stopping the walk once the sample was full. Only the sample
+    may be bounded.
+    """
+    dest = tmp_path / "dest"
+    (dest / "other").mkdir(parents=True)
+    for i in range(400):
+        (dest / "other" / f"f{i:03d}.MP4").write_bytes(b"x")
+    d = write_ledger(tmp_path / "d.jsonl", [dst("a.MP4", "A1")])
+
+    count, samples = scan_foreign_objects(dest, d, max_samples=3)
+    assert count == 400, "the count must be the whole, not the sample"
+    assert len(samples) == 3

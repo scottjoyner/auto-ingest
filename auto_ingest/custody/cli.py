@@ -1553,6 +1553,7 @@ def cmd_reconcile(args) -> int:
             f"destination_only           {result.destination_only}",
             f"mismatched                 {result.mismatched}",
             f"unverifiable               {result.unverifiable}",
+            f"foreign_at_destination     {result.foreign_objects}",
             f"state_now                  {status.derivation.state.value}",
             f"state_if_imported          {payload['state_if_imported']}",
             f"source_release_allowed_if_imported  "
@@ -1567,6 +1568,7 @@ def cmd_reconcile(args) -> int:
             ("destination_only", result.destination_only_samples),
             ("mismatched", result.mismatched_samples),
             ("unverifiable", result.unverifiable_samples),
+            ("foreign", result.foreign_samples),
         ):
             if samples:
                 lines.append(f"  {name:<21} {', '.join(samples)}")

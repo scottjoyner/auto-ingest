@@ -66,6 +66,15 @@ class CustodyPolicy:
     #: Treat extra destination objects as a release blocker instead of a warning.
     strict_destination_scope: bool = False
 
+    #: Relative subtrees at the destination root owned by *other* campaigns, and so
+    #: not foreign objects at all.
+    #:
+    #: Needed because a destination root is often shared. The live one holds a
+    #: second, already-archived campaign beside this one. Without somewhere to
+    #: declare that, `strict_destination_scope` would be permanently red and
+    #: therefore permanently ignored - which is worse than not having it.
+    tolerated_foreign_subtrees: Tuple[str, ...] = ()
+
     #: Require proven storage identity for the destination before release.
     require_destination_identity: bool = True
 
@@ -89,6 +98,7 @@ class CustodyPolicy:
             "declared_source_exclusions",
             "require_operator_witness",
             "strict_destination_scope",
+            "tolerated_foreign_subtrees",
             "require_destination_identity",
             "require_read_only_source",
             "require_mounted_destination",
@@ -98,7 +108,8 @@ class CustodyPolicy:
         for key in known:
             if key in raw and raw[key] is not None:
                 kwargs[key] = raw[key]
-        for field_name in ("declared_hash_exemptions", "declared_source_exclusions"):
+        for field_name in ("declared_hash_exemptions", "declared_source_exclusions",
+                           "tolerated_foreign_subtrees"):
             if field_name in kwargs:
                 value = kwargs[field_name]
                 if isinstance(value, str):
@@ -123,6 +134,7 @@ class CustodyPolicy:
             "require_read_only_source": self.require_read_only_source,
             "required_scope": self.required_scope,
             "strict_destination_scope": self.strict_destination_scope,
+            "tolerated_foreign_subtrees": list(self.tolerated_foreign_subtrees),
         }
 
     # -- scope helpers ----------------------------------------------------

@@ -257,6 +257,26 @@ def evaluate_release(
             f"source_only={rec.source_only}",
             "copy the missing objects to the destination",
         ))
+    # Two different questions, and only the second was ever answerable before.
+    #
+    # `destination_only` is this campaign's destination ledger minus its source
+    # ledger, so it can only ever count keys this campaign recorded. It is kept,
+    # because it catches a real case: an object copied and then dropped from the
+    # source.
+    #
+    # `foreign_objects` is the filesystem question - what else is at this
+    # destination root - and it is what the strict_scope blocker message has always
+    # claimed to be about. Before this, the knob could not do that, silently.
+    if policy.strict_destination_scope and rec.foreign_objects:
+        blockers.append(Blocker(
+            "foreign_destination_objects",
+            f"foreign_objects={rec.foreign_objects} at {dest.host_path}",
+            "objects at the destination are not in this campaign's ledger; either "
+            "they belong to another campaign - declare it in "
+            "policy.tolerated_foreign_subtrees - or they should not be there",
+        ))
+    elif rec.foreign_objects:
+        warnings.append(f"foreign_objects={rec.foreign_objects} (advisory)")
     if rec.destination_only:
         if policy.strict_destination_scope:
             blockers.append(Blocker(

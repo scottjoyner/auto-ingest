@@ -356,6 +356,10 @@ class ReconciliationEvidence:
     source_only: int = 0
     destination_only: int = 0
     mismatched: int = 0
+    #: Objects at the destination root that this campaign never recorded. Kept
+    #: apart from `destination_only`, which is a ledger-to-ledger difference and
+    #: so by construction can only count this campaign's own keys.
+    foreign_objects: int = 0
     reconciled_at: Optional[str] = None
 
     @classmethod
@@ -375,6 +379,7 @@ class ReconciliationEvidence:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "destination_only": self.destination_only,
+            "foreign_objects": self.foreign_objects,
             "mismatched": self.mismatched,
             "reconciled_at": self.reconciled_at,
             "source_only": self.source_only,

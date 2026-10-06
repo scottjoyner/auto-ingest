@@ -20,7 +20,7 @@ Two read-only operations live here:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -308,6 +308,11 @@ class ReconciliationResult:
     destination_ledger_present: bool
     source_objects: int = 0
     destination_objects: int = 0
+    #: Objects present at the destination root that this campaign did not record.
+    #: Distinct from ``destination_only``, which is a ledger-to-ledger difference
+    #: and so can only ever count this campaign's own keys.
+    foreign_objects: int = 0
+    foreign_samples: Tuple[str, ...] = ()
     verified: int = 0
     source_only: int = 0
     destination_only: int = 0
@@ -386,6 +391,7 @@ class ReconciliationResult:
             "reconciliation": {
                 "source_only": self.source_only + self.unverifiable,
                 "destination_only": self.destination_only,
+                "foreign_objects": self.foreign_objects,
                 "mismatched": self.mismatched,
             },
             "destination": {
@@ -413,6 +419,8 @@ class ReconciliationResult:
             "destination_only": self.destination_only,
             "destination_only_samples": list(self.destination_only_samples),
             "destination_objects": self.destination_objects,
+            "foreign_objects": self.foreign_objects,
+            "foreign_samples": list(self.foreign_samples),
             "expected_source_objects": self.expected_source_objects,
             "hash_ledger_present": self.hash_ledger_present,
             "incoherent": list(self.incoherent),
@@ -604,20 +612,108 @@ def reconcile_ledgers(
     )
 
 
+def scan_foreign_objects(
+    destination_root: str | Path,
+    destination_ledger: str | Path,
+    *,
+    tolerate: Tuple[str, ...] = (),
+    max_samples: int = MAX_SUMMARY_ENTRIES,
+) -> Tuple[int, Tuple[str, ...]]:
+    """Objects at ``destination_root`` that this campaign did not put there.
+
+    Reconciliation is a set difference between the campaign's own two ledgers, so it
+    is structurally incapable of seeing anything the campaign never recorded. That
+    is not a rounding error in practice: the live destination root holds 332 files
+    / 47.7 GB belonging to a *different*, already-archived campaign, and
+    reconcile reported ``destination_only=0`` - which reads as "the destination
+    holds exactly this campaign and nothing else".
+
+    Matched on the absolute paths the destination ledger recorded, not on custody
+    keys: staging may put an object somewhere other than its source path, so the
+    key is not the destination's coordinate.
+
+    ``tolerate`` names relative subtrees owned by other campaigns, so a shared
+    destination root is representable rather than permanently red. Without it, two
+    campaigns cannot share an archive - which is exactly the situation that makes
+    the check worth having in the first place.
+    """
+    import os
+
+    root = Path(destination_root)
+    if not root.is_dir():
+        return 0, ()
+
+    ours: set = set()
+    ledger_path = Path(destination_ledger)
+    if ledger_path.is_file():
+        try:
+            text = ledger_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict) and row.get("path"):
+                ours.add(os.path.normpath(str(row["path"])))
+
+    tolerated = {os.path.normpath(str(t)) for t in tolerate}
+    foreign: List[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = os.path.relpath(dirpath, root)
+        if rel_dir == ".":
+            rel_dir = ""
+        # A tolerated subtree is skipped whole, not filtered file by file.
+        dirnames[:] = [
+            d for d in dirnames
+            if os.path.normpath(os.path.join(rel_dir, d)) not in tolerated
+        ]
+        for name in filenames:
+            rel = os.path.normpath(os.path.join(rel_dir, name))
+            if rel in tolerated:
+                continue
+            if os.path.normpath(os.path.join(dirpath, name)) in ours:
+                continue
+            foreign.append(rel)
+    # Every object is counted; only the sample is bounded. An earlier version
+    # stopped walking early to save time and reported the truncated total as if it
+    # were the whole - 25 for a tree holding 332, which reads as "a couple of
+    # stray files" rather than "a second campaign nobody declared".
+    return len(foreign), tuple(sorted(foreign)[:max_samples])
+
+
 def reconcile_bundle(
     bundle: str | Path,
     *,
     max_samples: int = MAX_SUMMARY_ENTRIES,
     expected_source_objects: Optional[int] = None,
+    destination_root: Optional[str | Path] = None,
+    tolerate_foreign: Tuple[str, ...] = (),
 ) -> ReconciliationResult:
-    """Reconcile the ledgers of a campaign bundle. Absent ledgers stay absent."""
+    """Reconcile the ledgers of a campaign bundle. Absent ledgers stay absent.
+
+    ``destination_root`` enables the filesystem-scope check, which walks the
+    destination and counts what this campaign did not put there. It is optional
+    because it is the only part of reconciliation that touches the destination,
+    and on a large share that walk is not free.
+    """
     root = ledger_dir(bundle)
-    return reconcile_ledgers(
+    result = reconcile_ledgers(
         root / HASH_LEDGER,
         root / DESTINATION_LEDGER,
         max_samples=max_samples,
         expected_source_objects=expected_source_objects,
     )
+    if destination_root is None:
+        return result
+    foreign, samples = scan_foreign_objects(
+        destination_root, root / DESTINATION_LEDGER,
+        tolerate=tolerate_foreign, max_samples=max_samples)
+    return replace(result, foreign_objects=foreign, foreign_samples=samples)
 
 
 __all__ = [

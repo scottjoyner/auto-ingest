@@ -672,8 +672,13 @@ def reconcile_preview(
     # this card has, so it is what a partially-written hash ledger is checked
     # against. Zero (nothing inventoried yet) means "no cross-check available".
     expected = current.inventory.discovered_files or None
-    result = reconcile_bundle(root, max_samples=samples,
-                              expected_source_objects=expected)
+    # The destination walk is the one part of reconciliation that touches the
+    # destination filesystem, so it is opt-in by root: without a destination there
+    # is nothing to scope against, and on a large share the walk is not free.
+    result = reconcile_bundle(
+        root, max_samples=samples, expected_source_objects=expected,
+        destination_root=campaign.destination.host_path,
+        tolerate_foreign=policy.tolerated_foreign_subtrees)
     proposal = result.proposal()
     # Preview and import MUST agree, so both go through the same merge: an
     # unusable proposal (absent ledger) leaves the current evidence alone rather
