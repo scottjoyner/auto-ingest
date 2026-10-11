@@ -24,6 +24,16 @@ Other installed scripts or remote hosts may have further hardcoded clients; this
 - Do not log private prompts, inference responses or internal endpoint addresses on failure; the public `EmbeddingUnavailable` exception uses generic error messages.
 - Even a numerically valid vector is **not** a cryptographic proof of model GGUF digest, per-user authorization, or worker-specific execution. The currently exposed Beelink endpoint remains a [P0 issue #319](https://github.com/scottjoyner/auto-assist/issues/319); a listed-model or HTTP-200 response does not make it safe.
 
+## Critical dry-run side-effect correction
+
+During full call-path review, `signal_kg_bridge.ingest(..., dry_run=True)` was found to call `embed()` **before** checking the flag and to invoke `get_neo4j()` and `ensure_constraints()` (schema DDL!) **even during dry run**. It also logged a preview of Signal message content. `arxiv_kg_bridge.ingest(..., dry_run=True)` similarly called `embed()` and opened Neo4j before its dry-run branch; it also called `save_seen(seen)` after the dry-run loop, meaning local paper cursors could advance without ingestion.
+
+The draft now exits from **both ingest functions before inference and any Neo4j connection/schema/write** on dry-run; it never saves their corresponding cursor in this branch and logs only aggregate counts, not private message text or raw paper titles. arXiv's dry-run preview counts only unique unseen IDs. `tests/test_ingest_dry_run_guards.py` adds six mocked tests that **raise immediately if embed, get_neo4j, ensure_constraints or save_cursor/save_seen are invoked** and verify redacted logs. All six pass.
+
+**Residual risk: `signal_kg_bridge.main()` still calls `signal-cli receive` before entering `ingest`**. Queue semantics must be checked separately before treating command-line `--dry-run` as end-to-end side-effect free; this change establishes **model/graph/cursor nonmutation inside `ingest`**, not Signal queue custody. Likewise arXiv dry-run still makes normal read-only arXiv GETs before `ingest` unless invocation is mocked. No real dry-run was executed against either external service.
+
+Total exact-source isolated tests: **55** (22 embedding client/caller, 27 pinned resolver, 6 dry-run), plus lint/bytecode checks; hosted workflow verifies this exact combination separately.
+
 ## Evidence and release acceptance
 
 `tests/test_embedding_client_guard.py` performs **22 local-only tests** using mocked HTTP and selector calls, including model/vector validation and structural checks that each of the four known callers uses the central function without raw endpoint constants. The parent [PR #21](https://github.com/scottjoyner/auto-ingest/pull/21) contributes **27 additional** model-family, dimensionality and failover tests. No actual POST is sent in either suite.
