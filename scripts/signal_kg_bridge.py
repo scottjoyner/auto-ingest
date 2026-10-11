@@ -120,6 +120,11 @@ def ingest(msgs, dry_run=False):
     if not msgs:
         log("no new messages")
         return 0
+    if dry_run:
+        # No model invocation, DB session/schema DDL or local cursor writes.
+        # signal-cli receive (the caller) has separate queue semantics.
+        log(f"[dry-run] {len(msgs)} envelopes (no inference or graph writes)")
+        return len(msgs)
     drv, db = get_neo4j()
     ensure_constraints(drv, db)
     try:
@@ -128,11 +133,6 @@ def ingest(msgs, dry_run=False):
             last_ts = None
             for m in msgs:
                 emb = embed(m["body"])
-                if dry_run:
-                    log(f"[dry-run] {m['src']} @ {m['ts']}: {m['body'][:60]!r}")
-                    n += 1
-                    last_ts = m["ts"] or last_ts
-                    continue
                 # MERGE Scott + message; attach embedding if available.
                 # NODE KEY (source,ts) makes this idempotent across re-runs.
                 params = {
@@ -186,9 +186,9 @@ def ingest(msgs, dry_run=False):
                         log(f"semantic ABOUT skipped: {type(e).__name__}: {str(e)[:80]}")
                 n += 1
                 last_ts = m["ts"] or last_ts
-            if not dry_run and last_ts:
+            if last_ts:
                 save_cursor(str(last_ts))
-            log(f"ingested {n} messages" + (" [dry-run]" if dry_run else ""))
+            log(f"ingested {n} messages")
             return n
     finally:
         drv.close()
