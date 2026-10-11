@@ -34,8 +34,9 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from scripts.embedding_client import embed_texts
+
 CURSOR_FILE = REPO / "scripts" / ".arxiv_kg_cursor.json"
-LM_STUDIO_URL = "http://100.64.43.123:1234/v1/embeddings"
 EMBED_MODEL = "text-embedding-nomic-embed-text-v1.5"
 ATOM = "{http://www.w3.org/2005/Atom}"
 
@@ -108,16 +109,13 @@ def fetch_arxiv(query: str, max_results: int = 10):
 
 
 def embed(text: str):
+    """Return a validated 768-vector or None without a hardcoded endpoint."""
     if not text or not text.strip():
         return None
-    body = json.dumps({"model": EMBED_MODEL, "input": text[:2000]}).encode()
-    req = urllib.request.Request(LM_STUDIO_URL, data=body,
-                                 headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.load(r)["data"][0]["embedding"]
-    except Exception as e:  # noqa: BLE001
-        log("embed failed:", type(e).__name__, str(e)[:100])
+        return embed_texts([text[:2000]], model=EMBED_MODEL, timeout=30)[0]
+    except Exception as exc:  # noqa: BLE001
+        log("embedding unavailable:", type(exc).__name__)
         return None
 
 
