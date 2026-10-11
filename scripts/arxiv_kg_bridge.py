@@ -161,6 +161,15 @@ def ingest(papers, dry_run=False):
     if not papers:
         log("no papers")
         return 0
+    if dry_run:
+        # arXiv GET may already have occurred in main(), but no inference,
+        # graph connection/write or local seen-cursor mutation happens here.
+        new_ids_preview = {
+            paper["arxiv_id"] for paper in papers
+            if paper["arxiv_id"] not in seen
+        }
+        log(f"[dry-run] {len(new_ids_preview)} new paper IDs; no model or graph writes")
+        return len(new_ids_preview)
     drv, db = get_neo4j()
     new = 0
     try:
@@ -169,11 +178,6 @@ def ingest(papers, dry_run=False):
                 if p["arxiv_id"] in seen:
                     continue
                 emb = embed(p["abstract"])
-                if dry_run:
-                    log(f"[dry-run] {p['arxiv_id']}: {p['title'][:60]!r}")
-                    seen.add(p["arxiv_id"])
-                    new += 1
-                    continue
                 try:
                     s.run(
                         """
@@ -248,7 +252,7 @@ def ingest(papers, dry_run=False):
             except Exception as e:  # noqa: BLE001
                 log(f"similar-edge step skipped: {type(e).__name__}: {str(e)[:90]}")
         save_seen(seen)
-        log(f"ingested {new} new papers (total seen {len(seen)})" + (" [dry-run]" if dry_run else ""))
+        log(f"ingested {new} new papers (total seen {len(seen)})")
         return new
     finally:
         drv.close()
