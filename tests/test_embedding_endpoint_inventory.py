@@ -186,7 +186,7 @@ class TestEmbeddingInventoryFailover(unittest.TestCase):
 
     def test_missing_dimension_metadata_fails_if_pinned(self):
         with patch.object(M.urllib.request, "urlopen", return_value=FakeResponse(
-            {"data": [{"id": "nomic-embed-text-v1.5.Q4_K_M.gguf", "meta": {"n_embd": 768}}]}
+            {"data": [{"id": "nomic-embed-text-v1.5.Q4_K_M.gguf"}]}
         )):
             self.assertFalse(M._healthy(
                 "http://example.invalid/v1/models",
@@ -251,7 +251,7 @@ class TestEmbeddingInventoryFailover(unittest.TestCase):
         selected = self.record(3, "usable")
         self.registry_with(None, {"url": None, "priority": 2}, selected)
         with patch.object(M.urllib.request, "urlopen", return_value=FakeResponse(
-            {"data": [{"id": "nomic-embed-text-v1.5.Q4_K_M.gguf"}]}
+            {"data": [{"id": "nomic-embed-text-v1.5.Q4_K_M.gguf", "meta": {"n_embd": 768}}]}
         )):
             self.assertEqual(M.get_embedding_endpoint(), selected["url"])
 
