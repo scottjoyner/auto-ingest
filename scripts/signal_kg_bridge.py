@@ -34,9 +34,10 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from scripts.embedding_client import embed_texts
+
 CURSOR_FILE = REPO / "scripts" / ".signal_kg_cursor.json"
 SIGNAL_ACCOUNT = os.environ.get("SIGNAL_ACCOUNT")  # e.g. +170XXXX5781; may be None (default device)
-LM_STUDIO_URL = "http://100.64.43.123:1234/v1/embeddings"  # LM Studio on x1-370 net
 EMBED_MODEL = "text-embedding-nomic-embed-text-v1.5"
 
 
@@ -63,19 +64,13 @@ def get_neo4j():
 
 
 def embed(text: str):
-    """Embed a short text via LM Studio. Returns list[float] or None."""
-    import urllib.request
+    """Return a validated 768-vector or None without a hardcoded endpoint."""
     if not text or not text.strip():
         return None
-    body = json.dumps({"model": EMBED_MODEL, "input": text[:2000]}).encode()
-    req = urllib.request.Request(LM_STUDIO_URL, data=body,
-                                 headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = json.load(r)
-        return data["data"][0]["embedding"]
-    except Exception as e:  # noqa: BLE001
-        log("embed failed:", type(e).__name__, str(e)[:120])
+        return embed_texts([text[:2000]], model=EMBED_MODEL, timeout=30)[0]
+    except Exception as exc:  # noqa: BLE001
+        log("embedding unavailable:", type(exc).__name__)
         return None
 
 
