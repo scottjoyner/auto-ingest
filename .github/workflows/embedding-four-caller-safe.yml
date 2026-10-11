@@ -1,0 +1,61 @@
+name: Four-caller Nomic-768 Safe Embeddings (Research)
+
+on:
+  push:
+    branches:
+      - experiment/central-embedding-caller-gate-20261011
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pinned-embedding-callers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install source-only linter
+        run: python -m pip install 'ruff>=0.6,<1'
+      - name: Test four caller boundaries and inherited Nomic-768 resolver
+        run: |
+          python -m unittest discover -s tests -p 'test_embedding_client_guard.py' -q
+          python -m unittest discover -s tests -p 'test_embedding_endpoint_inventory.py' -q
+      - name: Strict new-client lint and pre-existing caller unused-import checks
+        run: |
+          ruff check scripts/embedding_client.py tests/test_embedding_client_guard.py
+          ruff check scripts/get_embedding_endpoint.py tests/test_embedding_endpoint_inventory.py
+          ruff check --select F401 scripts/backfill_paper_768.py \
+            scripts/enrich_bridge_semantic.py \
+            scripts/signal_kg_bridge.py scripts/arxiv_kg_bridge.py
+      - name: Compile all changed callers without importing Neo4j or sending inference
+        run: |
+          python -m compileall -q scripts/embedding_client.py \
+            scripts/backfill_paper_768.py scripts/enrich_bridge_semantic.py \
+            scripts/signal_kg_bridge.py scripts/arxiv_kg_bridge.py
+      - name: Refuse raw embedding fallbacks and unsupported vector admission
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          source=Path('scripts/embedding_client.py').read_text()
+          for req in (
+              'MAX_BATCH = 16', 'DIMENSIONS = 768',
+              'get_embedding_endpoint(model=model, fail=False)',
+              'return None', 'math.isfinite', '_RejectRedirects',
+          ):
+              if req == 'return None':
+                  continue
+              assert req in source, req
+          for name in (
+              'backfill_paper_768.py', 'enrich_bridge_semantic.py',
+              'signal_kg_bridge.py', 'arxiv_kg_bridge.py',
+          ):
+              script=Path('scripts',name).read_text()
+              assert 'from scripts.embedding_client import' in script, name
+              assert 'LM_STUDIO_URL =' not in script, name
+              assert 'EMBED_URL =' not in script, name
+          print('Source-only gate: no live model call, no emergency direct URL.')
+          PY
