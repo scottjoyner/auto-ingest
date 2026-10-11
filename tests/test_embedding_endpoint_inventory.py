@@ -60,6 +60,7 @@ class TestEmbeddingInventoryFailover(unittest.TestCase):
     def registry_with(self, *records):
         self.registry.write_text(json.dumps({
             "model": "text-embedding-nomic-embed-text-v1.5",
+            "embedding_dimensions": 768,
             "endpoints": list(records),
         }))
 
@@ -135,8 +136,8 @@ class TestEmbeddingInventoryFailover(unittest.TestCase):
         calls, fake = self.stub({
             hub["health"]: {"data": []},
             offline["health"]: OSError("provider offline"),
-            alternate["health"]: {"data": [{"id": "nomic-embed-text-v1.5"}]},
-            fallback["health"]: {"data": [{"id": "nomic-embed-text-v1.5"}]},
+            alternate["health"]: {"data": [{"id": "nomic-embed-text-v1.5", "meta": {"n_embd": 768}}]},
+            fallback["health"]: {"data": [{"id": "nomic-embed-text-v1.5", "meta": {"n_embd": 768}}]},
         })
         with patch.object(M.urllib.request, "urlopen", side_effect=fake):
             selected = M.get_embedding_endpoint()
@@ -185,7 +186,7 @@ class TestEmbeddingInventoryFailover(unittest.TestCase):
 
     def test_missing_dimension_metadata_fails_if_pinned(self):
         with patch.object(M.urllib.request, "urlopen", return_value=FakeResponse(
-            {"data": [{"id": "nomic-embed-text-v1.5.Q4_K_M.gguf"}]}
+            {"data": [{"id": "nomic-embed-text-v1.5.Q4_K_M.gguf", "meta": {"n_embd": 768}}]}
         )):
             self.assertFalse(M._healthy(
                 "http://example.invalid/v1/models",
@@ -253,6 +254,54 @@ class TestEmbeddingInventoryFailover(unittest.TestCase):
             {"data": [{"id": "nomic-embed-text-v1.5.Q4_K_M.gguf"}]}
         )):
             self.assertEqual(M.get_embedding_endpoint(), selected["url"])
+
+    def test_override_requires_installed_pinned_registry_metadata(self):
+        M.ENV_URL = "http://example.invalid:1235/v1/embeddings"
+        with patch.object(M.urllib.request, "urlopen", return_value=FakeResponse(
+            {"data": [{
+                "id": "nomic-embed-text-v1.5.Q4_K_M.gguf",
+                "meta": {"n_embd": 768}
+            }]}
+        )):
+            self.assertIsNone(M.get_embedding_endpoint(fail=False))
+
+    def test_override_with_matching_pins_can_select_listing(self):
+        M.ENV_URL = "http://example.invalid:1235/v1/embeddings"
+        self.registry_with(self.record(1, "unused"))
+        with patch.object(M.urllib.request, "urlopen", return_value=FakeResponse(
+            {"data": [{
+                "id": "nomic-embed-text-v1.5.Q4_K_M.gguf",
+                "meta": {"n_embd": 768}
+            }]}
+        )):
+            self.assertEqual(M.get_embedding_endpoint(), M.ENV_URL)
+
+    def test_override_refuses_wrong_model_even_with_matching_dimensions(self):
+        M.ENV_URL = "http://example.invalid:1235/v1/embeddings"
+        self.registry_with(self.record(1, "unused"))
+        with patch.object(M.urllib.request, "urlopen", return_value=FakeResponse(
+            {"data": [{"id": "llama3-instruct", "meta": {"n_embd": 768}}]}
+        )):
+            self.assertIsNone(M.get_embedding_endpoint(fail=False))
+
+    def test_registry_without_dimensions_is_not_a_valid_binding(self):
+        server = self.record(1, "unbounded")
+        self.registry_with(server)
+        d = json.loads(self.registry.read_text())
+        d.pop("embedding_dimensions")
+        self.registry.write_text(json.dumps(d))
+        with patch.object(M.urllib.request, "urlopen", return_value=FakeResponse(
+            {"data": [{
+                "id": "nomic-embed-text-v1.5.Q4_K_M.gguf",
+                "meta": {"n_embd": 768}
+            }]}
+        )) as opened:
+            self.assertIsNone(M.get_embedding_endpoint(fail=False))
+            opened.assert_not_called()
+
+    def test_list_registry_object_fails_closed(self):
+        self.registry.write_text("[]")
+        self.assertIsNone(M.get_embedding_endpoint(fail=False))
 
     def test_environment_override_does_not_accept_empty_model_inventory(self):
         M.ENV_URL = "http://example.invalid:1235/v1/embeddings"
