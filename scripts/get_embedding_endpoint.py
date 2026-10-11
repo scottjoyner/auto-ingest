@@ -5,7 +5,8 @@ get_embedding_endpoint.py — fleet-aware embedding endpoint resolver.
 KG embedding crons (backfill_paper_768, enrich_bridge_semantic, ...) should call this
 instead of hardcoding a single LM Studio URL. It reads the shared registry
 (embedding_endpoints.json on SSD), health-checks each endpoint in priority order, and
-returns the first reachable one. This makes embeddings resilient: if the hub's LM Studio
+returns the first provider listing at least one model. HTTP 200 alone is not
+model readiness or worker execution proof. This makes embeddings resilient: if the hub's LM Studio
 is down (e.g. benchmarking), the cron fails over to a standby node (destroyer, etc).
 
 Usage (in a cron script):
@@ -20,6 +21,8 @@ import os
 import sys
 import urllib.request
 
+MAX_INVENTORY_BYTES = 65_536
+
 REGISTRY = os.environ.get(
     "EMBEDDING_REGISTRY",
     "/media/scott/SSD_4TB/hermes-home/auto-ingest/embedding_endpoints.json",
@@ -30,11 +33,35 @@ HEALTH_TIMEOUT = float(os.environ.get("EMBEDDING_HEALTH_TIMEOUT", "4"))
 
 
 def _healthy(health_url):
+    """Read-only model LISTING acceptance; not proof of LOADED or owner auth.
+
+    A 200 from /v1/models with zero advertised models is not a usable
+    embedding endpoint. The caller's separate production trust policy must
+    still enforce model identity, source authentication, and owner admission.
+    """
+    if not isinstance(health_url, str) or not health_url.endswith("/v1/models"):
+        return False
     try:
-        req = urllib.request.Request(health_url, method="GET")
-        with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT) as r:
-            return r.status == 200
-    except Exception:
+        req = urllib.request.Request(
+            health_url, method="GET", headers={"Accept": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT) as response:
+            if response.status != 200:
+                return False
+            raw = response.read(MAX_INVENTORY_BYTES + 1)
+        if not raw or len(raw) > MAX_INVENTORY_BYTES:
+            return False
+        inventory = json.loads(raw)
+        if not isinstance(inventory, dict) or not isinstance(
+            inventory.get("data"), list
+        ):
+            return False
+        return any(
+            isinstance(item, dict) and isinstance(item.get("id"), str)
+            and bool(item["id"].strip())
+            for item in inventory["data"]
+        )
+    except (OSError, ValueError, TypeError, UnicodeError):
         return False
 
 
@@ -62,9 +89,13 @@ def get_embedding_endpoint(fail=True, model=None):
     endpoints.sort(key=lambda e: e.get("priority", 99))
 
     for e in endpoints:
+        if not isinstance(e, dict):
+            continue
         url = e.get("url")
-        health = e.get("health", url.replace("/v1/embeddings", "/v1/models"))
-        if url and _healthy(health):
+        if not isinstance(url, str) or not url.endswith("/v1/embeddings"):
+            continue
+        health = e.get("health") or url.replace("/v1/embeddings", "/v1/models")
+        if _healthy(health):
             return url
 
     if fail:
