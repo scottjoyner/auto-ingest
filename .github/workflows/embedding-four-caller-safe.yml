@@ -23,10 +23,11 @@ jobs:
       - name: Test four caller boundaries and inherited Nomic-768 resolver
         run: |
           python -m unittest discover -s tests -p 'test_embedding_client_guard.py' -q
+          python -m unittest discover -s tests -p 'test_ingest_dry_run_guards.py' -q
           python -m unittest discover -s tests -p 'test_embedding_endpoint_inventory.py' -q
       - name: Strict new-client lint and pre-existing caller unused-import checks
         run: |
-          ruff check scripts/embedding_client.py tests/test_embedding_client_guard.py
+          ruff check scripts/embedding_client.py tests/test_embedding_client_guard.py tests/test_ingest_dry_run_guards.py
           ruff check scripts/get_embedding_endpoint.py tests/test_embedding_endpoint_inventory.py
           ruff check --select F401 scripts/backfill_paper_768.py \
             scripts/enrich_bridge_semantic.py \
@@ -57,5 +58,9 @@ jobs:
               assert 'from scripts.embedding_client import' in script, name
               assert 'LM_STUDIO_URL =' not in script, name
               assert 'EMBED_URL =' not in script, name
-          print('Source-only gate: no live model call, no emergency direct URL.')
+          for name in ('signal_kg_bridge.py', 'arxiv_kg_bridge.py'):
+              body=Path('scripts',name).read_text()
+              assert 'if dry_run:' in body, name
+              assert 'no model' in body or 'no inference' in body, name
+          print('Offline tests validate dry-run before any model/graph/cursor mutation.')
           PY
