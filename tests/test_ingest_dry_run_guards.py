@@ -57,6 +57,28 @@ class TestSignalDryRun(unittest.TestCase):
         ):
             self.assertEqual(self.mod.ingest([], dry_run=True), 0)
 
+    def test_signal_cli_dry_run_skips_receive_before_queue_access(self):
+        with (
+            patch.object(sys, "argv", [
+                "signal_kg_bridge.py", "--dry-run", "--since", "2026-10-10",
+            ]),
+            patch.object(self.mod, "receive_signal", side_effect=AssertionError(
+                "Signal queue was accessed"
+            )),
+            patch.object(self.mod, "load_cursor", side_effect=AssertionError(
+                "cursor read should not be needed"
+            )),
+            patch.object(self.mod, "get_neo4j", side_effect=AssertionError(
+                "database was opened"
+            )),
+            patch.object(self.mod, "embed", side_effect=AssertionError(
+                "model was invoked"
+            )),
+            patch.object(self.mod, "log") as log,
+        ):
+            self.assertEqual(self.mod.main(), 0)
+            self.assertIn("queue safety unverified", str(log.call_args_list))
+
     def test_signal_dry_run_counts_without_reading_private_body(self):
         bad_message = {"src": "synthetic-user", "ts": 1_800_000_001}
         with (
