@@ -50,9 +50,13 @@ def _matches_expected_model(model_id, expected_model):
         expected = expected[len("text-embedding-"):]
     expected = expected.replace("_", "-")
     advertised = model_id.rsplit("/", 1)[-1].strip().lower().replace("_", "-")
-    return advertised == expected or any(
-        advertised.startswith(expected + separator)
-        for separator in (".", "-")
+    return (
+        advertised == expected
+        or advertised.startswith(expected + ".")
+        or any(
+            advertised.startswith(expected + "-" + quant)
+            for quant in ("q2", "q3", "q4", "q5", "q6", "q8", "f16", "f32")
+        )
     )
 
 
