@@ -32,7 +32,31 @@ ENV_URL = os.environ.get("EMBEDDING_URL")
 HEALTH_TIMEOUT = float(os.environ.get("EMBEDDING_HEALTH_TIMEOUT", "4"))
 
 
-def _healthy(health_url):
+def _matches_expected_model(model_id, expected_model):
+    """Match canonical model family, not arbitrary substring in a path.
+
+    Registry: text-embedding-nomic-embed-text-v1.5
+    llama.cpp: .../nomic-embed-text-v1.5.Q4_K_M.gguf
+    We accept only exact family or a separated quantization/file suffix.
+    """
+    if not isinstance(model_id, str) or not model_id.strip():
+        return False
+    if expected_model is None:
+        return True
+    if not isinstance(expected_model, str) or not expected_model.strip():
+        return False
+    expected = expected_model.strip().lower()
+    if expected.startswith("text-embedding-"):
+        expected = expected[len("text-embedding-"):]
+    expected = expected.replace("_", "-")
+    advertised = model_id.rsplit("/", 1)[-1].strip().lower().replace("_", "-")
+    return advertised == expected or any(
+        advertised.startswith(expected + separator)
+        for separator in (".", "-")
+    )
+
+
+def _healthy(health_url, expected_model=None, expected_dimensions=None):
     """Read-only model LISTING acceptance; not proof of LOADED or owner auth.
 
     A 200 from /v1/models with zero advertised models is not a usable
@@ -40,6 +64,10 @@ def _healthy(health_url):
     still enforce model identity, source authentication, and owner admission.
     """
     if not isinstance(health_url, str) or not health_url.endswith("/v1/models"):
+        return False
+    if expected_dimensions is not None and (
+        type(expected_dimensions) is not int or expected_dimensions <= 0
+    ):
         return False
     try:
         req = urllib.request.Request(
@@ -56,11 +84,20 @@ def _healthy(health_url):
             inventory.get("data"), list
         ):
             return False
-        return any(
-            isinstance(item, dict) and isinstance(item.get("id"), str)
-            and bool(item["id"].strip())
-            for item in inventory["data"]
-        )
+        for item in inventory["data"]:
+            if not isinstance(item, dict) or not _matches_expected_model(
+                item.get("id"), expected_model
+            ):
+                continue
+            if expected_dimensions is not None:
+                metadata = item.get("meta")
+                if not isinstance(metadata, dict) or (
+                    type(metadata.get("n_embd")) is not int
+                    or metadata["n_embd"] != expected_dimensions
+                ):
+                    continue
+            return True
+        return False
     except (OSError, ValueError, TypeError, UnicodeError):
         return False
 
@@ -69,7 +106,10 @@ def get_embedding_endpoint(fail=True, model=None):
     """Return the embeddings URL of the first healthy endpoint, or None/raise."""
     if ENV_URL:
         # Single-endpoint mode: still health-check it.
-        if _healthy(ENV_URL.replace("/v1/embeddings", "/v1/models")):
+        if _healthy(
+            ENV_URL.replace("/v1/embeddings", "/v1/models"),
+            expected_model=model,
+        ):
             return ENV_URL
         if fail:
             raise RuntimeError(f"EMBEDDING_URL {ENV_URL} is not reachable")
@@ -106,7 +146,14 @@ def get_embedding_endpoint(fail=True, model=None):
         if not isinstance(url, str) or not url.endswith("/v1/embeddings"):
             continue
         health = e.get("health") or url.replace("/v1/embeddings", "/v1/models")
-        if _healthy(health):
+        expected_model = model or e.get("model") or reg.get("model")
+        expected_dimensions = e.get(
+            "embedding_dimensions", reg.get("embedding_dimensions")
+        )
+        if _healthy(
+            health, expected_model=expected_model,
+            expected_dimensions=expected_dimensions,
+        ):
             return url
 
     if fail:
