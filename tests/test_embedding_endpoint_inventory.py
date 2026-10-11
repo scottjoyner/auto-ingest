@@ -144,6 +144,94 @@ class TestEmbeddingInventoryFailover(unittest.TestCase):
         self.assertEqual(calls, [hub["health"], offline["health"], alternate["health"]])
         self.assertNotIn(fallback["health"], calls)
 
+    def test_wrong_embedding_family_is_rejected(self):
+        with patch.object(M.urllib.request, "urlopen", return_value=FakeResponse(
+            {"data": [{"id": "llama3-instruct", "meta": {"n_embd": 768}}]}
+        )):
+            self.assertFalse(M._healthy(
+                "http://example.invalid/v1/models",
+                expected_model="text-embedding-nomic-embed-text-v1.5",
+                expected_dimensions=768,
+            ))
+
+    def test_similar_model_name_cannot_spoof_expected_family(self):
+        self.assertFalse(M._matches_expected_model(
+            "/models/nomic-embed-text-v1.5-malicious.gguf",
+            "text-embedding-nomic-embed-text-v1.5",
+        ))
+        self.assertFalse(M._matches_expected_model(
+            "/models/nomic-embed-text-v1.4.Q4_K_M.gguf",
+            "text-embedding-nomic-embed-text-v1.5",
+        ))
+
+    def test_gguf_filename_path_can_match_canonical_registry_family(self):
+        self.assertTrue(M._matches_expected_model(
+            "/models/nomic-embed-text-v1.5.Q4_K_M.gguf",
+            "text-embedding-nomic-embed-text-v1.5",
+        ))
+
+    def test_wrong_embedding_dimension_is_not_a_valid_fallback(self):
+        with patch.object(M.urllib.request, "urlopen", return_value=FakeResponse(
+            {"data": [{
+                "id": "/models/nomic-embed-text-v1.5.Q4_K_M.gguf",
+                "meta": {"n_embd": 512},
+            }]}
+        )):
+            self.assertFalse(M._healthy(
+                "http://example.invalid/v1/models",
+                expected_model="text-embedding-nomic-embed-text-v1.5",
+                expected_dimensions=768,
+            ))
+
+    def test_missing_dimension_metadata_fails_if_pinned(self):
+        with patch.object(M.urllib.request, "urlopen", return_value=FakeResponse(
+            {"data": [{"id": "nomic-embed-text-v1.5.Q4_K_M.gguf"}]}
+        )):
+            self.assertFalse(M._healthy(
+                "http://example.invalid/v1/models",
+                expected_model="text-embedding-nomic-embed-text-v1.5",
+                expected_dimensions=768,
+            ))
+
+    def test_matching_family_and_dimensions_suffice_for_listing_only(self):
+        with patch.object(M.urllib.request, "urlopen", return_value=FakeResponse(
+            {"data": [{
+                "id": "/models/nomic-embed-text-v1.5.Q4_K_M.gguf",
+                "meta": {"n_embd": 768},
+            }]}
+        )):
+            self.assertTrue(M._healthy(
+                "http://example.invalid/v1/models",
+                expected_model="text-embedding-nomic-embed-text-v1.5",
+                expected_dimensions=768,
+            ))
+
+    def test_realistic_registry_skips_wrong_model_before_deathstar(self):
+        hub = self.record(1, "hub")
+        deathstar = self.record(3, "deathstar")
+        fallback = self.record(6, "beelink")
+        self.registry_with(hub, deathstar, fallback)
+        registry = json.loads(self.registry.read_text())
+        registry["embedding_dimensions"] = 768
+        self.registry.write_text(json.dumps(registry))
+        calls, fake = self.stub({
+            hub["health"]: {"data": [{
+                "id": "instruct-model", "meta": {"n_embd": 768}
+            }]},
+            deathstar["health"]: {"data": [{
+                "id": "/models/nomic-embed-text-v1.5.Q4_K_M.gguf",
+                "meta": {"n_embd": 768}
+            }]},
+            fallback["health"]: {"data": [{
+                "id": "nomic-embed-text-v1.5.Q4_K_M.gguf",
+                "meta": {"n_embd": 768}
+            }]},
+        })
+        with patch.object(M.urllib.request, "urlopen", side_effect=fake):
+            selected = M.get_embedding_endpoint()
+        self.assertEqual(selected, deathstar["url"])
+        self.assertEqual(calls, [hub["health"], deathstar["health"]])
+
     def test_all_unavailable_returns_none(self):
         self.registry_with(self.record(1, "hub"))
         with patch.object(M.urllib.request, "urlopen", side_effect=OSError("offline")):
@@ -162,7 +250,7 @@ class TestEmbeddingInventoryFailover(unittest.TestCase):
         selected = self.record(3, "usable")
         self.registry_with(None, {"url": None, "priority": 2}, selected)
         with patch.object(M.urllib.request, "urlopen", return_value=FakeResponse(
-            {"data": [{"id": "nomic-embed"}]}
+            {"data": [{"id": "nomic-embed-text-v1.5.Q4_K_M.gguf"}]}
         )):
             self.assertEqual(M.get_embedding_endpoint(), selected["url"])
 
