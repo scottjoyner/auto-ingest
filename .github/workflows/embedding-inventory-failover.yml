@@ -1,0 +1,45 @@
+name: Embedding Model Inventory Failover (Research)
+
+on:
+  push:
+    branches:
+      - fix/embedding-empty-inventory-failover-20261011
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  read-only-model-listing-failover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install source-only lint
+        run: python -m pip install 'ruff>=0.6,<1'
+      - name: Test 27 pinned-family, 768-dimension, override and failover cases
+        run: python -m unittest discover -s tests -p 'test_embedding_endpoint_inventory.py' -v
+      - name: Lint resolver and acceptance tests
+        run: ruff check scripts/get_embedding_endpoint.py tests/test_embedding_endpoint_inventory.py
+      - name: Enforce GET-only and bounded model-list behavior
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          src=Path('scripts/get_embedding_endpoint.py').read_text()
+          assert 'MAX_INVENTORY_BYTES = 65_536' in src
+          assert 'method="GET"' in src
+          assert 'inventory.get("data")' in src
+          assert '_matches_expected_model' in src
+          assert 'expected_dimensions' in src
+          assert 'type(metadata.get("n_embd")) is not int' in src
+          assert 'pinned_dimensions' in src
+          assert 'override_registry' in src
+          registry=Path('embedding_endpoints.json').read_text()
+          assert '"embedding_dimensions": 768' in registry
+          for bad in ('method="POST"', '/v1/chat/completions', 'subprocess', 'os.system('):
+              assert bad not in src, bad
+          print("Read-only model listing only; no execution/source/admission claim.")
+          PY
