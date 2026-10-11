@@ -84,9 +84,20 @@ def get_embedding_endpoint(fail=True, model=None):
         return None
 
     endpoints = reg.get("endpoints", [])
+    if not isinstance(endpoints, list):
+        endpoints = []
+    endpoints = [e for e in endpoints if isinstance(e, dict)]
     if model:
-        endpoints = [e for e in endpoints if reg.get("model") == model or e.get("model") == model]
-    endpoints.sort(key=lambda e: e.get("priority", 99))
+        endpoints = [
+            e for e in endpoints
+            if reg.get("model") == model or e.get("model") == model
+        ]
+
+    def priority(entry):
+        number = entry.get("priority", 99)
+        return number if type(number) is int and number >= 0 else 99
+
+    endpoints.sort(key=priority)
 
     for e in endpoints:
         if not isinstance(e, dict):
