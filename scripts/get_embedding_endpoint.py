@@ -139,9 +139,13 @@ def get_embedding_endpoint(fail=True, model=None):
     try:
         with open(REGISTRY) as f:
             reg = json.load(f)
-    except FileNotFoundError:
+    except (OSError, ValueError, UnicodeError):
         if fail:
-            raise RuntimeError(f"Embedding registry not found: {REGISTRY}")
+            raise RuntimeError("Embedding registry unavailable or malformed")
+        return None
+    if not isinstance(reg, dict):
+        if fail:
+            raise RuntimeError("Embedding registry must be a JSON object")
         return None
 
     endpoints = reg.get("endpoints", [])
@@ -171,6 +175,10 @@ def get_embedding_endpoint(fail=True, model=None):
         expected_dimensions = e.get(
             "embedding_dimensions", reg.get("embedding_dimensions")
         )
+        if (not isinstance(expected_model, str) or not expected_model.strip()
+                or type(expected_dimensions) is not int
+                or expected_dimensions <= 0):
+            continue
         if _healthy(
             health, expected_model=expected_model,
             expected_dimensions=expected_dimensions,
