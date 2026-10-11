@@ -200,6 +200,13 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
+    if args.dry_run:
+        # signal-cli receive may mutate remote/local queue custody.
+        # Without an independently verified non-consuming peek API, a CLI
+        # dry-run must not call it or proceed to embedding/graph writes.
+        log("[dry-run] Signal receive intentionally skipped (queue safety unverified)")
+        return 0
+
     since = args.since or load_cursor()
     log("ingest since:", since or "(signal-cli default)")
     msgs = receive_signal(since)
