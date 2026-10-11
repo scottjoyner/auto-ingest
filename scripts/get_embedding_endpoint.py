@@ -109,14 +109,31 @@ def _healthy(health_url, expected_model=None, expected_dimensions=None):
 def get_embedding_endpoint(fail=True, model=None):
     """Return the embeddings URL of the first healthy endpoint, or None/raise."""
     if ENV_URL:
-        # Single-endpoint mode: still health-check it.
-        if _healthy(
-            ENV_URL.replace("/v1/embeddings", "/v1/models"),
-            expected_model=model,
+        # A manual endpoint override must not bypass the *installed* model
+        # family and embedding dimension pin. Never include URL in errors.
+        try:
+            with open(REGISTRY) as config_file:
+                override_registry = json.load(config_file)
+        except (OSError, ValueError, UnicodeError):
+            override_registry = {}
+        if not isinstance(override_registry, dict):
+            override_registry = {}
+        pinned_model = model or override_registry.get("model")
+        pinned_dimensions = override_registry.get("embedding_dimensions")
+        if (
+            pinned_model and type(pinned_dimensions) is int
+            and pinned_dimensions > 0
+            and isinstance(ENV_URL, str)
+            and ENV_URL.endswith("/v1/embeddings")
+            and _healthy(
+                ENV_URL.replace("/v1/embeddings", "/v1/models"),
+                expected_model=pinned_model,
+                expected_dimensions=pinned_dimensions,
+            )
         ):
             return ENV_URL
         if fail:
-            raise RuntimeError(f"EMBEDDING_URL {ENV_URL} is not reachable")
+            raise RuntimeError("Embedding override unavailable or not model-pinned")
         return None
 
     try:
