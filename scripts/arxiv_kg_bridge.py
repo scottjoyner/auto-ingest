@@ -20,7 +20,6 @@ Usage:
 from __future__ import annotations
 import argparse
 import json
-import subprocess
 import sys
 import time
 import urllib.request
@@ -34,7 +33,7 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from scripts.embedding_client import embed_texts
+from scripts.embedding_client import embed_texts  # noqa: E402
 
 CURSOR_FILE = REPO / "scripts" / ".arxiv_kg_cursor.json"
 EMBED_MODEL = "text-embedding-nomic-embed-text-v1.5"
