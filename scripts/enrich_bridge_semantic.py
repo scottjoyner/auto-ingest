@@ -26,8 +26,8 @@ from pathlib import Path as _P
 _SYS_REPO = str(_P(__file__).resolve().parent.parent)
 if _SYS_REPO not in _sys.path:
     _sys.path.insert(0, _SYS_REPO)
-from auto_ingest_config import get_neo4j_config as _get_cfg
-from scripts.embedding_client import MAX_BATCH, embed_texts
+from auto_ingest_config import get_neo4j_config as _get_cfg  # noqa: E402
+from scripts.embedding_client import MAX_BATCH, embed_texts  # noqa: E402
 MODEL = "text-embedding-nomic-embed-text-v1.5"
 
 SIM_THRESHOLD = 0.25   # minimum cosine to create a semantic edge
