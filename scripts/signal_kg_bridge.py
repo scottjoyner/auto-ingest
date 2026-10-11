@@ -34,7 +34,7 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from scripts.embedding_client import embed_texts
+from scripts.embedding_client import embed_texts  # noqa: E402
 
 CURSOR_FILE = REPO / "scripts" / ".signal_kg_cursor.json"
 SIGNAL_ACCOUNT = os.environ.get("SIGNAL_ACCOUNT")  # e.g. +170XXXX5781; may be None (default device)
