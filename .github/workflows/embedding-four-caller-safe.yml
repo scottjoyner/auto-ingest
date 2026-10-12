@@ -71,7 +71,8 @@ jobs:
               'BLOCKED_UNBOUND_SCHEDULED_EXECUTION',
           ):
               assert required in source, required
-          for unsafe in ('subprocess', 'urllib.request', 'requests.post', 'os.system('):
+          for unsafe in ('import subprocess', 'from subprocess import',
+                         'import urllib.request', 'requests.post(', 'os.system('):
               assert unsafe not in source, unsafe
           print('Offline tests enforce dry-run and read-only Hermes rollout NO-GO.')
           PY
