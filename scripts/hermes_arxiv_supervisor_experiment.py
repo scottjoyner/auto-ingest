@@ -14,7 +14,6 @@ import os
 import re
 import signal
 import subprocess
-import time
 from pathlib import Path
 
 APPROVED_MODEL = "text-embedding-nomic-embed-text-v1.5"
