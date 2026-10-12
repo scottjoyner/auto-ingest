@@ -18,7 +18,6 @@ here — semantic edges are kept distinct so you can tell how a link was derived
 Idempotent / resumable: skips summaries/concepts that already have `embedding_768`.
 """
 import neo4j
-import requests
 import numpy as np
 
 # Use the repo's standard Neo4j config resolver (env -> config -> baked-in).
@@ -27,18 +26,17 @@ from pathlib import Path as _P
 _SYS_REPO = str(_P(__file__).resolve().parent.parent)
 if _SYS_REPO not in _sys.path:
     _sys.path.insert(0, _SYS_REPO)
-from auto_ingest_config import get_neo4j_config as _get_cfg
-EMBED_URL = "http://localhost:1234/v1/embeddings"
+from auto_ingest_config import get_neo4j_config as _get_cfg  # noqa: E402
+from scripts.embedding_client import MAX_BATCH, embed_texts  # noqa: E402
 MODEL = "text-embedding-nomic-embed-text-v1.5"
 
 SIM_THRESHOLD = 0.25   # minimum cosine to create a semantic edge
 TOP_K = 5              # max concepts per summary
 
 def embed(texts):
-    """Batch embed via LM Studio OpenAI-compatible endpoint. Returns list[np.array]."""
-    r = requests.post(EMBED_URL, json={"model": MODEL, "input": texts}, timeout=120)
-    r.raise_for_status()
-    return [np.array(d["embedding"], dtype=np.float32) for d in r.json()["data"]]
+    """Validated, model-pinned Nomic-768 batch; never use a raw fallback URL."""
+    vectors = embed_texts(texts, model=MODEL, timeout=120)
+    return [np.array(v, dtype=np.float32) for v in vectors]
 
 def norm(v):
     n = np.linalg.norm(v)
@@ -57,7 +55,7 @@ def main():
         names = [c[0] for c in concepts]
     if names:
         print(f"embedding {len(names)} concepts...", flush=True)
-        B = 100
+        B = MAX_BATCH
         with driver.session() as ws:
             for i in range(0, len(names), B):
                 chunk = names[i:i+B]
@@ -121,7 +119,7 @@ def main():
                 tx.commit()
         total_edges += len(edges)
 
-    B = 64
+    B = MAX_BATCH
     with driver.session() as s:
         rows = list(s.run(q))
     print(f"summaries to embed: {len(rows)}", flush=True)

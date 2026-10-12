@@ -26,7 +26,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,9 +33,10 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from scripts.embedding_client import embed_texts  # noqa: E402
+
 CURSOR_FILE = REPO / "scripts" / ".signal_kg_cursor.json"
 SIGNAL_ACCOUNT = os.environ.get("SIGNAL_ACCOUNT")  # e.g. +170XXXX5781; may be None (default device)
-LM_STUDIO_URL = "http://100.64.43.123:1234/v1/embeddings"  # LM Studio on x1-370 net
 EMBED_MODEL = "text-embedding-nomic-embed-text-v1.5"
 
 
@@ -63,19 +63,13 @@ def get_neo4j():
 
 
 def embed(text: str):
-    """Embed a short text via LM Studio. Returns list[float] or None."""
-    import urllib.request
+    """Return a validated 768-vector or None without a hardcoded endpoint."""
     if not text or not text.strip():
         return None
-    body = json.dumps({"model": EMBED_MODEL, "input": text[:2000]}).encode()
-    req = urllib.request.Request(LM_STUDIO_URL, data=body,
-                                 headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = json.load(r)
-        return data["data"][0]["embedding"]
-    except Exception as e:  # noqa: BLE001
-        log("embed failed:", type(e).__name__, str(e)[:120])
+        return embed_texts([text[:2000]], model=EMBED_MODEL, timeout=30)[0]
+    except Exception as exc:  # noqa: BLE001
+        log("embedding unavailable:", type(exc).__name__)
         return None
 
 
@@ -126,6 +120,11 @@ def ingest(msgs, dry_run=False):
     if not msgs:
         log("no new messages")
         return 0
+    if dry_run:
+        # No model invocation, DB session/schema DDL or local cursor writes.
+        # signal-cli receive (the caller) has separate queue semantics.
+        log(f"[dry-run] {len(msgs)} envelopes (no inference or graph writes)")
+        return len(msgs)
     drv, db = get_neo4j()
     ensure_constraints(drv, db)
     try:
@@ -134,11 +133,6 @@ def ingest(msgs, dry_run=False):
             last_ts = None
             for m in msgs:
                 emb = embed(m["body"])
-                if dry_run:
-                    log(f"[dry-run] {m['src']} @ {m['ts']}: {m['body'][:60]!r}")
-                    n += 1
-                    last_ts = m["ts"] or last_ts
-                    continue
                 # MERGE Scott + message; attach embedding if available.
                 # NODE KEY (source,ts) makes this idempotent across re-runs.
                 params = {
@@ -192,9 +186,9 @@ def ingest(msgs, dry_run=False):
                         log(f"semantic ABOUT skipped: {type(e).__name__}: {str(e)[:80]}")
                 n += 1
                 last_ts = m["ts"] or last_ts
-            if not dry_run and last_ts:
+            if last_ts:
                 save_cursor(str(last_ts))
-            log(f"ingested {n} messages" + (" [dry-run]" if dry_run else ""))
+            log(f"ingested {n} messages")
             return n
     finally:
         drv.close()
@@ -205,6 +199,13 @@ def main():
     ap.add_argument("--since", help="ISO date to ingest from")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+
+    if args.dry_run:
+        # signal-cli receive may mutate remote/local queue custody.
+        # Without an independently verified non-consuming peek API, a CLI
+        # dry-run must not call it or proceed to embedding/graph writes.
+        log("[dry-run] Signal receive intentionally skipped (queue safety unverified)")
+        return 0
 
     since = args.since or load_cursor()
     log("ingest since:", since or "(signal-cli default)")

@@ -18,30 +18,17 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from scripts.embedding_client import embed_texts  # noqa: E402
+
 CURSOR_FILE = REPO / "scripts" / ".paper768_cursor.json"
-LM_STUDIO_URL = "http://100.64.43.123:1234/v1/embeddings"  # legacy default; overridden by discovery
 EMBED_MODEL = "text-embedding-nomic-embed-text-v1.5"
-
-
-def resolve_embedding_url():
-    """Fleet-aware endpoint resolution (see scripts/get_embedding_endpoint.py)."""
-    try:
-        from scripts.get_embedding_endpoint import get_embedding_endpoint
-        url = get_embedding_endpoint(fail=False)
-        if url:
-            return url
-    except Exception as e:
-        log(f"embedding discovery unavailable ({e}); using legacy URL")
-    return LM_STUDIO_URL
 
 
 def log(*a):
@@ -57,14 +44,7 @@ def get_neo4j():
 
 
 def embed(text: str):
-    url = resolve_embedding_url()
-    req = urllib.request.Request(
-        url,
-        data=json.dumps({"model": EMBED_MODEL, "input": text}).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.load(r)["data"][0]["embedding"]
+    return embed_texts([text], model=EMBED_MODEL, timeout=60)[0]
 
 
 def main():
