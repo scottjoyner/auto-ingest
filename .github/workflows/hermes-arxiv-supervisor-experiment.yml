@@ -1,0 +1,49 @@
+name: Hermes Arxiv Blocking Supervisor (Synthetic Only)
+
+on:
+  push:
+    branches:
+      - experiment/hermes-arxiv-blocking-supervisor-20261011
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-child-supervision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install source-only linter
+        run: python -m pip install 'ruff>=0.6,<1'
+      - name: Test disposable child success failure timeout overlap and identity
+        run: |
+          python -m unittest discover -s tests -p 'test_hermes_arxiv_supervisor_experiment.py' -v
+      - name: Lint experimental library and fake-process tests
+        run: |
+          ruff check scripts/hermes_arxiv_supervisor_experiment.py \
+            tests/test_hermes_arxiv_supervisor_experiment.py
+      - name: Enforce experimental-only no CLI no approval guarantees
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('scripts/hermes_arxiv_supervisor_experiment.py').read_text()
+          for needed in (
+              'fcntl.flock', 'LOCK_NB', 'subprocess.Popen',
+              'start_new_session=True', 'proc.wait(timeout=timeout_seconds)',
+              'os.killpg', 'source_and_registry_checksum_match',
+              '"can_dispatch": False', '"operator_approval_verified": False',
+              '"source_signed_receipt": False',
+          ):
+              assert needed in s, needed
+          for forbidden in (
+              'if __name__ == "__main__"', 'import argparse',
+              'import requests', 'urllib.request', 'import neo4j',
+          ):
+              assert forbidden not in s, forbidden
+          print('No deployed entrypoint or production approval; synthetic child only.')
+          PY
