@@ -25,10 +25,11 @@ jobs:
           python -m unittest discover -s tests -p 'test_embedding_client_guard.py' -q
           python -m unittest discover -s tests -p 'test_ingest_dry_run_guards.py' -q
           python -m unittest discover -s tests -p 'test_hermes_embedding_deployment_audit.py' -q
+          python -m unittest discover -s tests -p 'test_hermes_wrapper_completion_audit.py' -q
           python -m unittest discover -s tests -p 'test_embedding_endpoint_inventory.py' -q
       - name: Strict new-client lint and pre-existing caller unused-import checks
         run: |
-          ruff check scripts/embedding_client.py tests/test_embedding_client_guard.py tests/test_ingest_dry_run_guards.py scripts/audit_hermes_embedding_deployment.py tests/test_hermes_embedding_deployment_audit.py
+          ruff check scripts/embedding_client.py tests/test_embedding_client_guard.py tests/test_ingest_dry_run_guards.py scripts/audit_hermes_embedding_deployment.py tests/test_hermes_embedding_deployment_audit.py scripts/audit_hermes_wrapper_completion.py tests/test_hermes_wrapper_completion_audit.py
           ruff check scripts/get_embedding_endpoint.py tests/test_embedding_endpoint_inventory.py
           ruff check --select F401 scripts/backfill_paper_768.py \
             scripts/enrich_bridge_semantic.py \
@@ -74,5 +75,18 @@ jobs:
           for unsafe in ('import subprocess', 'from subprocess import',
                          'import urllib.request', 'requests.post(', 'os.system('):
               assert unsafe not in source, unsafe
-          print('Offline tests enforce dry-run and read-only Hermes rollout NO-GO.')
+          completion=Path('scripts/audit_hermes_wrapper_completion.py').read_text()
+          for required in (
+              '"can_deploy": False', '"can_dispatch": False',
+              '"child_completion_attested": False',
+              'BLOCKED_UNVERIFIED_HERMES_CHILD_COMPLETION',
+              'detached_popen_no_completion_wait',
+          ):
+              assert required in completion, required
+          for forbidden in (
+              'import subprocess', 'from subprocess import', 'os.system(',
+              'subprocess.run(', 'subprocess.Popen(', 'requests.post(',
+          ):
+              assert forbidden not in completion, forbidden
+          print('Offline tests enforce dry-run, scheduler and wrapper completion NO-GO.')
           PY
