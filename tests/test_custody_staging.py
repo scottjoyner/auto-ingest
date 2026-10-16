@@ -703,3 +703,37 @@ def test_a_clip_is_never_routed_as_an_orphan():
     plan = plan_staging(["DCIM/Movie/2026_0829_123850_F.MP4"])
     assert plan.unpaired_detections() == ()
     assert plan.staged[0].destination_key == "2026/08/29/2026_0829_123850_F.MP4"
+
+
+# Regressions from three mounted x1-370 dashcam cards (October 16, 2026).
+def test_real_sequenced_front_rear_files_keep_unique_camera_identity():
+    front = "DCIM/Movie/2026_0626_034541_000001F.MP4"
+    rear = "DCIM/Movie/2026_0626_034541_000002R.MP4"
+    expected = {
+        front: "2026/06/26/2026_0626_034541_000001F.MP4",
+        rear: "2026/06/26/2026_0626_034541_000002R.MP4",
+    }
+    for source, target in expected.items():
+        result = destination_for(source, include_sidecars=False)
+        assert result.destination_key == target
+        assert result.stageable
+    assert plan_staging(list(expected), include_sidecars=False).collisions() == ()
+
+
+def test_real_sequenced_detection_retains_video_filename_pair():
+    video = destination_for("DCIM/Movie/2026_0327_054230_000062R.MP4")
+    detection = destination_for("DCIM/Movie/2026_0327_054230_000062R_YOLOv8n.csv")
+    assert video.destination_key == "2026/03/27/2026_0327_054230_000062R.MP4"
+    assert detection.destination_key == "2026/03/27/2026_0327_054230_000062R_YOLOv8n.csv"
+
+
+def test_appledouble_metadata_is_not_a_dashcam_video():
+    key = "DCIM/Movie/._1999_1128_202128_F.MP4"
+    assert classify(key.split("/")[-1]) == OTHER_ROLE
+    assert not destination_for(key).stageable
+
+
+def test_modern_dashcam_1999_clock_reset_requires_review():
+    bad_clock = destination_for("DCIM/Movie/1999_1128_202128_F.MP4")
+    assert not bad_clock.stageable
+    assert bad_clock.reason == "clock_review_pre2000"
