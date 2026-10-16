@@ -49,3 +49,7 @@ This discovery materially changes the transfer plan: **do not bulk copy the 161.
 3. Verify all non-MP4 sidecars and clock resets as necessary, and reconcile duplicate variants. Preserve the authoritative operator audit trail and append-only custody ledgers.
 4. Obtain the full exact-file `release-source --mp4-only` plan and independently accepted `SAFE_TO_RELEASE` authority; delete only fully verified MP4s with audit, preserving `DCIM/` and sidecars.
 5. Stop readers, flush and cleanly unmount/eject the specific card before physical removal. Until then, leave physical cards in place or keep them intact as unreleased originals, not as reusable empty media.
+
+## Swapping the original SD cards without erasing them
+
+After a separate, clean non-forced unmount and per-UUID custody preservation audit, the original three SD cards were physically safe to remove and store intact. Before treating any replacement as a new campaign, use [UUID-bound next-card hotplug discovery](SD_NEXT_CARD_HOTPLUG_2026-10.md) rather than relying on ephemeral `/dev/sdX` assignments.
