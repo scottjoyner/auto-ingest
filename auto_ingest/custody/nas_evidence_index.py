@@ -20,13 +20,6 @@ from .fleet_campaigns import frozen_inventory, safe_key
 from .store import load_campaign, load_status
 
 SHA = re.compile(r"^[0-9a-f]{64}$")
-STAGING_ROOT = "/nas/recovery/dashcam-sd-ingest/SDCARD-20261010-51406932/source"
-SOURCE_MOUNTS = {
-    "5140-6932": "/media/scott/UNTITLED",
-    "68FC-E499": "/media/scott/68FC-E499",
-    "69BE-B963": "/media/scott/69BE-B963",
-}
-
 
 def input_sha(path: Path) -> str:
     h = hashlib.sha256()
@@ -93,20 +86,24 @@ def build_index(
     sha, sources = frozen_inventory(ledger)
     if not _digest(expected_sha) or sha != expected_sha.lower():
         raise ValueError("pinned frozen-ledger SHA256 mismatch")
-    if set(sources) != set(SOURCE_MOUNTS):
-        raise ValueError("frozen inventory card set differs from fleet manifest")
+    if not sources:
+        raise ValueError("frozen inventory contains no cards")
     cards: dict[str, dict] = {}
-    for uuid in SOURCE_MOUNTS:
+    source_mounts: dict[str, str] = {}
+    for uuid in sorted(sources):
         bundle = campaign_root / uuid
         campaign = load_campaign(bundle)
         if campaign.source.card.compare(CardIdentity(filesystem_uuid=uuid)).matched is not True:
             raise ValueError(f"campaign source identity mismatch: {uuid}")
-        if campaign.source.mount_point != SOURCE_MOUNTS[uuid]:
-            raise ValueError(f"campaign mount mismatch: {uuid}")
+        source_mount = campaign.source.mount_point
+        if not source_mount or not Path(source_mount).is_absolute() or ".." in Path(source_mount).parts:
+            raise ValueError(f"campaign source mount invalid: {uuid}")
+        source_mounts[uuid] = source_mount
         status = load_status(bundle)
         if status.source_release_allowed:
             raise ValueError(f"unexpected open source-release gate: {uuid}")
         cards[uuid] = {"bundle": str(bundle), "id": campaign.campaign_id,
+                       "source_mount": source_mount,
                        "status": status.derivation.state.value,
                        "source_release_allowed": False}
     rows = {
@@ -117,18 +114,25 @@ def build_index(
         }
         for uuid, partition in sources.items() for key, value in partition.items()
     }
+    # Source mount and staging destination are facts from the UUID-bound
+    # campaigns and explicitly supplied historical witness, not host defaults.
+    stage_doc = _json(staging_witness)
+    staging_uuid = stage_doc.get("source_card_uuid")
+    staging_root = stage_doc.get("target_mount")
+    if (staging_uuid not in sources or not _absolute_nas(staging_root)):
+        raise ValueError("staging witness root/UUID mismatch")
     for record in _csv(staging_csv):
         if record.get("staged_exact_status") != "MATCHING_SIZE_ONLY":
             continue
         uuid = record.get("card_uuid")
-        if uuid != "5140-6932":
-            raise ValueError("staging candidate not bound to 5140-6932")
+        if uuid != staging_uuid:
+            raise ValueError("staging candidate UUID conflicts with witness")
         key = record["source_relative_path"]
         size = _size(record["source_expected_bytes"])
         if size != _size(record["staged_observed_size"]):
             raise ValueError("staging candidate size conflicts")
         _candidate(rows, uuid, key, size,
-                   STAGING_ROOT + "/" + key, "staging_path_size_only")
+                   staging_root.rstrip("/") + "/" + key, "staging_path_size_only")
     for record in _csv(alternate_csv):
         if record.get("metadata_status") != "PATH_AND_SIZE_MATCH":
             continue
@@ -141,13 +145,11 @@ def build_index(
                    "alternate_archive_path_size_only")
 
     # A previous matched digest is not a live assertion about the NAS today.
-    a = _json(staging_witness)
-    if a.get("source_card_uuid") != "5140-6932" or a.get("target_mount") != STAGING_ROOT:
-        raise ValueError("staging witness root/UUID mismatch")
+    a = stage_doc
     for rec in a.get("records", []):
-        uuid = "5140-6932"
+        uuid = staging_uuid
         key = rec["path"]
-        destination = STAGING_ROOT + "/" + key
+        destination = staging_root.rstrip("/") + "/" + key
         obj = rows.get((uuid, key))
         if obj is None or destination not in obj["candidates"]:
             raise ValueError("unmatched staged witness candidate")
@@ -164,7 +166,7 @@ def build_index(
     for rec in a.get("cases", []):
         uuid = rec["card_uuid"]
         source = rec["source"]
-        prefix = SOURCE_MOUNTS.get(uuid)
+        prefix = source_mounts.get(uuid)
         if not prefix or not source.startswith(prefix + "/"):
             raise ValueError("alternative source path/UUID mismatch")
         key = source[len(prefix) + 1:]
@@ -183,7 +185,7 @@ def build_index(
                                  "scope": "historical_point_in_time"})
     file_rows = []
     overall = Counter()
-    per_card = {uuid: Counter() for uuid in SOURCE_MOUNTS}
+    per_card = {uuid: Counter() for uuid in sources}
     for (uuid, key), item in sorted(rows.items()):
         if item["witnesses"]:
             state = "prior_sha_witness_recheck_required"
@@ -245,7 +247,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.out:
             path = args.out.resolve(strict=False)
             if (path.is_relative_to(Path("/nas")) or
-                    any(path.is_relative_to(Path(x)) for x in SOURCE_MOUNTS.values())):
+                    any(path.is_relative_to(Path(c["source_mount"]))
+                        for c in result["cards"].values())):
                 raise ValueError("report output must not be on NAS or source cards")
             ancestor = path.parent
             if (not ancestor.is_dir() or
