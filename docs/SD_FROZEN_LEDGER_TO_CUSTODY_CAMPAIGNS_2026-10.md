@@ -48,6 +48,10 @@ The bundles live in:
 
 Readback shows each is state **DISCOVERED**, source read_only=false (the cards really are mounted rw), destination host_path=null, and source_release_allowed=false. No active hash/copy/verify/release ledgers were created. The card bytes and NAS bytes were untouched.
 
+## Existing NAS candidate evidence
+
+A reproducible, read-only anti-join of indexed staging/archive candidates and point-in-time digest witnesses is described in [NAS indexed anti-join](SD_NAS_INDEXED_ANTI_JOIN_2026-10.md). Do not treat its metadata results or old SHA witness reports as a destination release ledger.
+
 ## Next independently gated transitions
 
 1. Reconcile alternate NAS archive/staging copies by source UUID + digest using indexed manifests rather than 500+ GB of unnecessary rescanning.
