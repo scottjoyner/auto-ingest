@@ -254,6 +254,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--execute", action="store_true",
                     help="REQUIRED: without it nothing is unlinked and the exact "
                          "set that would be removed is only shown")
+    pr.add_argument("--mp4-only", action="store_true",
+                    help="only propose/release verified MP4 files; preserve DCIM directories and sidecars")
     pr.add_argument("--limit", type=int, default=None,
                     help="release at most this many objects (executed pass only)")
     pr.add_argument("--apply", action="store_true",
@@ -1223,6 +1225,7 @@ def cmd_release_source(args) -> int:
         execute=bool(args.execute),
         policy=policy,
         limit=args.limit,
+        mp4_only=bool(args.mp4_only),
     )
     payload = result.to_dict()
     # Derived from `mode` rather than stored, so a proposal and a pass can never

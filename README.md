@@ -2,6 +2,10 @@
 
 Containerized pipeline that ingests dashcam, audio, and bodycam recordings into a Neo4j knowledge graph. Features distributed workers, a NAS-drop job queue, REST API for triggering jobs, and scheduled cron workers.
 
+## October 2026 fleet migration
+
+See [Fleet storage and SD custody](docs/FLEET_STORAGE_AND_SD_CUSTODY_2026-10.md) for the current x1/Beelink namespace contract, preserved recovery holds, the reproducible card inventory, and the gated MP4-only release workflow. The June deployment examples below are **legacy references**, not an approved production rollout.
+
 ## Documentation
 
 | Document | Description |
@@ -157,8 +161,8 @@ docker compose logs -f ingest-service
 docker compose logs -f sync-service
 
 # Neo4j
-docker exec neo4j cypher-shell -u neo4j -p knowledge_graph_2026 "RETURN 1"
-docker exec neo4j cypher-shell -u neo4j -p knowledge_graph_2026 \
+docker exec neo4j cypher-shell -u neo4j -p "$NEO4J_PASSWORD" "RETURN 1"
+docker exec neo4j cypher-shell -u neo4j -p "$NEO4J_PASSWORD" \
   "MATCH (n) RETURN labels(n) AS label, count(*) AS cnt ORDER BY cnt DESC LIMIT 10"
 
 # Queue

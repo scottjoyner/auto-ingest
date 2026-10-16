@@ -766,5 +766,14 @@ def read_staged_ledger(bundle: str | Path) -> Optional[Dict[str, str]]:
         if not line.strip():
             continue
         row = json.loads(line)
-        mapping[row["source_key"]] = row["destination_key"]
+        if not isinstance(row, dict):
+            raise ValueError("invalid non-object staged ledger row")
+        source_key = row["source_key"]
+        destination_key = row["destination_key"]
+        if (not isinstance(source_key, str) or not source_key or
+                not isinstance(destination_key, str) or not destination_key):
+            raise ValueError("staged ledger keys must be nonempty strings")
+        if source_key in mapping:
+            raise ValueError(f"duplicate staged source key: {source_key}")
+        mapping[source_key] = destination_key
     return mapping
