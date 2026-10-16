@@ -239,10 +239,12 @@ def test_cli_observe_mount_reads_the_real_kernel(tmp_path, capsys, real_mounts):
     really_present = "/media/scott/UNTITLED" in Path("/proc/mounts").read_text()
     assert payload["source"]["observation"]["present"] is really_present
     if really_present:
-        # Card is here: the ro observation must survive the round trip.
-        assert payload["source"]["observed_read_only"] is True
+        # Real cards can be rw or ro depending on operator mount state. The
+        # observer must report the kernel truth, never assume ro from presence.
+        observed_ro = observe_mount("/media/scott/UNTITLED").read_only
+        assert payload["source"]["observed_read_only"] is observed_ro
         assert payload["declared_read_only_trusted"] is False
-        assert code == EXIT_OK
+        assert code == (EXIT_OK if observed_ro is True else EXIT_GATE_CLOSED)
     else:
         # No card: the CLI must say so rather than reporting a source it cannot
         # see. This is the CI path, and it used to be an outright failure.
