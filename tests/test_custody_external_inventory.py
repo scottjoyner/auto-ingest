@@ -119,3 +119,50 @@ def test_truncated_row_refused(tmp_path):
     digest = sha256(path.read_bytes()).hexdigest()
     with pytest.raises(ExternalInventoryError, match="malformed"):
         observed(path, digest)
+
+def multirow_csv(root: Path, rows: list[dict[str, str]]) -> tuple[Path, str]:
+    path = root / "multirow.csv"
+    with path.open("w", newline="", encoding="utf-8") as out:
+        writer = csv.DictWriter(out, fieldnames=FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({
+                "card_uuid": "CARD-1",
+                "source_relative_path": "DCIM/a.MP4",
+                "candidate_relative_path": "2026/10/16/a.MP4",
+                "expected_bytes": "12",
+                "metadata_status": "NAME_AND_SIZE_ONLY",
+                "observed_bytes": "12",
+                "nas_payload_sha256_verified_today": "False",
+                "source_release_authorized": "False",
+                **row,
+            })
+    return path, sha256(path.read_bytes()).hexdigest()
+
+
+def test_fails_closed_on_case_variant_source(tmp_path):
+    path, digest = multirow_csv(tmp_path, [
+        {"source_relative_path": "DCIM/Fig1.png", "candidate_relative_path": "A/Fig1.png"},
+        {"source_relative_path": "DCIM/fig1.png", "candidate_relative_path": "B/fig1.png"},
+    ])
+    with pytest.raises(ExternalInventoryError, match="source path casefold collision"):
+        observe_metadata_csv(path, expected_sha256=digest, expected_rows=2)
+
+
+def test_fails_closed_on_case_variant_destination_across_cards(tmp_path):
+    path, digest = multirow_csv(tmp_path, [
+        {"card_uuid": "CARD-1", "source_relative_path": "A/one.mp4", "candidate_relative_path": "a/Fig1.png"},
+        {"card_uuid": "CARD-2", "source_relative_path": "B/two.mp4", "candidate_relative_path": "a/fig1.png"},
+    ])
+    with pytest.raises(ExternalInventoryError, match="destination path casefold collision"):
+        observe_metadata_csv(path, expected_sha256=digest, expected_rows=2)
+
+
+def test_accepts_same_basename_when_card_and_destination_namespace_differ(tmp_path):
+    path, digest = multirow_csv(tmp_path, [
+        {"card_uuid": "CARD-1", "source_relative_path": "DCIM/FILE.MP4", "candidate_relative_path": "card1/FILE.MP4"},
+        {"card_uuid": "CARD-2", "source_relative_path": "DCIM/file.mp4", "candidate_relative_path": "card2/file.mp4"},
+    ])
+    result = observe_metadata_csv(path, expected_sha256=digest, expected_rows=2)
+    assert result.rows == 2
+    assert not result.source_release_allowed
