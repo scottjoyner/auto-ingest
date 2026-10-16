@@ -22,7 +22,9 @@ def _csv(path: Path, names, values):
 
 @pytest.fixture
 def indexed(tmp_path):
-    mountmap = dict(ix.SOURCE_MOUNTS)
+    mountmap = {"5140-6932": "/mnt/test-cardA",
+                "68FC-E499": "/mnt/test-cardB",
+                "69BE-B963": "/mnt/test-cardC"}
     dest = tmp_path / "campaigns"
     old = tmp_path / "frozen.jsonl"
     sources = [
@@ -56,7 +58,7 @@ def indexed(tmp_path):
     }])
     stage_w = tmp_path / "staged-witness.json"
     stage_w.write_text(json.dumps({
-        "source_card_uuid": "5140-6932", "target_mount": ix.STAGING_ROOT,
+        "source_card_uuid": "5140-6932", "target_mount": "/nas/recovery/test-staging",
         "records": [{"path": sources[0][1], "state": "SHA_MATCH_STABLE",
                      "stable_pre_post": True, "bytes": 3,
                      "source_sha256": "a" * 64, "nas_stage_sha256": "a" * 64}],
@@ -87,7 +89,7 @@ def test_manifest_join_keeps_all_old_sha_outside_live_custody(indexed):
     assert report["counts"]["video_mp4_no_indexed_candidate_not_proven_missing"] == 2
     assert all(r["current_nas_sha_verified"] is False for r in report["rows"])
     assert all(r["source_release_allowed"] is False for r in report["rows"])
-    assert set(report["cards"]) == set(ix.SOURCE_MOUNTS)
+    assert set(report["cards"]) == {"5140-6932", "68FC-E499", "69BE-B963"}
 
 
 def test_corrupt_staged_witness_or_file_size_refused(indexed):
