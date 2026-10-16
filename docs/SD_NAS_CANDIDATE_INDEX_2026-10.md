@@ -57,3 +57,7 @@ This only prints bounded statistics and a sample. Optional `--out PATH` writes a
 2. Obtain bounded, fresh independent NAS SHA readback for the **3 previously SHA-matched MP4s**, then for the other **74 size-only MP4 candidates**. Check exact NAS path, device identity, stable content, source/independent digest and archive permanence. Do not auto-promote any historical witness to the current custody ledger.
 3. Classify 3,619 unindexed MP4s by source UUID and original clock metadata; search additional roots and existing off-host receipt manifests, then stage/copy only independently proven gaps.
 4. Only after source quiescence and hardware RO observation, full authoritative source + NAS digest ledgers and `SAFE_TO_RELEASE`, allow a separately approved exact-file `release-source --mp4-only` proposal. Preserve `DCIM/` and the rest of the original filesystem tree.
+
+## Controlled current content comparison
+
+The candidate index itself never hashes media. For a deliberately bounded source-versus-destination recheck of existing candidate MP4s, see [bounded live media probe](SD_BOUNDED_LIVE_MEDIA_PROBE_2026-10.md). It has independent mount/read-budget checks, and its receipts explicitly cannot open the source-release gate.
