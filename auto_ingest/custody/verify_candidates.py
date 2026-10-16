@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
@@ -99,23 +100,68 @@ def check_pair(row: dict, source_root: Path, dest_root: Path = Path("/nas")) -> 
     }
 
 
+def _prior_comparisons(
+    rows: list[dict], index_file: Path, paths: list[Path],
+    index_sha256: str | None = None,
+) -> set[tuple[str, str]]:
+    """Skip only exact, stable, previously matching candidates in this index.
+
+    This prevents redundant reads, but old SHA checks are never promoted to
+    destination custody or source-release proof. A changed index or mismatch
+    fails closed instead of silently applying an old report's skip records.
+    """
+    keyed = {(r["card_uuid"], r["source_relative_path"]): r for r in rows}
+    skipped: dict[tuple[str, str], str] = {}
+    for path in paths:
+        old = json.loads(path.read_text(encoding="utf-8"))
+        if (old.get("scope") !=
+                "bounded_point_in_time_source_and_nas_sha_not_custody_release" or
+                old.get("source_index") != str(index_file) or
+                old.get("source_release_authorized") is not False):
+            raise ValueError(f"prior report does not match candidate index or method: {path}")
+        if (old.get("index_sha256") is not None and
+                old.get("index_sha256") != index_sha256):
+            raise ValueError(f"prior report candidate index SHA changed: {path}")
+        if not isinstance(old.get("results"), list):
+            raise ValueError(f"prior report has no results: {path}")
+        seen: set[tuple[str, str]] = set()
+        for item in old["results"]:
+            key = (item.get("card_uuid"), item.get("source_relative_path"))
+            if key in seen:
+                raise ValueError(f"duplicate prior comparison: {key}")
+            seen.add(key)
+            current = keyed.get(key)
+            if current is None or current.get("candidate_paths") != [item.get("destination")] or (
+                current.get("bytes") != item.get("bytes")
+            ):
+                raise ValueError(f"stale prior candidate metadata: {key}")
+            digest = item.get("source_sha256_now")
+            if (item.get("sha_equal") is not True or
+                    item.get("source_stable") is not True or
+                    item.get("destination_stable") is not True or
+                    item.get("source_release_authorized") is not False or
+                    not isinstance(digest, str) or
+                    re.fullmatch("[0-9a-f]{64}", digest) is None or
+                    digest != item.get("destination_sha256_now")):
+                # A mismatch remains in the verification queue, never skipped.
+                continue
+            if key in skipped and skipped[key] != digest:
+                raise ValueError(f"conflicting previous digests for {key}")
+            skipped[key] = digest
+    return set(skipped)
+
+
 def verify_index(index_file: Path, campaign_root: Path,
                  max_files: int = 8, max_read_bytes: int = 350_000_000,
-                 prior_report: Path | None = None) -> dict:
-    rows = [json.loads(line) for line in index_file.open(encoding="utf-8")]
-    skip_keys: set[tuple[str, str]] = set()
-    if prior_report is not None:
-        previous = json.loads(prior_report.read_text(encoding="utf-8"))
-        if (previous.get("scope") !=
-                "bounded_point_in_time_source_and_nas_sha_not_custody_release" or
-                previous.get("source_index") != str(index_file)):
-            raise ValueError("prior report does not match candidate index or method")
-        for item in previous.get("results", []):
-            if (item.get("sha_equal") is True and
-                    item.get("source_stable") is True and
-                    item.get("destination_stable") is True and
-                    item.get("source_release_authorized") is False):
-                skip_keys.add((item["card_uuid"], item["source_relative_path"]))
+                 prior_report: Path | None = None,
+                 prior_reports: list[Path] | None = None) -> dict:
+    index_data = index_file.read_bytes()
+    index_sha256 = hashlib.sha256(index_data).hexdigest()
+    rows = [json.loads(line) for line in index_data.decode("utf-8").splitlines()]
+    paths = ([] if prior_report is None else [prior_report]) + (prior_reports or [])
+    if len({str(p) for p in paths}) != len(paths):
+        raise ValueError("duplicate prior report path")
+    skip_keys = _prior_comparisons(rows, index_file, paths, index_sha256=index_sha256)
     chosen = choose_candidates(rows, max_files=max_files,
                                max_read_bytes=max_read_bytes, skip_keys=skip_keys)
     output = []
@@ -143,8 +189,10 @@ def verify_index(index_file: Path, campaign_root: Path,
         "schema": 1,
         "scope": "bounded_point_in_time_source_and_nas_sha_not_custody_release",
         "observed_utc": datetime.now(timezone.utc).isoformat(),
-        "source_index": str(index_file), "max_files": max_files,
+        "source_index": str(index_file), "index_sha256": index_sha256,
+        "max_files": max_files,
         "prior_report": str(prior_report) if prior_report is not None else None,
+        "prior_reports": [str(p) for p in paths],
         "previously_compared_skipped_not_reverified": len(skip_keys),
         "max_read_bytes": max_read_bytes, "source_release_authorized": False,
         "total_bytes_read": sum(row["bytes"] * 2 for row in output),
@@ -158,15 +206,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--campaign-root", type=Path, required=True)
     p.add_argument("--max-files", type=int, default=8)
     p.add_argument("--max-read-bytes", type=int, default=350_000_000)
-    p.add_argument("--prior-report", type=Path,
-                   help="skip matching stable pairs from one prior point-in-time report")
+    p.add_argument("--prior-report", type=Path, action="append", default=[],
+                   help="repeat to skip stable matching pairs in previous reports (never custody)")
     p.add_argument("--out", type=Path, help="create new OS-local evidence file")
     args = p.parse_args(argv)
     try:
         report = verify_index(args.index, args.campaign_root,
                               max_files=args.max_files,
                               max_read_bytes=args.max_read_bytes,
-                              prior_report=args.prior_report)
+                              prior_reports=args.prior_report)
         if args.out:
             dest = args.out.resolve(strict=False)
             if dest.is_relative_to(Path("/nas")):

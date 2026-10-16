@@ -135,6 +135,9 @@ def test_prior_report_skips_stable_pairs_without_granting_release(tmp_path, monk
             "sha_equal": True, "source_stable": True,
             "destination_stable": True,
             "source_release_authorized": False, "bytes": row["bytes"],
+            "destination": row["candidate_paths"][0],
+            "source_sha256_now": "a" * 64,
+            "destination_sha256_now": "a" * 64,
         }
     monkeypatch.setattr(verifier, "check_pair", fake_check)
     first = verifier.verify_index(index, bundles, max_files=1)
@@ -149,3 +152,76 @@ def test_prior_report_skips_stable_pairs_without_granting_release(tmp_path, monk
     prior.write_text(json.dumps({**first, "source_index": "/another/index"}))
     with pytest.raises(ValueError, match="prior report does not match"):
         verifier.verify_index(index, bundles, max_files=1, prior_report=prior)
+    prior.write_text(json.dumps({**first, "index_sha256": "0" * 64}))
+    with pytest.raises(ValueError, match="candidate index SHA changed"):
+        verifier.verify_index(index, bundles, max_files=1, prior_report=prior)
+
+
+def test_multi_report_resume_skips_only_matching_stable_pairs(tmp_path):
+    from auto_ingest.custody.verify_candidates import _prior_comparisons
+
+    index = tmp_path / "index.jsonl"
+    rows = [
+        {"card_uuid": "ABCD-1234", "source_relative_path": f"DCIM/{i}.MP4",
+         "candidate_paths": [f"/nas/2026/{i}.MP4"], "bytes": 5}
+        for i in range(3)
+    ]
+    index.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    prior = []
+    for i in range(2):
+        path = tmp_path / f"prior-{i}.json"
+        path.write_text(json.dumps({
+            "scope": "bounded_point_in_time_source_and_nas_sha_not_custody_release",
+            "source_index": str(index),
+            "source_release_authorized": False,
+            "results": [{
+                "card_uuid": rows[i]["card_uuid"],
+                "source_relative_path": rows[i]["source_relative_path"],
+                "destination": rows[i]["candidate_paths"][0],
+                "bytes": 5, "sha_equal": True,
+                "source_stable": True, "destination_stable": True,
+                "source_sha256_now": "b" * 64,
+                "destination_sha256_now": "b" * 64,
+                "source_release_authorized": False,
+            }],
+        }))
+        prior.append(path)
+    assert _prior_comparisons(rows, index, prior) == {
+        (rows[0]["card_uuid"], rows[0]["source_relative_path"]),
+        (rows[1]["card_uuid"], rows[1]["source_relative_path"]),
+    }
+    altered = json.loads(prior[1].read_text())
+    altered["results"][0]["destination"] = "/nas/wrong.mp4"
+    prior[1].write_text(json.dumps(altered))
+    with pytest.raises(ValueError, match="stale prior candidate metadata"):
+        _prior_comparisons(rows, index, prior)
+
+
+def test_multi_report_conflicts_are_not_silently_skipped(tmp_path):
+    from auto_ingest.custody.verify_candidates import _prior_comparisons
+
+    index = tmp_path / "index.jsonl"
+    row = {"card_uuid": "ABCD-1234", "source_relative_path": "one.mp4",
+           "candidate_paths": ["/nas/one.mp4"], "bytes": 5}
+    index.write_text(json.dumps(row) + "\n")
+    base = {
+        "scope": "bounded_point_in_time_source_and_nas_sha_not_custody_release",
+        "source_index": str(index), "source_release_authorized": False,
+    }
+    paths = []
+    for i, digest in enumerate(("a" * 64, "b" * 64)):
+        path = tmp_path / f"prior-{i}.json"
+        path.write_text(json.dumps({**base, "results": [{
+            "card_uuid": "ABCD-1234", "source_relative_path": "one.mp4",
+            "destination": "/nas/one.mp4", "bytes": 5,
+            "sha_equal": True, "source_stable": True,
+            "destination_stable": True, "source_release_authorized": False,
+            "source_sha256_now": digest, "destination_sha256_now": digest,
+        }]}))
+        paths.append(path)
+    with pytest.raises(ValueError, match="conflicting previous digests"):
+        _prior_comparisons([row], index, paths)
+    data = json.loads(paths[1].read_text())
+    data["results"][0]["sha_equal"] = False
+    paths[1].write_text(json.dumps(data))
+    assert _prior_comparisons([row], index, paths) == {("ABCD-1234", "one.mp4")}
