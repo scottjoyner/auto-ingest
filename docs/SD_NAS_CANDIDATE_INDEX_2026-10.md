@@ -61,3 +61,7 @@ This only prints bounded statistics and a sample. Optional `--out PATH` writes a
 ## Controlled current content comparison
 
 The candidate index itself never hashes media. For a deliberately bounded source-versus-destination recheck of existing candidate MP4s, see [bounded live media probe](SD_BOUNDED_LIVE_MEDIA_PROBE_2026-10.md). It has independent mount/read-budget checks, and its receipts explicitly cannot open the source-release gate.
+
+## Additional date-folder candidate discovery
+
+[Date-folder NAS reconciliation](SD_DATE_ARCHIVE_RECONCILIATION_2026-10.md) adds a bounded metadata-only candidate finder for a separate `deathstar/8TB_2025` archive subtree. It found 1,136 additional MP4 paths, including all 1,074 previously unindexed `UNTITLED` MP4 names. These are not current SHA custody proofs.
