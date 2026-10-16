@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import io
+import unicodedata
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -93,6 +94,11 @@ def observe_metadata_csv(
     by_status: dict[str, int] = {}
     by_card: dict[str, int] = {}
     seen: set[tuple[str, str]] = set()
+    # A case-sensitive SSD can hold both Fig1.png and fig1.png, but an SMB
+    # destination may collapse them. Reject portable path aliases rather than
+    # silently accepting an apparently distinct source/destination manifest.
+    portable_sources: set[tuple[str, str]] = set()
+    portable_destinations: set[str] = set()
     count = 0
 
     try:
@@ -117,6 +123,27 @@ def observe_metadata_csv(
             if key in seen:
                 raise ExternalInventoryError("duplicate source identity")
             seen.add(key)
+            fold_source = unicodedata.normalize(
+                "NFC", name.replace("\\", "/")
+            ).casefold()
+            folded_key = (card, fold_source)
+            if folded_key in portable_sources:
+                raise ExternalInventoryError(
+                    "source path casefold collision cannot be safely imported"
+                )
+            portable_sources.add(folded_key)
+
+            target_path = row["candidate_relative_path"] or ""
+            if not target_path:
+                raise ExternalInventoryError("missing destination candidate identity")
+            folded_target = unicodedata.normalize(
+                "NFC", target_path.replace("\\", "/")
+            ).casefold()
+            if folded_target in portable_destinations:
+                raise ExternalInventoryError(
+                    "destination path casefold collision cannot be safely imported"
+                )
+            portable_destinations.add(folded_target)
             try:
                 size = int(row["expected_bytes"])
                 observed = int(row["observed_bytes"]) if row["observed_bytes"] else None
