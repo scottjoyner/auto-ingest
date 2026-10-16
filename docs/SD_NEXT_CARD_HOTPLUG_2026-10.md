@@ -13,12 +13,12 @@ Frozen receipt SHA-256: `f9c22200e1517e07a29ad2c076ea564f59d32d44a2931d0b00146c9
 From the checked out `auto-ingest` repo, use:
 
 ```bash
-python3 -m auto_ingest.custody.next_card_discovery \
+python3 -m auto_ingest.sd_card_hotplug_cli \
  --prior-handoff /home/scott/nas-reconciliation-audit-20261016/sd-card-originals-clean-unmount-handoff-20261016.json \
  --expected-handoff-sha256 f9c22200e1517e07a29ad2c076ea564f59d32d44a2931d0b00146c94bcb18d17
 ```
 
-This reads **only lsblk device metadata**, not the card file contents, and matches old cards by **filesystem UUID**, never unstable `/dev/sdX` slots. It rejects cloned/repeated current UUIDs, malformed old evidence, unknown USB filesystem layouts and duplicate source claims. No automatic mounting, unmounting, copying, hashing, deleting, NAS mutation, or data graph mutation occurs. Optional `--out /home/scott/.../unique-next-card-report.json` writes an exclusive read-only discovery receipt on the OS volume.
+The CLI lives in `auto_ingest.sd_card_hotplug_cli` (outside `auto_ingest.custody`), preserving the existing custody rule that forbids subprocess execution imports. It runs a single explicitly bounded, read-only lsblk metadata query and passes its decoded response to the pure custody classifier. This reads **only lsblk device metadata**, not the card file contents, and matches old cards by **filesystem UUID**, never unstable `/dev/sdX` slots. It rejects cloned/repeated current UUIDs, malformed old evidence, unknown USB filesystem layouts and duplicate source claims. No automatic mounting, unmounting, copying, hashing, deleting, NAS mutation, or data graph mutation occurs. Optional `--out /home/scott/.../unique-next-card-report.json` writes an exclusive read-only discovery receipt on the OS volume.
 
 An observed candidate is **not automatically ready for source-file enumeration**: for each newly inserted UUID, independently qualify the real kernel filesystem mount and USB device-to-UUID mapping and preferably mount read-only before using the existing `fleet_preflight`/`fleet_campaigns` inventory tools. Reject cards which match one of the old UUIDs unless specifically continuing its existing custody campaign. If the device is unmounted, it is only a candidate awaiting an operator-reviewed mount step.
 

@@ -108,3 +108,36 @@ def test_dangerous_device_identifier_denied():
         d.inspect_lsblk({"blockdevices": [
             {"name": "../../sda", "type": "disk", "tran": "usb", "rm": True},
         ]}, prior_uuids=set())
+
+
+def test_cli_runner_and_custody_core_are_separated(prior, monkeypatch, capsys):
+    from auto_ingest import sd_card_hotplug_cli as cli
+    path, sha = prior
+    devices = {"blockdevices": [device("sda", "69BE-B963"),
+                                device("sdb", "AABB-1122")]}
+    from types import SimpleNamespace
+    requests = []
+
+    def fake_run(args, **kwargs):
+        requests.append((args, kwargs))
+        return SimpleNamespace(stdout=json.dumps(devices))
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli.main(["--prior-handoff", str(path),
+                     "--expected-handoff-sha256", sha]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["new_card_count"] == 1
+    assert report["prior_card_count_still_inserted"] == 1
+    assert report["source_release_allowed"] is False
+    assert requests[0][0] == cli.LSBLK_READ_ONLY_ARGS
+    assert requests[0][1]["timeout"] == 15
+
+
+def test_pure_custody_package_has_no_process_launch_import():
+    from pathlib import Path
+    source = Path(d.__file__).read_text()
+    import ast
+    tree = ast.parse(source)
+    assert not any(isinstance(node, (ast.Import, ast.ImportFrom)) and
+                   any(alias.name.split(".")[0] == "subprocess" for alias in node.names)
+                   for node in ast.walk(tree) if isinstance(node, ast.Import))

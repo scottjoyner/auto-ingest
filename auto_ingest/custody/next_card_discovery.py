@@ -5,12 +5,10 @@ reuses previous /dev/sdX numbers, or authorizes source release.
 """
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
 import re
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -146,13 +144,14 @@ def inspect_lsblk(payload: dict, *, prior_uuids: set[str]) -> dict:
     return result
 
 
-def discover(handoff: Path, expected_sha: str) -> dict:
+def discover(handoff: Path, expected_sha: str, device_tree: dict) -> dict:
+    """Pure custody classification of caller-provided read-only device metadata.
+
+    OS command execution belongs in the explicitly invoked external CLI,
+    keeping custody independent of process launching and legacy watchers.
+    """
     old = verified_old_cards(handoff, expected_sha)
-    output = subprocess.run(
-        ["lsblk", "-J", "-o", "NAME,TYPE,SIZE,FSTYPE,LABEL,UUID,RM,RO,TRAN,MOUNTPOINTS,MODEL"],
-        capture_output=True, text=True, check=True, timeout=15,
-    )
-    result = inspect_lsblk(json.loads(output.stdout), prior_uuids=old)
+    result = inspect_lsblk(device_tree, prior_uuids=old)
     result["observed_utc"] = datetime.now(timezone.utc).isoformat()
     result["prior_handoff_sha256"] = expected_sha.lower()
     return result
@@ -174,23 +173,3 @@ def write_receipt(output: Path, data: dict) -> None:
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prior-handoff", type=Path, required=True)
-    parser.add_argument("--expected-handoff-sha256", required=True)
-    parser.add_argument("--out", type=Path, help="optional exclusive local OS-disk audit JSON")
-    args = parser.parse_args(argv)
-    try:
-        result = discover(args.prior_handoff, args.expected_handoff_sha256)
-        if args.out:
-            write_receipt(args.out, result)
-    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-        parser.error(str(exc))
-    print(json.dumps(result, indent=2, sort_keys=True))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
