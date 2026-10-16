@@ -57,3 +57,7 @@ Readback shows each is state **DISCOVERED**, source read_only=false (the cards r
 5. Review the full MP4-only **dry-run** file proposal, and separately authorize source unlink only when all gates pass. Preserve DCIM directory scaffolding.
 
 **Not a release receipt:** path/size agreement, previous source SHA, available NAS space, or passing CI do not establish current destination custody.
+
+## Next manifest-only archive anti-join
+
+See [SD/NAS candidate index](SD_NAS_CANDIDATE_INDEX_2026-10.md). It narrows the first re-verification target set without changing any campaign states or source-release policy.
