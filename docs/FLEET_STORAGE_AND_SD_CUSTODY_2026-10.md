@@ -28,6 +28,10 @@ On **x1**, `/nas` is the CIFS share `//192.168.1.202/fileserver` at the time of 
 
 The 3,693 stageable target paths have **zero collisions both within and across the three cards**. This is a *filename-plan* assertion, not a transfer or checksum receipt. All 4,268 original files remain in custody. Historical evidence: `~/knowledge/20-Projects/NAS5-RECONCILIATION-INVENTORY-2026-10-16.md`, the same-day continuation and `/home/scott/nas-reconciliation-audit-20261016`.
 
+## UUID-bound campaign handoff
+
+The physical 4,268-file source ledger is now bridged into three real auto-ingest campaign bundles, with source observations, no destination assertion, and no release eligibility. See [frozen ledger to custody campaigns](SD_FROZEN_LEDGER_TO_CUSTODY_CAMPAIGNS_2026-10.md). This is intentionally separate from ingestion hash/copy/verification stages.
+
 ## Read-only fleet preflight
 
 ```bash
