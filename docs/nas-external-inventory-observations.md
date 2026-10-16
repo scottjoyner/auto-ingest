@@ -17,6 +17,15 @@ accepts a frozen CSV from the read-only NAS metadata scanner with:
 * One of the bounded metadata states (absent, name+size, mismatch, symlink,
   permission/IO uncertainty and so on).
 
+Before summarizing an external CSV, the importer also rejects path aliases
+under Unicode NFC normalization and case-folding: two source paths in the same
+card, or two target paths in the same campaign, cannot collapse to one portable
+name. This safeguard addresses an observed October 16 NAS5 research-vault
+collision: SSD names Fig1.png and fig1.png contained different SHA-256
+payloads, but a single NAS Fig1.png held only the lowercase variant's data.
+The importer fails closed rather than silently accepting such ambiguous paths.
+It remains observation-only and does not authorize copying or release.
+
 The importer **does not** read media payloads, generate hash-equality proof,
 write campaign bundles or mutate a custody state. It refuses any
 nas_payload_sha256_verified_today=True or source_release_authorized=True
@@ -44,7 +53,7 @@ Research-vault repository directory and file queues are a distinct dataset.
 Do not import them as SD-card campaigns: they require their own typed contract
 without implicit source-release semantics.
 
-Run the isolated 11-test module via:
+Run the isolated 16-test module via:
 
     PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q tests/test_custody_external_inventory.py
 
