@@ -1,9 +1,19 @@
 # Auto-Ingest System
 
 <!-- repo-entrypoint-guide:start -->
-> **Entrypoint:** Use [Documentation](#documentation) for the system design/runbooks and [Quick Start](#quick-start) for local setup. Start with inventory/read-only checks, then validate job ownership and storage capacity before enabling NAS-to-graph ingestion.
-> 
-> **Operational boundary:** API reachability or a queued job does not mean media was ingested successfully. Keep content custody, timestamps, retention, and per-item completion evidence separate from scheduler health.
+## Repository guide
+
+**Entrypoint:** Use [Documentation](#documentation) for the system design/runbooks and [Quick Start](#quick-start) for local setup. Start with inventory/read-only checks, then validate job ownership and storage capacity before enabling NAS-to-graph ingestion.
+
+**Operational boundary:** API reachability or a queued job does not mean media was ingested successfully. Keep content custody, timestamps, retention, and per-item completion evidence separate from scheduler health.
+
+### Find your way
+
+- [Documentation](#documentation)
+- [Quick Start](#quick-start)
+- [Trigger Jobs](#trigger-jobs)
+- [Architecture](#architecture)
+- [Troubleshooting](#troubleshooting)
 <!-- repo-entrypoint-guide:end -->
 
 
