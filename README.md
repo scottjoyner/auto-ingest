@@ -30,10 +30,22 @@ Containerized pipeline that ingests dashcam, audio, and bodycam recordings into 
 | [Job Management Skill](deploy/skills/auto-ingest-job-management/SKILL.md) | Enqueue jobs, manage queue, API endpoints |
 | [Troubleshooting Skill](deploy/skills/auto-ingest-troubleshooting/SKILL.md) | Known issues, diagnostics, fixes |
 
+## Read-only preflight
+
+From the repository root, review the configured paths, available capacity, and environment variables before starting any containers or transfer jobs. The checks below do not enqueue media work:
+
+```bash
+docker compose config --quiet
+bin/auto-ingest caps
+bin/auto-ingest status
+```
+
+Only proceed to the service startup and job examples after verifying the intended host, Neo4j credentials, and media custody/storage plan.
+
 ## Quick Start
 
 ```bash
-cd /home/scott/git/auto-ingest
+cd auto-ingest
 
 # Configure environment
 cp deploy/path_profiles.env.example .env
@@ -161,7 +173,7 @@ Core Neo4j node types:
 ## Management
 
 ```bash
-cd /home/scott/git/auto-ingest
+cd auto-ingest
 
 # Start/stop
 docker compose up -d          # start all
