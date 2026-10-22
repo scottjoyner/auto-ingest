@@ -1,5 +1,12 @@
 # Auto-Ingest System
 
+<!-- repo-entrypoint-guide:start -->
+> **Entrypoint:** Use [Documentation](#documentation) for the system design/runbooks and [Quick Start](#quick-start) for local setup. Start with inventory/read-only checks, then validate job ownership and storage capacity before enabling NAS-to-graph ingestion.
+> 
+> **Operational boundary:** API reachability or a queued job does not mean media was ingested successfully. Keep content custody, timestamps, retention, and per-item completion evidence separate from scheduler health.
+<!-- repo-entrypoint-guide:end -->
+
+
 Containerized pipeline that ingests dashcam, audio, and bodycam recordings into a Neo4j knowledge graph. Features distributed workers, a NAS-drop job queue, REST API for triggering jobs, and scheduled cron workers.
 
 ## Documentation
