@@ -1,0 +1,274 @@
+"""Offline, role-pinned Ed25519 attestation for *claims* about Neo4j backups.
+
+No production services, backup jobs, keys, databases, remote hosts or archive
+bytes are accessed. Even a valid signature proves ONLY that the holder of a
+previously approved private key signed these claimed fields; it does not
+prove that the job actually ran, completed, wrote correct bytes, or restored.
+"""
+
+import base64
+import json
+import os
+import re
+import secrets
+import stat
+from pathlib import Path
+
+from neo4j_backup_receipt_verifier import (
+    FIELDS,
+    MAX_RECEIPT,
+    compare_claims,
+)
+from neo4j_backup_receipt_verifier import (
+    load as load_bounded_receipt,
+)
+from neo4j_backup_receipt_verifier import (
+    validate as validate_claim,
+)
+
+SCHEMA = "neo4j-backup-signed-claim-v1"
+DOMAIN = b"neo4j-backup-signed-claim-v1\x00"
+KEY_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+ENVELOPE_KEYS = {"schema", "keyId", "claim", "signature"}
+MAX_ATTESTATION = MAX_RECEIPT
+TRUSTED_ROLES = ("primary", "mirror")
+
+
+def result(state="unverified", reason="signed-claim-evidence-unverified"):
+    return {
+        "schema": "neo4j-backup-signed-claim-assessment-v1",
+        "state": state,
+        "reason": reason,
+        "approvedProducerKeyVerified": False,
+        "claimedExitZero": False,
+        "archiveBytesIndependentlyVerified": False,
+        "sourceMirrorByteIdentityVerified": False,
+        "databaseConsistencyVerified": False,
+        "databaseRestoreVerified": False,
+        "backupJobExecutionVerified": False,
+        "deleteAuthorized": False,
+        "hostChangeAuthorized": False,
+        "archiveBytesRead": 0,
+        "nasWrites": 0,
+        "remoteWrites": 0,
+        "modelRequestsSent": 0,
+    }
+
+
+def _claim_eligible(claim):
+    if not isinstance(claim, dict) or set(claim) != FIELDS:
+        return False
+    # A signed failure receipt would need a separate schema because a failed
+    # backup may not have produced any archive/hash at all. Fail closed here.
+    return validate_claim(claim)["state"] == "unsigned-success-claim-not-certified"
+
+
+def _canonical(claim):
+    return json.dumps(
+        claim, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    ).encode("ascii")
+
+
+def _signed_bytes(key_id, claim):
+    return DOMAIN + key_id.encode("ascii") + b"\x00" + _canonical(claim)
+
+
+def _strict_envelope(value):
+    if not isinstance(value, dict) or set(value) != ENVELOPE_KEYS:
+        return False
+    if value.get("schema") != SCHEMA:
+        return False
+    key_id = value.get("keyId")
+    signature = value.get("signature")
+    if not isinstance(key_id, str) or not KEY_RE.fullmatch(key_id):
+        return False
+    if not isinstance(signature, str) or len(signature) != 86:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9_-]{86}", signature):
+        return False
+    try:
+        sig = base64.urlsafe_b64decode(signature + "==")
+        if len(sig) != 64 or base64.urlsafe_b64encode(sig).rstrip(b"=").decode() != signature:
+            return False
+    except (ValueError, TypeError):
+        return False
+    return _claim_eligible(value.get("claim"))
+
+
+def create_signed_claim(claim, key_id, private_key):
+    """Only for an approved owner-held Ed25519 private-key object.
+
+    Passing a key does not establish that the backup job ran or succeeded.
+    A producer integration MUST bind this operation to a checked process
+    exit and bounded independent archive readback, separately reviewed.
+    No key generation, key loading, subprocess or disk writes here.
+    """
+    if not isinstance(key_id, str) or not KEY_RE.fullmatch(key_id):
+        raise ValueError("invalid opaque key identifier")
+    if not _claim_eligible(claim):
+        raise ValueError("unsupported or unsuccessful claim")
+    if not callable(getattr(private_key, "sign", None)):
+        raise ValueError("a trusted in-memory signing key is required")
+    sig = private_key.sign(_signed_bytes(key_id, claim))
+    if not isinstance(sig, bytes) or len(sig) != 64:
+        raise ValueError("invalid signing result")
+    envelope = {
+        "schema": SCHEMA,
+        "keyId": key_id,
+        "claim": dict(claim),
+        "signature": base64.urlsafe_b64encode(sig).rstrip(b"=").decode("ascii"),
+    }
+    if not _strict_envelope(envelope):
+        raise ValueError("signed envelope failed canonical validation")
+    return envelope
+
+
+def verify_signed_claim(envelope, approved_role_keys):
+    """Role-pinned, out-of-band trusted public keys ONLY.
+
+    approved_role_keys = {
+      'primary': {'keyId': 'approved-primary', 'publicKeyRaw': <32 bytes>},
+      'mirror': {'keyId': 'approved-mirror', 'publicKeyRaw': <32 bytes>},
+    }
+    Never accept verification keys provided by the untrusted envelope.
+    """
+    out = result()
+    if not _strict_envelope(envelope) or not isinstance(approved_role_keys, dict):
+        return out
+    claim = envelope["claim"]
+    role = claim["role"]
+    if role not in TRUSTED_ROLES:
+        return out
+    configured = approved_role_keys.get(role)
+    if not isinstance(configured, dict) or set(configured) != {"keyId", "publicKeyRaw"}:
+        return out
+    pinned_id = configured["keyId"]
+    key_raw = configured["publicKeyRaw"]
+    if (
+        not isinstance(pinned_id, str)
+        or not KEY_RE.fullmatch(pinned_id)
+        or envelope["keyId"] != pinned_id
+        or type(key_raw) is not bytes
+        or len(key_raw) != 32
+    ):
+        return out
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
+        return result(reason="trusted-crypto-dependency-unavailable")
+    try:
+        Ed25519PublicKey.from_public_bytes(key_raw).verify(
+            base64.urlsafe_b64decode(envelope["signature"] + "=="),
+            _signed_bytes(pinned_id, claim),
+        )
+    except (InvalidSignature, ValueError, TypeError):
+        return result(reason="role-pinned-signature-invalid")
+    out.update(
+        state="approved-key-signed-claim-content-and-restore-unverified",
+        reason="signature-matches-preapproved-role-key-but-exit-is-still-an-assertion",
+        approvedProducerKeyVerified=True,
+        claimedExitZero=True,
+    )
+    return out
+
+
+def verify_signed_pair(primary_envelope, mirror_envelope, approved_role_keys):
+    """Check *two* independent approved role keys and cold-stage ordering."""
+    out = result()
+    if not isinstance(approved_role_keys, dict):
+        return out
+    primary = verify_signed_claim(primary_envelope, approved_role_keys)
+    mirror = verify_signed_claim(mirror_envelope, approved_role_keys)
+    if not (primary["approvedProducerKeyVerified"] and mirror["approvedProducerKeyVerified"]):
+        return out
+    if (
+        primary_envelope["claim"]["role"] != "primary"
+        or mirror_envelope["claim"]["role"] != "mirror"
+    ):
+        return out
+    if primary_envelope["keyId"] == mirror_envelope["keyId"]:
+        return result(reason="primary-and-mirror-require-distinct-approved-role-key-ids")
+    # Different labels pointing to the SAME public key are not two signers.
+    if (
+        approved_role_keys["primary"]["publicKeyRaw"]
+        == approved_role_keys["mirror"]["publicKeyRaw"]
+    ):
+        return result(reason="primary-and-mirror-require-distinct-approved-public-keys")
+    if (
+        compare_claims(primary_envelope["claim"], mirror_envelope["claim"])["state"]
+        != "matching-unsigned-claims-not-certified"
+    ):
+        return result(reason="signed-stage-claims-do-not-align")
+    out.update(
+        state="two-approved-keys-signed-matching-claims-not-byte-proof",
+        reason="two-role-signatures-valid-but-archive-integrity-and-restore-unverified",
+        approvedProducerKeyVerified=True,
+        claimedExitZero=True,
+    )
+    return out
+
+
+def load_signed_envelope(path):
+    """Bounded/no-follow JSON read. Never reads a backup archive or key."""
+    obj = load_bounded_receipt(path)
+    return obj if _strict_envelope(obj) else None
+
+
+def publish_signed_envelope(directory, envelope):
+    """Owner-run, exclusive atomic publication of ONE small signed claim.
+
+    Does not run backup jobs or access backup bytes/keys. Requires an EXISTING
+    owner-only directory; never creates paths, overwrites a receipt or
+    operates on a symlink. The operator must independently confirm this is
+    local private storage, not a NAS destination or an output from cron.
+    """
+    if not _strict_envelope(envelope):
+        raise ValueError("invalid signed claim")
+    parent = Path(directory)
+    if parent.is_symlink():
+        raise ValueError("symlink directory rejected")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    dir_fd = os.open(parent, flags)
+    name = f"{envelope['claim']['runId']}-{envelope['claim']['role']}.signed.json"
+    payload = _canonical(envelope) + b"\n"
+    fd = None
+    temporary_name = None
+    try:
+        if len(payload) > MAX_ATTESTATION:
+            raise ValueError("signed claim too large")
+        info = os.fstat(dir_fd)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise ValueError("private owner-only output directory required")
+        file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        temporary_name = f".tmp-{secrets.token_hex(16)}-{name}"
+        fd = os.open(temporary_name, file_flags, 0o600, dir_fd=dir_fd)
+        offset = 0
+        while offset < len(payload):
+            written = os.write(fd, payload[offset:])
+            if written <= 0:
+                raise OSError("short private receipt write")
+            offset += written
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        # Hardlink publication is atomic and NO-OVERWRITE by EEXIST.
+        os.link(
+            temporary_name,
+            name,
+            src_dir_fd=dir_fd,
+            dst_dir_fd=dir_fd,
+            follow_symlinks=False,
+        )
+        os.fsync(dir_fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=dir_fd)
+                os.fsync(dir_fd)
+            except FileNotFoundError:
+                pass
+        os.close(dir_fd)
+    return parent / name
