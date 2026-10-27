@@ -150,7 +150,9 @@ def compare_claims(primary, mirror):
         or primary["runId"] != mirror["runId"]
         or primary["archiveBytes"] != mirror["archiveBytes"]
         or not hmac.compare_digest(primary["archiveSha256"], mirror["archiveSha256"])
-        or utc(primary["finishUtc"]) > utc(mirror["finishUtc"])
+        # A cold mirror must start only after the primary backup has
+        # completed. Both timestamps are still unsigned job claims.
+        or utc(primary["finishUtc"]) > utc(mirror["startUtc"])
     ):
         return out
     out.update(
