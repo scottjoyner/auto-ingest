@@ -210,6 +210,45 @@ class SignedCompletionClaimTests(unittest.TestCase):
             self.assertEqual(file.read_bytes(), before)
             self.assertEqual(sorted(x.name for x in private.iterdir()), [file.name])
 
+    def test_private_publisher_rejects_symlink_in_any_ancestor_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real = root / "real"
+            real.mkdir(mode=0o700)
+            nested = real / "nested"
+            nested.mkdir(mode=0o700)
+            private = nested / "private"
+            private.mkdir(mode=0o700)
+            alias = root / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                signed.publish_signed_envelope(alias / "nested" / "private", self.a)
+            self.assertEqual(list(private.iterdir()), [])
+            # No symlinked ancestor: same target directory is still valid.
+            actual = signed.publish_signed_envelope(private, self.a)
+            self.assertEqual(signed.load_signed_envelope(actual), self.a)
+
+    def test_private_publisher_rejects_parent_traversal_and_relative_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            paths = (root / "private" / ".." / "private", Path("private"))
+            for path in paths:
+                with self.subTest(kind="relative" if not path.is_absolute() else "traversal"):
+                    with self.assertRaises(ValueError):
+                        signed.publish_signed_envelope(path, self.a)
+            self.assertEqual(list(private.iterdir()), [])
+
+    def test_private_directory_path_rejects_intermediate_non_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            file = root / "file"
+            file.write_bytes(b"synthetic-only")
+            with self.assertRaises(ValueError):
+                signed.publish_signed_envelope(file / "nested", self.a)
+            self.assertEqual(file.read_bytes(), b"synthetic-only")
+
     def test_partial_write_failure_never_publishes_final_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             private = Path(tmp) / "private"
