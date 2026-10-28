@@ -133,3 +133,43 @@ reviewed resource limits and rollback controls.
 
 **No automatic merge, owner-account deployment, privileged access,
 production backup command, secret creation or NAS write.**
+
+## Offline review follow-up: publication failure semantics
+
+An independent synthetic fault-injection review found that the
+original private publisher could raise after its final hardlink had
+been created (for example on the directory durability sync), leaving
+a visible final signed receipt despite reporting an exception.
+This could confuse an owner retrying an otherwise correct job receipt.
+
+The isolated review patch changes publication ordering to:
+
+1. Write a new private 0600 temporary receipt; sync the file.
+2. Atomically hardlink to the exclusive, no-overwrite final name.
+3. Remove the temporary name.
+4. Sync the parent directory **after** the temporary cleanup.
+
+If an error happens after the final link but before the final
+directory sync, the publisher attempts **only an inode-matched
+rollback** of the newly linked final name, then syncs the
+directory again. A failed rollback/sync explicitly raises a
+publication-uncertain error and requires inspection of the private
+owner directory before any retry. Other existing names are never
+deleted or overwritten. The tests exercise a one-shot directory
+sync error, persistent sync failures and a temporary-link unlink
+failure using synthetic receipts and disposable local directories.
+
+**Important limitation:** Atomic hardlink visibility is not the
+same as confirmed persistence, and failed filesystem durability
+cannot always be rolled back after a crash or storage error.
+A transient final name can be visible during the pre-sync interval.
+The producer must never treat an exception as proof that no receipt
+ever became visible or durable. A future owner-authorized integration
+must reconcile run ID and owner-private final filenames before
+retries, and a verifier must still require approved role keys,
+independent job-exit custody, independent archive-byte readback
+and an actual isolated Neo4j restore.
+
+This remains **offline, synthetic-only** review code. It does not
+authorize a production receipt publisher, create signing keys,
+read production archives, or change the protected backup jobs.

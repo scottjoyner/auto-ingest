@@ -221,6 +221,69 @@ class SignedCompletionClaimTests(unittest.TestCase):
                     signed.publish_signed_envelope(private, self.a)
             self.assertEqual(list(private.iterdir()), [])
 
+    def test_directory_fsync_failure_rolls_back_visible_final_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp) / "private"
+            private.mkdir(mode=0o700)
+            actual = signed.os.fsync
+            calls = [0]
+
+            def fail_once(fd):
+                calls[0] += 1
+                if calls[0] == 2:
+                    raise OSError("synthetic final-directory-durability-failure")
+                return actual(fd)
+
+            with mock.patch.object(signed.os, "fsync", side_effect=fail_once):
+                with self.assertRaises(OSError):
+                    signed.publish_signed_envelope(private, self.a)
+            self.assertGreaterEqual(calls[0], 3)
+            self.assertEqual(list(private.iterdir()), [])
+            # A retry after a successfully rolled-back publication is safe.
+            receipt = signed.publish_signed_envelope(private, self.a)
+            self.assertEqual(signed.load_signed_envelope(receipt), self.a)
+
+    def test_persistent_directory_fsync_failure_is_explicitly_ambiguous(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp) / "private"
+            private.mkdir(mode=0o700)
+            actual = signed.os.fsync
+            calls = [0]
+
+            def fail_directory(fd):
+                calls[0] += 1
+                if calls[0] >= 2:
+                    raise OSError("synthetic persistent-storage-durability-failure")
+                return actual(fd)
+
+            with mock.patch.object(signed.os, "fsync", side_effect=fail_directory):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "receipt publication uncertain; reconcile private directory",
+                ):
+                    signed.publish_signed_envelope(private, self.a)
+            # In this synthetic environment unlink succeeded, but the
+            # failed sync makes crash durability UNKNOWN. No success signal.
+            self.assertEqual(list(private.iterdir()), [])
+
+    def test_temporary_unlink_failure_after_hardlink_rolls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp) / "private"
+            private.mkdir(mode=0o700)
+            actual = signed.os.unlink
+            calls = [0]
+
+            def fail_first_unlink(path, *args, **kwargs):
+                calls[0] += 1
+                if calls[0] == 1:
+                    raise OSError("synthetic temporary-link-removal-failure")
+                return actual(path, *args, **kwargs)
+
+            with mock.patch.object(signed.os, "unlink", side_effect=fail_first_unlink):
+                with self.assertRaises(OSError):
+                    signed.publish_signed_envelope(private, self.a)
+            self.assertEqual(list(private.iterdir()), [])
+
     def test_directory_must_be_existing_owner_only_and_not_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "private"

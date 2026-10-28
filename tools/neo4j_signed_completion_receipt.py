@@ -309,12 +309,13 @@ def load_signed_envelope(path):
 
 
 def publish_signed_envelope(directory, envelope):
-    """Owner-run, exclusive atomic publication of ONE small signed claim.
+    """Owner-run, exclusive no-overwrite publication of ONE small signed claim.
 
-    Does not run backup jobs or access backup bytes/keys. Requires an EXISTING
-    owner-only directory; never creates paths, overwrites a receipt or
-    operates on a symlink. The operator must independently confirm this is
-    local private storage, not a NAS destination or an output from cron.
+    Only use an EXISTING owner-only directory with trusted local storage
+    custody. Atomic hardlink publication has a brief pre-fsync visibility
+    interval. If the final directory sync fails, make a best-effort
+    inode-checked rollback and always raise; the caller must reconcile
+    the private destination after any ambiguous storage error.
     """
     if not _strict_envelope(envelope):
         raise ValueError("invalid signed claim")
@@ -327,6 +328,9 @@ def publish_signed_envelope(directory, envelope):
     payload = _canonical(envelope) + b"\n"
     fd = None
     temporary_name = None
+    published = False
+    committed = False
+    original_inode = None
     try:
         if len(payload) > MAX_ATTESTATION:
             raise ValueError("signed claim too large")
@@ -336,6 +340,8 @@ def publish_signed_envelope(directory, envelope):
         file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         temporary_name = f".tmp-{secrets.token_hex(16)}-{name}"
         fd = os.open(temporary_name, file_flags, 0o600, dir_fd=dir_fd)
+        original = os.fstat(fd)
+        original_inode = (original.st_dev, original.st_ino)
         offset = 0
         while offset < len(payload):
             written = os.write(fd, payload[offset:])
@@ -345,7 +351,9 @@ def publish_signed_envelope(directory, envelope):
         os.fsync(fd)
         os.close(fd)
         fd = None
-        # Hardlink publication is atomic and NO-OVERWRITE by EEXIST.
+        # Atomic no-overwrite hardlink, then drop the temporary name.
+        # The FINAL directory sync must happen AFTER dropping the temp
+        # link, so no failing later cleanup sync can look like success.
         os.link(
             temporary_name,
             name,
@@ -353,14 +361,32 @@ def publish_signed_envelope(directory, envelope):
             dst_dir_fd=dir_fd,
             follow_symlinks=False,
         )
+        published = True
+        os.unlink(temporary_name, dir_fd=dir_fd)
+        temporary_name = None
         os.fsync(dir_fd)
+        committed = True
+    except (OSError, ValueError):
+        if published and not committed:
+            # A failed directory sync or temporary unlink must not
+            # silently leave an apparently final receipt behind.
+            try:
+                target = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                if (target.st_dev, target.st_ino) != original_inode:
+                    raise OSError("published final receipt identity changed")
+                os.unlink(name, dir_fd=dir_fd)
+                os.fsync(dir_fd)
+            except OSError as cleanup_error:
+                raise OSError(
+                    "receipt publication uncertain; reconcile private directory before retry"
+                ) from cleanup_error
+        raise
     finally:
         if fd is not None:
             os.close(fd)
         if temporary_name is not None:
             try:
                 os.unlink(temporary_name, dir_fd=dir_fd)
-                os.fsync(dir_fd)
             except FileNotFoundError:
                 pass
         os.close(dir_fd)
