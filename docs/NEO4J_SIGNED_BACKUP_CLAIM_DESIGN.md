@@ -173,3 +173,26 @@ and an actual isolated Neo4j restore.
 This remains **offline, synthetic-only** review code. It does not
 authorize a production receipt publisher, create signing keys,
 read production archives, or change the protected backup jobs.
+
+## Ancestor-symlink publication safety review
+
+The original owner-private publisher used `O_NOFOLLOW` only on the final
+receipt directory. An attacker-controlled ancestor symlink could redirect
+a syntactically non-symlink final path into a different directory. A
+synthetic-only test reproduced the unintended publication successfully.
+
+The publisher now requires an absolute path without parent traversal and
+opens every ancestor component via `O_PATH|O_DIRECTORY|O_NOFOLLOW`, pinned
+by directory file descriptors. Only the final private directory is opened
+for read and synchronization, and all subsequent writes/links/unlinks use
+its pinned file descriptor. The function fails closed on a symlink in any
+component; a missing directory still reports an ordinary OS error. No
+symlinked ancestor is followed even if the symlink points to an existing,
+owner-only directory. Synthetic tests cover nested ancestor symlinks,
+`..` traversal, relative paths and non-directory ancestors.
+
+**Limitation:** no-follow pathname handling does not establish that the
+underlying filesystem is local: bind mounts and network mounts are still
+possible, and the owner must independently inspect the actual destination
+filesystem and its access controls before any producer integration. The
+private publisher remains **undeployed** and offline review code only.
