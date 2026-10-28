@@ -7,6 +7,7 @@ prove that the job actually ran, completed, wrote correct bytes, or restored.
 """
 
 import base64
+import errno
 import json
 import os
 import re
@@ -308,6 +309,38 @@ def load_signed_envelope(path):
     return obj if _strict_envelope(obj) else None
 
 
+def _open_private_dir_componentwise(directory):
+    """Pin every directory component without following an ancestor symlink."""
+    parent = Path(directory)
+    if not parent.is_absolute() or ".." in parent.parts:
+        raise ValueError("absolute non-traversing private receipt directory required")
+    if len(parent.parts) < 2 or not hasattr(os, "O_PATH"):
+        raise ValueError("private receipt directory must have a supported absolute path")
+    common_flags = (
+        getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
+    fd = os.open("/", os.O_PATH | common_flags)
+    try:
+        for index, part in enumerate(parent.parts[1:]):
+            final = index == len(parent.parts) - 2
+            next_fd = os.open(
+                part,
+                (os.O_RDONLY if final else os.O_PATH) | common_flags,
+                dir_fd=fd,
+            )
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in (errno.ENOTDIR, errno.ELOOP):
+            raise ValueError("private receipt directory path is untrusted") from exc
+        raise
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def publish_signed_envelope(directory, envelope):
     """Owner-run, exclusive no-overwrite publication of ONE small signed claim.
 
@@ -320,10 +353,7 @@ def publish_signed_envelope(directory, envelope):
     if not _strict_envelope(envelope):
         raise ValueError("invalid signed claim")
     parent = Path(directory)
-    if parent.is_symlink():
-        raise ValueError("symlink directory rejected")
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    dir_fd = os.open(parent, flags)
+    dir_fd = _open_private_dir_componentwise(parent)
     name = f"{envelope['claim']['runId']}-{envelope['claim']['role']}.signed.json"
     payload = _canonical(envelope) + b"\n"
     fd = None
