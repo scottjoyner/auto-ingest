@@ -1,5 +1,6 @@
 """Synthetic-only Ed25519 backup role-claim tests; no production key or backup."""
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -251,6 +252,173 @@ class SignedCompletionClaimTests(unittest.TestCase):
             big = root / "big.signed.json"
             big.write_bytes(b"x" * (signed.MAX_ATTESTATION + 1))
             self.assertIsNone(signed.load_signed_envelope(big))
+
+    def _synthetic_byte_pair(self, directory, *, same_inode=False):
+        """The only backup bytes touched by the new integration tests."""
+        original = b"synthetic-primary-backup-content\\n" * 200
+        digest = hashlib.sha256(original).hexdigest()
+        primary_path = Path(directory) / "source.backup"
+        mirror_path = Path(directory) / "mirror.backup"
+        primary_path.write_bytes(original)
+        if same_inode:
+            mirror_path.hardlink_to(primary_path)
+        else:
+            mirror_path.write_bytes(original)
+        a = signed.create_signed_claim(
+            {**claim(), "archiveBytes": len(original), "archiveSha256": digest},
+            "approved-primary",
+            self.primary,
+        )
+        b = signed.create_signed_claim(
+            {**claim("mirror"), "archiveBytes": len(original), "archiveSha256": digest},
+            "approved-mirror",
+            self.mirror,
+        )
+        options = {
+            "expected_run_id": "synthetic-run-001",
+            "not_before_utc": "2026-10-27T06:00:00Z",
+            "not_after_utc": "2026-10-27T08:30:00Z",
+            "primary_path": primary_path,
+            "mirror_path": mirror_path,
+            "max_bytes": len(original),
+        }
+        return a, b, options, len(original)
+
+    def test_two_signed_claims_require_explicit_independent_bytes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            primary, mirror, args, size = self._synthetic_byte_pair(temp)
+            verification = signed.verify_signed_pair_with_readback(
+                primary, mirror, self.keys, **args
+            )
+            self.assertEqual(
+                verification["state"],
+                "role-signed-and-independent-byte-readback-verified-not-a-restore",
+            )
+            self.assertTrue(verification["approvedProducerKeyVerified"])
+            self.assertTrue(verification["archiveBytesIndependentlyVerified"])
+            self.assertTrue(verification["sourceMirrorByteIdentityVerified"])
+            self.assertEqual(verification["archiveBytesRead"], 2 * size)
+            for field in (
+                "backupJobExecutionVerified",
+                "databaseConsistencyVerified",
+                "databaseRestoreVerified",
+                "deleteAuthorized",
+                "hostChangeAuthorized",
+            ):
+                self.assertFalse(verification[field])
+            self.assertEqual(verification["nasWrites"], 0)
+            self.assertEqual(verification["modelRequestsSent"], 0)
+
+    def test_replayed_valid_signatures_outside_independent_expected_run_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            primary, mirror, args, _ = self._synthetic_byte_pair(temp)
+            for change in (
+                {"expected_run_id": "another-run-001"},
+                {"not_before_utc": "2026-10-27T07:00:00Z"},
+                {"not_after_utc": "2026-10-27T07:30:00Z"},
+                {"not_before_utc": "2026-10-26T00:00:00Z"},
+                {"not_after_utc": "2026-10-31T00:00:00Z"},
+                {"not_before_utc": "malformed"},
+                {"not_after_utc": "2030-10-27T08:30:00Z"},
+                {"expected_run_id": "../../evil"},
+            ):
+                with self.subTest(change=change):
+                    with mock.patch.object(
+                        signed,
+                        "compare_independently_read_files",
+                        side_effect=AssertionError(
+                            "must not read files without independently scoped run/time"
+                        ),
+                    ) as read:
+                        outcome = signed.verify_signed_pair_with_readback(
+                            primary, mirror, self.keys, **{**args, **change}
+                        )
+                    self.assertEqual(outcome["state"], "unverified")
+                    self.assertEqual(outcome["archiveBytesRead"], 0)
+                    read.assert_not_called()
+
+    def test_exact_day_boundary_is_acceptable_but_long_window_is_not(self):
+        with tempfile.TemporaryDirectory() as temp:
+            primary, mirror, args, _ = self._synthetic_byte_pair(temp)
+            window = {
+                **args,
+                "not_before_utc": "2026-10-27T06:00:00Z",
+                "not_after_utc": "2026-10-28T06:00:00Z",
+            }
+            result = signed.verify_signed_pair_with_readback(primary, mirror, self.keys, **window)
+            self.assertTrue(result["sourceMirrorByteIdentityVerified"])
+            with mock.patch.object(
+                signed,
+                "compare_independently_read_files",
+                side_effect=AssertionError("excessive window must avoid archive IO"),
+            ) as read:
+                oversized = signed.verify_signed_pair_with_readback(
+                    primary,
+                    mirror,
+                    self.keys,
+                    **{**window, "not_after_utc": "2026-10-28T06:00:01Z"},
+                )
+            self.assertEqual(oversized["state"], "unverified")
+            read.assert_not_called()
+
+    def test_invalid_role_signatures_never_trigger_archive_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            primary, mirror, args, _ = self._synthetic_byte_pair(temp)
+            bad = {**mirror, "signature": "A" * 86}
+            with mock.patch.object(
+                signed,
+                "compare_independently_read_files",
+                side_effect=AssertionError("must verify signatures before data reads"),
+            ) as read:
+                outcome = signed.verify_signed_pair_with_readback(primary, bad, self.keys, **args)
+            self.assertEqual(outcome["state"], "unverified")
+            self.assertFalse(outcome["approvedProducerKeyVerified"])
+            read.assert_not_called()
+
+    def test_byte_readback_fail_closed_if_archive_changed_after_signing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            primary, mirror, args, size = self._synthetic_byte_pair(temp)
+            Path(args["mirror_path"]).write_bytes(b"x" * size)
+            result = signed.verify_signed_pair_with_readback(primary, mirror, self.keys, **args)
+            self.assertEqual(result["state"], "unverified")
+            self.assertFalse(result["archiveBytesIndependentlyVerified"])
+            self.assertFalse(result["sourceMirrorByteIdentityVerified"])
+            self.assertEqual(result["archiveBytesRead"], 0)
+            self.assertFalse(result["databaseRestoreVerified"])
+
+    def test_same_inode_and_symlink_mirror_cannot_prove_two_independent_copies(self):
+        with tempfile.TemporaryDirectory() as temp:
+            primary, mirror, args, _ = self._synthetic_byte_pair(temp, same_inode=True)
+            outcome = signed.verify_signed_pair_with_readback(primary, mirror, self.keys, **args)
+            self.assertEqual(outcome["state"], "unverified")
+            Path(args["mirror_path"]).unlink()
+            Path(args["mirror_path"]).symlink_to(Path(args["primary_path"]))
+            outcome = signed.verify_signed_pair_with_readback(primary, mirror, self.keys, **args)
+            self.assertEqual(outcome["state"], "unverified")
+
+    def test_explicit_byte_cap_prevents_implicit_large_archive_reads(self):
+        with tempfile.TemporaryDirectory() as temp:
+            primary, mirror, args, size = self._synthetic_byte_pair(temp)
+            for bad_cap in (True, 0, size - 1, 32 * 1024**3 + 1):
+                with self.subTest(cap=bad_cap):
+                    outcome = signed.verify_signed_pair_with_readback(
+                        primary, mirror, self.keys, **{**args, "max_bytes": bad_cap}
+                    )
+                    self.assertEqual(outcome["state"], "unverified")
+                    self.assertFalse(outcome["archiveBytesIndependentlyVerified"])
+                    self.assertEqual(outcome["archiveBytesRead"], 0)
+
+    def test_no_implicit_archive_reads_when_only_signed_pair_queried(self):
+        with mock.patch.object(
+            signed,
+            "compare_independently_read_files",
+            side_effect=AssertionError("a signed pair check is never an implicit archive read"),
+        ) as read:
+            outcome = signed.verify_signed_pair(self.a, self.b, self.keys)
+        self.assertEqual(
+            outcome["state"], "two-approved-keys-signed-matching-claims-not-byte-proof"
+        )
+        read.assert_not_called()
 
     def test_crypto_unavailable_reports_failure_not_unsigned_fallback(self):
         with mock.patch.dict(sys.modules, {"cryptography.exceptions": None}):

@@ -84,6 +84,45 @@ fake receipts. Positive results explicitly leave job execution,
 archive integrity, cross-host byte identity, graph consistency,
 restore success, deletion and all host/model changes unverified.
 
+## Optional explicit signature plus independent byte verification
+
+The offline helper verify_signed_pair_with_readback() composes
+the role-pinned signed-claim and independent bounded SHA-256 verifier.
+It requires an explicit approved primary/mirror pair, a separately
+supplied exact expected run ID, an independently supplied UTC window
+of at most 24 hours, two explicitly selected archive paths and a
+separately reviewed I/O budget.
+
+Before ANY file access, both signatures must validate against
+previously approved distinct public keys, the claimed run must equal
+the independently specified expected run, and all primary/mirror
+start and finish times must be within the caller's UTC interval.
+The caller must obtain that interval and run ID from an independent
+owner-controlled schedule or durable job ledger, not echo the claims.
+
+Only then does it invoke the existing bounded independent archive
+readback checker. The default per-file I/O cap is 16 MiB, and the
+maximum combined read is twice the explicit per-file cap. The
+checker requires two distinct regular inodes with stable metadata
+and independently matching source and mirror SHA-256 digests.
+There is no automatic path discovery, bulk content read, or NAS
+write. A larger cap must be explicitly requested and approved.
+
+The strongest result only confirms that TWO role-pinned signatures
+and the two explicitly selected file byte streams agreed with their
+claimed digests at the time of independent readback. It does NOT
+prove the producer observed a real job exit, database generation,
+transactional consistency, restorability, deletion eligibility,
+or custody of the owner's signing keys.
+
+The run/time scope reduces accidental cross-run replay but is NOT
+a durable anti-replay ledger. Trusted issuance, monotonic sequencing,
+clock source review, key rotation and revocation remain owner gates.
+Synthetic tests cover good separate files, stale/wrong run scopes,
+24-hour boundaries, tampered signatures and file bytes, same-inode
+hardlink or symlink copies, I/O caps and no implicit archive reads.
+No real production archive or owner private key was read.
+
 ## Remaining recovery acceptance
 
 A valid signed primary+mirror pair still requires separately

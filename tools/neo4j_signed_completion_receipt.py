@@ -15,9 +15,14 @@ import stat
 from pathlib import Path
 
 from neo4j_backup_receipt_verifier import (
+    DEFAULT_READ_MAX,
     FIELDS,
+    MAX_READ_MAX,
     MAX_RECEIPT,
+    RUN_RE,
     compare_claims,
+    compare_independently_read_files,
+    utc,
 )
 from neo4j_backup_receipt_verifier import (
     load as load_bounded_receipt,
@@ -205,6 +210,94 @@ def verify_signed_pair(primary_envelope, mirror_envelope, approved_role_keys):
         reason="two-role-signatures-valid-but-archive-integrity-and-restore-unverified",
         approvedProducerKeyVerified=True,
         claimedExitZero=True,
+    )
+    return out
+
+
+def verify_signed_pair_with_readback(
+    primary_envelope,
+    mirror_envelope,
+    approved_role_keys,
+    *,
+    expected_run_id,
+    not_before_utc,
+    not_after_utc,
+    primary_path,
+    mirror_path,
+    max_bytes=DEFAULT_READ_MAX,
+):
+    """Explicit bounded source AND mirror byte readback for authenticated claims.
+
+    This only reports that two independently read archive byte sequences agree
+    with two role-pinned signed claims. It does NOT authenticate the actual
+    backup process exit, authoritatively bind a DB transaction generation,
+    prove an isolated restore, or grant retention/deletion approval.
+
+    Caller must specify the expected run and independent time interval, two
+    distinct explicit archive paths and an I/O budget. No default path or
+    automatic bulk scan exists.
+    """
+    out = result()
+    if (
+        not isinstance(expected_run_id, str)
+        or not RUN_RE.fullmatch(expected_run_id)
+        or type(max_bytes) is not int
+        or not 1 <= max_bytes <= MAX_READ_MAX
+    ):
+        return result(reason="invalid-independent-run-or-io-bound")
+    lower = utc(not_before_utc)
+    upper = utc(not_after_utc)
+    if (
+        lower is None
+        or upper is None
+        or not lower <= upper
+        or (upper - lower).total_seconds() > 24 * 3600
+    ):
+        return result(reason="invalid-independent-time-window")
+    pair = verify_signed_pair(primary_envelope, mirror_envelope, approved_role_keys)
+    if pair["state"] != "two-approved-keys-signed-matching-claims-not-byte-proof":
+        return result(reason="pair-of-approved-signed-claims-required")
+    primary = primary_envelope["claim"]
+    mirror = mirror_envelope["claim"]
+    if (
+        primary["runId"] != expected_run_id
+        or mirror["runId"] != expected_run_id
+        or not (
+            lower
+            <= utc(primary["startUtc"])
+            <= utc(primary["finishUtc"])
+            <= utc(mirror["startUtc"])
+            <= utc(mirror["finishUtc"])
+            <= upper
+        )
+    ):
+        return result(reason="claim-outside-independent-run-or-time-scope")
+    # Both signatures have passed verification BEFORE this can read any file.
+    # The base verifier separately checks inode identity, symlink refusal,
+    # declared SHA256, bounded reads and post-read path identity stability.
+    readback = compare_independently_read_files(
+        primary,
+        primary_path,
+        mirror,
+        mirror_path,
+        max_bytes=max_bytes,
+    )
+    if (
+        readback["state"] != "readback-byte-identical-writer-and-restore-unverified"
+        or readback.get("primarySourceBytesIndependentlyVerified") is not True
+        or readback.get("mirrorSourceByteIdentityVerified") is not True
+        or type(readback.get("archiveReads")) is not int
+        or not 0 < readback["archiveReads"] <= 2 * max_bytes
+    ):
+        return result(reason="signed-claims-match-but-independent-readback-unverified")
+    out.update(
+        state="role-signed-and-independent-byte-readback-verified-not-a-restore",
+        reason="two-role-pinned-claims-and-bounded-source-mirror-sha256-verified-not-process-exit",
+        approvedProducerKeyVerified=True,
+        claimedExitZero=True,
+        archiveBytesIndependentlyVerified=True,
+        sourceMirrorByteIdentityVerified=True,
+        archiveBytesRead=readback["archiveReads"],
     )
     return out
 
