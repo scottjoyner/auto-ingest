@@ -29,7 +29,10 @@ jobs:
           pip install "pydantic>=2.6" "PyYAML>=6.0" "neo4j>=5.24" \
                       "fastapi" "python-multipart" "httpx" "numpy" \
                       "opencv-python-headless" "Pillow" "pytest>=8.0" "pytest-cov>=6.0" \
-                      "ruff>=0.5" "pydantic-settings"
+                      "ruff>=0.5" "pydantic-settings" "cryptography>=42"
+
+      - name: Verify Ed25519 cryptography backend is available
+        run: python -c "from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey; print('Ed25519 backend available')"
 
       - name: Ruff (lint)
         # Ruff is adopted for the package + tests. A small set of files carry
@@ -76,5 +79,5 @@ jobs:
           .venv/bin/pip install "pydantic>=2.6" "PyYAML>=6.0" "neo4j>=5.24" \
                       "fastapi" "python-multipart" "httpx" "numpy" \
                       "opencv-python-headless" "Pillow" "pytest>=8.0" "pytest-cov>=6.0" \
-                      "pydantic-settings" "moviepy==1.0.3"
+                      "pydantic-settings" "moviepy==1.0.3" "cryptography>=42"
           .venv/bin/python -m pytest tests/ -q
