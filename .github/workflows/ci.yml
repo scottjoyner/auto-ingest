@@ -51,6 +51,11 @@ jobs:
             --extend-exclude=auto_ingest/diarize/link_global_speakers_2.py \
             --extend-exclude=auto_ingest/diarize/speaker_linker.py            --extend-exclude=scripts/scott_graph_mcp.py
 
+      - name: Owner-only Neo4j producer adapter — lint and synthetic receipt tests
+        run: |
+          ruff check tools/neo4j_owner_job_adapter.py tests/test_neo4j_owner_job_adapter.py
+          python -m pytest -q tests/test_neo4j_owner_job_adapter.py
+
       - name: No hardcoded Neo4j password (must route through NEO4J_PASSWORD_DEFAULT)
         run: python tools/lint_no_hardcoded_secrets.py
 
