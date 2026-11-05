@@ -1399,3 +1399,97 @@ def test_release_source_imports_nothing_banned():
         else:
             continue
         assert not (set(roots) & banned), roots
+
+
+# A staged NAS layout deliberately differs from the card-relative source path.
+def test_release_rehashes_recorded_staged_target_before_unlink(tmp_path):
+    from auto_ingest.custody.ledger import STAGED_LEDGER
+
+    bundle, src, dest = build_released(tmp_path, count=1)
+    relative = "2026/09/03/c0.mp4"
+    target = dest / relative
+    target.parent.mkdir(parents=True)
+    (dest / "c0.mp4").rename(target)
+    (ledger_dir(bundle) / STAGED_LEDGER).write_text(json.dumps({
+        "source_key": "c0.mp4", "destination_key": relative,
+    }) + "\n", encoding="utf-8")
+    proposed = plan(bundle, src, dest, recheck=True)
+    assert proposed.usable and proposed.deletable == 1
+    assert proposed.objects[0].destination_key == relative
+    executed = release(bundle, src, dest, execute=True)
+    assert executed.deleted == 1
+    assert not (src / "c0.mp4").exists()
+    assert target.exists()
+
+
+def test_release_refuses_colliding_staged_targets_even_with_valid_hashes(tmp_path):
+    from auto_ingest.custody.ledger import STAGED_LEDGER
+
+    bundle, src, dest = build_released(tmp_path, count=2)
+    rows = [
+        {"source_key": "c0.mp4", "destination_key": "same.mp4"},
+        {"source_key": "c1.mp4", "destination_key": "same.mp4"},
+    ]
+    (ledger_dir(bundle) / STAGED_LEDGER).write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    proposal = plan(bundle, src, dest)
+    assert not proposal.usable and not proposal.objects
+    assert "staged_ledger_collision_or_invalid_key" in codes(proposal.blockers)
+    assert src_files(src) == ["c0.mp4", "c1.mp4"]
+
+
+def test_release_never_uses_source_path_when_staged_mapping_is_incomplete(tmp_path):
+    from auto_ingest.custody.ledger import STAGED_LEDGER
+
+    bundle, src, dest = build_released(tmp_path, count=2)
+    (ledger_dir(bundle) / STAGED_LEDGER).write_text(json.dumps({
+        "source_key": "c0.mp4", "destination_key": "c0.mp4",
+    }) + "\n", encoding="utf-8")
+    proposal = plan(bundle, src, dest)
+    assert not proposal.usable and not proposal.objects
+    assert "staged_ledger_incomplete" in codes(proposal.blockers)
+
+
+def test_mp4_only_release_preserves_other_verified_files_and_card_directories(tmp_path):
+    from auto_ingest.custody import StorageIdentity
+
+    src = tmp_path / "card"
+    dest = tmp_path / "nas"
+    (src / "DCIM" / "Movie").mkdir(parents=True)
+    dest.mkdir()
+    (src / "DCIM" / "Movie" / "2026_0903_175924_F.MP4").write_bytes(b"media-content")
+    (src / "DCIM" / "Movie" / "timing.csv").write_bytes(b"metadata")
+    identity = StorageIdentity(filesystem_uuid="TEST-DEST", device="/dev/test",
+                               filesystem_type="ext4")
+    bundle = write_bundle(tmp_path / "bundle",
+                          make_campaign(dest=make_destination(
+                              host_path=str(dest), mounted=True, identity=identity)),
+                          build_evidence())
+    assert main(["hash", "--bundle", str(bundle), "--root", str(src), "--apply", "--json"]) == 0
+    assert main(["execute", "--bundle", str(bundle), "--source-root", str(src),
+                 "--execute", "--apply", "--json"]) == 0
+    assert main(["verify", "--bundle", str(bundle), "--destination", str(dest),
+                 "--apply", "--json"]) == 0
+    import_evidence(bundle, {"destination": {"observed_identity": identity.to_dict()}},
+                    apply=True)
+    proposal = plan(bundle, src, dest, mp4_only=True)
+    assert proposal.usable and proposal.deletable == 1
+    assert proposal.keys == ("DCIM/Movie/2026_0903_175924_F.MP4",)
+    result = release(bundle, src, dest, mp4_only=True, execute=True)
+    assert result.deleted == 1
+    assert (src / "DCIM" / "Movie" / "timing.csv").read_bytes() == b"metadata"
+    assert (src / "DCIM" / "Movie").is_dir()
+    assert (dest / "DCIM" / "Movie" / "2026_0903_175924_F.MP4").exists()
+    assert not (src / "DCIM" / "Movie" / "2026_0903_175924_F.MP4").exists()
+
+
+def test_duplicate_source_staging_ledger_is_never_release_authority(tmp_path):
+    from auto_ingest.custody.ledger import STAGED_LEDGER
+
+    bundle, src, dest = build_released(tmp_path, count=1)
+    row = json.dumps({"source_key": "c0.mp4", "destination_key": "c0.mp4"}) + "\n"
+    (ledger_dir(bundle) / STAGED_LEDGER).write_text(row + row, encoding="utf-8")
+    proposal = plan(bundle, src, dest)
+    assert not proposal.usable
+    assert "staged_ledger_invalid" in codes(proposal.blockers)
+    assert (src / "c0.mp4").exists()

@@ -203,6 +203,7 @@ from .ledger import (
     LedgerRecord,
     ledger_dir,
     read_records,
+    read_staged_ledger,
     summarize_ledger,
 )
 from .machine import derive_state
@@ -281,9 +282,13 @@ class SourceObject:
     path: str
     size: int
     digest: str
+    destination_key: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"digest": self.digest, "key": self.key, "path": self.path, "size": self.size}
+        result = {"digest": self.digest, "key": self.key, "path": self.path, "size": self.size}
+        if self.destination_key and self.destination_key != self.key:
+            result["destination_key"] = self.destination_key
+        return result
 
 
 @dataclass(frozen=True)
@@ -649,6 +654,7 @@ def plan_release(
     evidence: CampaignEvidence,
     policy: CustodyPolicy | None = None,
     recheck: bool = False,
+    mp4_only: bool = False,
     max_samples: int = MAX_SUMMARY_ENTRIES,
 ) -> ReleasePlan:
     """Derive the exact set of source objects that may be removed. Read-only.
@@ -735,6 +741,33 @@ nobody here did it".
 
     source_index = _proven_index(hash_path, SOURCE_VERIFIED_STATUSES)
     dest_index = _proven_index(dest_path, DESTINATION_PROVEN_STATUSES)
+    # Destination verification ledgers retain source keys, whereas the staged
+    # ledger determines the actual NAS-relative location of each file.
+    try:
+        staged = read_staged_ledger(bundle)
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError) as exc:
+        blockers.append(Blocker("staged_ledger_invalid", str(exc),
+                                "repair and re-verify the staged layout"))
+        return _blocked_plan(campaign, state, root, allowed, blockers, notes)
+    destinations = staged if staged is not None else {key: key for key in source_index}
+    if staged is not None:
+        if any(key not in staged for key in source_index):
+            blockers.append(Blocker("staged_ledger_incomplete",
+                                    "source hash keys lack recorded staged targets",
+                                    "record complete staging before source release"))
+        if (any(not isinstance(k, str) or not isinstance(v, str) or not v
+                for k, v in staged.items()) or
+                len(set(staged.values())) != len(staged)):
+            blockers.append(Blocker("staged_ledger_collision_or_invalid_key",
+                                    "staged destinations must be unique and nonempty",
+                                    "preserve all distinct source recordings"))
+        if any(_resolve_under_root(dest_root, v) is None
+               for v in staged.values() if isinstance(v, str)):
+            blockers.append(Blocker("staged_destination_path_unsafe",
+                                    "staged path escapes or crosses a symlink",
+                                    "use safe paths within destination root"))
+    if blockers:
+        return _blocked_plan(campaign, state, root, allowed, blockers, notes)
     notes.append(f"source_proven_objects={len(source_index)}")
     notes.append(f"destination_proven_objects={len(dest_index)}")
 
@@ -752,6 +785,8 @@ nobody here did it".
     candidates: List[Tuple[str, Path, LedgerRecord]] = []
     considered = 0
     for key in sorted(source_index):
+        if mp4_only and not key.lower().endswith(".mp4"):
+            continue
         want = source_index[key]
         proof = dest_index.get(key)
         if proof is None:
@@ -833,10 +868,11 @@ nobody here did it".
                 path=str(target),
                 size=want.size,
                 digest=want.digest.strip().lower(),
+                destination_key=destinations[key],
             ))
             continue
         if recheck:
-            ok, detail = _destination_proves(dest_root, key, want.digest)
+            ok, detail = _destination_proves(dest_root, destinations[key], want.digest)
             if not ok:
                 refusal_keys.append(key)
                 refusals.append(Blocker(
@@ -850,6 +886,7 @@ nobody here did it".
             path=str(target),
             size=want.size,
             digest=want.digest.strip().lower(),
+            destination_key=destinations[key],
         ))
 
     return ReleasePlan(
@@ -1197,6 +1234,7 @@ def execute_release(
     execute: bool = False,
     policy: CustodyPolicy | None = None,
     limit: Optional[int] = None,
+    mp4_only: bool = False,
     decided_at: Optional[str] = None,
     max_errors: int = MAX_SUMMARY_ENTRIES,
 ) -> ReleaseResult:
@@ -1248,6 +1286,7 @@ def execute_release(
         campaign=campaign,
         evidence=evidence,
         policy=policy,
+        mp4_only=mp4_only,
         max_samples=max_errors,
     )
     audit = audit_path(bundle)
@@ -1408,7 +1447,7 @@ def execute_release(
             for obj in plan.objects:
                 if limit is not None and (deleted + failed + refused) >= limit:
                     break
-                ok, detail = _destination_proves(dest_root, obj.key, obj.digest)
+                ok, detail = _destination_proves(dest_root, obj.destination_key or obj.key, obj.digest)
                 if not ok:
                     refused += 1
                     if len(errors) < max_errors:
