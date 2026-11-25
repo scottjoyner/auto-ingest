@@ -6,6 +6,10 @@ This change provides a **read-only, standard-library prototype** for evaluating 
 
 A scheduler invocation proves only that a job started. An unsigned completion receipt reporting exit code zero, size, and SHA-256 is an **untrusted claim**, even if its structure is valid.
 
+For a **cold-mirror** workflow, the mirror's claimed UTC start must be
+at or after the primary's claimed completion; overlapping stages are
+rejected. This is an unsigned timeline check, not evidence of a job exit.
+
 An independent bounded read of an explicitly selected archive can verify that the file's bytes match the claimed digest. Reading two distinct source and mirror files and matching their digests can establish byte identity. **Neither result authenticates the writer, proves transaction consistency, or verifies Neo4j recovery.**
 
 Real recovery certification needs authenticated producer custody, source database identity, valid transaction-chain evidence, and a successful isolated restore and consistency test.

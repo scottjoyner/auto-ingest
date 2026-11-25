@@ -21,7 +21,9 @@ def sample(role="primary"):
         "schema": r.SCHEMA,
         "role": role,
         "runId": "synthetic-run-001",
-        "startUtc": "2026-10-27T06:27:01Z",
+        "startUtc": (
+            "2026-10-27T06:27:01Z" if role == "primary" else "2026-10-27T07:27:01Z"
+        ),
         "finishUtc": "2026-10-27T07:01:02Z" if role == "primary" else "2026-10-27T07:52:02Z",
         "exitCode": 0,
         "archiveBytes": len(DATA),
@@ -82,6 +84,27 @@ class ReceiptContractTests(unittest.TestCase):
         self.assertEqual(combined["state"], "matching-unsigned-claims-not-certified")
         self.assertFalse(combined["mirrorSourceByteIdentityVerified"])
         self.assertFalse(combined["restoreVerified"])
+
+    def test_cold_mirror_must_start_after_primary_finishes(self):
+        good = r.compare_claims(sample(), sample("mirror"))
+        self.assertEqual(good["state"], "matching-unsigned-claims-not-certified")
+        for start in (
+            "2026-10-27T06:27:01Z",  # mirror began at primary start
+            "2026-10-27T07:01:01Z",  # mirror started just before completion
+            "2026-10-27T06:59:59Z",
+        ):
+            with self.subTest(start=start):
+                result = r.compare_claims(
+                    sample(), {**sample("mirror"), "startUtc": start}
+                )
+                self.assertEqual(result["state"], "unverified")
+                self.assertFalse(result["mirrorSourceByteIdentityVerified"])
+
+    def test_cold_mirror_equal_completion_boundary_permitted_as_unsigned_claim(self):
+        mirror = {**sample("mirror"), "startUtc": sample()["finishUtc"]}
+        outcome = r.compare_claims(sample(), mirror)
+        self.assertEqual(outcome["state"], "matching-unsigned-claims-not-certified")
+        self.assertFalse(outcome["mirrorSourceByteIdentityVerified"])
 
     def test_claim_mismatches_rejected(self):
         for change in (
