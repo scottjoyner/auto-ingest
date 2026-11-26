@@ -830,7 +830,7 @@ def q_pick_ready(session, limit: int) -> List[str]:
     return [r["id"] for r in res]
 
 def q_attach_run(session, task_id: str, run: Dict[str, Any]):
-    res = session.run(
+    result = session.run(
         """
         MATCH (task:Task {id:$tid})
         CREATE (r:Run {
@@ -847,8 +847,12 @@ def q_attach_run(session, task_id: str, run: Dict[str, Any]):
         started_at=run["started_at"],
         status=run["status"],
         manifest_json=json.dumps(run.get("manifest", {}), ensure_ascii=False),
-    ).single()
-    return res["rid"]
+    )
+    record = result.single(strict=True)
+    if record["rid"] != run["id"]:
+        raise RuntimeError("Unexpected run attachment acknowledgement")
+    result.consume()
+    return record["rid"]
 
 def q_finish_run(session, task_id: str, run_id: str, success: bool, manifest: Dict[str, Any]):
     result = session.run(
