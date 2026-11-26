@@ -33,7 +33,8 @@ def test_selected_tasks_reach_terminal_states(tmp_path, failure_stage):
         assert tid not in runs
         runs[tid] = {"id": run["id"], "status": "RUNNING"}
 
-    def execute(task):
+    def execute(task, *, run_id):
+        assert uuid.UUID(run_id)
         tid = task["id"]
         executions.append(tid)
         if tid == "first" and failure_stage == "execute":

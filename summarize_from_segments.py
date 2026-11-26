@@ -969,7 +969,7 @@ def ensure_artifacts(task_id: str) -> pathlib.Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
 
-def execute_task_minimal(task: Dict[str, Any]) -> Dict[str, Any]:
+def execute_task_minimal(task: Dict[str, Any], *, run_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Minimal, safe "execution":
       - make artifacts/{TASK_ID}
@@ -989,8 +989,19 @@ TITLE: {task.get('title','')}
 DESC: {task.get('description','')}
 TIME: {datetime.datetime.utcnow().isoformat()}Z
 """
-    out_path.write_text(content, encoding="utf-8")
-    steps.append({"op":"write_file","path":str(out_path),"bytes":len(content)})
+    if run_id is not None:
+        content += f"RUN: {run_id}\n"
+    output = content.encode("utf-8")
+    with out_path.open("wb") as handle:
+        handle.write(output)
+        handle.flush()
+        os.fsync(handle.fileno())
+    steps.append({"op":"write_file","path":str(out_path),"bytes":len(output)})
+    if run_id is not None:
+        from auto_ingest.executor_evidence import publish_local_output_receipt
+        receipt = publish_local_output_receipt(
+            artdir, task_id=tid, run_id=run_id, output=output)
+        steps.append({"op":"local_output_receipt","path":str(receipt)})
 
     for a in (task.get("acceptance") or []):
         if a.get("type") == "http_ok" and a.get("args",{}).get("url"):
@@ -1049,7 +1060,7 @@ def execute_ready(limit: int):
         manifest_exec = {}
         stage = "execute"
         try:
-            manifest_exec = execute_task_minimal(task)
+            manifest_exec = execute_task_minimal(task, run_id=run["id"])
             run["manifest"].update(manifest_exec)
             stage = "acceptance"
             results = run_acceptance(task, tid)
