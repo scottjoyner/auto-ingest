@@ -33,6 +33,18 @@ def test_finalize_requires_confirmed_update(success, outcome):
     result = Result()
 
     class Session:
+        def begin_transaction(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def commit(self):
+            assert result.consumed
+
         def run(self, query, **params):
             assert params["tid"] == "task"
             assert params["rid"] == "run"

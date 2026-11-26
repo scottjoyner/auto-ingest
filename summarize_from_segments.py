@@ -823,65 +823,84 @@ def q_pick_ready(session, limit: int) -> List[str]:
         MATCH (task:Task {status:'READY'})
         WITH task ORDER BY coalesce(task.updated_at, datetime()) ASC
         LIMIT $limit
-        SET task.status = 'RUNNING', task.updated_at = datetime()
         RETURN task.id AS id
         """, limit=limit
     )
-    return [r["id"] for r in res]
+    candidates = [r["id"] for r in res]
+    res.consume()
+    return candidates
 
 def q_attach_run(session, task_id: str, run: Dict[str, Any]):
-    result = session.run(
-        """
-        MATCH (task:Task {id:$tid})
-        CREATE (r:Run {
-          id: $rid,
-          started_at: datetime($started_at),
-          status: $status,
-          manifest_json: $manifest_json
-        })
-        MERGE (task)-[:HAS_RUN]->(r)
-        RETURN r.id AS rid
-        """,
-        tid=task_id,
-        rid=run["id"],
-        started_at=run["started_at"],
-        status=run["status"],
-        manifest_json=json.dumps(run.get("manifest", {}), ensure_ascii=False),
-    )
-    record = result.single(strict=True)
-    if record["rid"] != run["id"]:
-        raise RuntimeError("Unexpected run attachment acknowledgement")
-    result.consume()
-    return record["rid"]
+    # Lock the candidate before re-reading status. The temporary property
+    # acquires a write lock held until transaction completion; it is not a lease.
+    # A losing worker must not execute even if it previously saw READY.
+    with session.begin_transaction() as tx:
+        result = tx.run(
+            """
+            MATCH (task:Task {id:$tid})
+            SET task._executor_lock = true
+            REMOVE task._executor_lock
+            WITH task
+            WHERE task.status = 'READY' AND task.active_run_id IS NULL
+            CREATE (r:Run {
+              id: $rid,
+              started_at: datetime($started_at),
+              status: $status,
+              manifest_json: $manifest_json
+            })
+            MERGE (task)-[:HAS_RUN]->(r)
+            SET task.status = 'RUNNING', task.active_run_id = $rid,
+                task.updated_at = datetime()
+            RETURN r.id AS rid
+            """,
+            tid=task_id,
+            rid=run["id"],
+            started_at=run["started_at"],
+            status=run["status"],
+            manifest_json=json.dumps(run.get("manifest", {}), ensure_ascii=False),
+        )
+        record = result.single(strict=True)
+        if record["rid"] != run["id"]:
+            raise RuntimeError("Unexpected run attachment acknowledgement")
+        result.consume()
+        tx.commit()
+        return record["rid"]
 
 def q_finish_run(session, task_id: str, run_id: str, success: bool, manifest: Dict[str, Any]):
-    result = session.run(
-        """
-        MATCH (task:Task {id:$tid})-[:HAS_RUN]->(r:Run {id:$rid})
-        SET r.status = $rstatus,
-            r.ended_at = datetime($ended_at),
-            r.success = $success,
-            r.manifest_json = $manifest_json,
-            task.status = $tstatus,
-            task.updated_at = datetime()
-        RETURN task.id AS tid, r.id AS rid, task.status AS status
-        """,
-        tid=task_id,
-        rid=run_id,
-        rstatus = "DONE" if success else "FAILED",
-        tstatus = "DONE" if success else "FAILED",
-        ended_at = datetime.datetime.utcnow().isoformat() + "Z",
-        success = success,
-        manifest_json = json.dumps(manifest, ensure_ascii=False),
-    )
-    # Require exactly one matched task/run and a completed result before
-    # the caller announces a terminal state. An uncertain commit is not
-    # permission to re-execute a task.
-    record = result.single(strict=True)
-    expected = "DONE" if success else "FAILED"
-    if (record["tid"], record["rid"], record["status"]) != (task_id, run_id, expected):
-        raise RuntimeError("Unexpected task finalization acknowledgement")
-    result.consume()
+    # A stale or foreign run must never overwrite the current owner's state.
+    with session.begin_transaction() as tx:
+        result = tx.run(
+            """
+            MATCH (task:Task {id:$tid})
+            SET task._executor_lock = true
+            REMOVE task._executor_lock
+            WITH task
+            WHERE task.status = 'RUNNING' AND task.active_run_id = $rid
+            MATCH (task)-[:HAS_RUN]->(r:Run {id:$rid})
+            WHERE r.status = 'RUNNING'
+            SET r.status = $rstatus,
+                r.ended_at = datetime($ended_at),
+                r.success = $success,
+                r.manifest_json = $manifest_json,
+                task.status = $tstatus,
+                task.updated_at = datetime()
+            REMOVE task.active_run_id
+            RETURN task.id AS tid, r.id AS rid, task.status AS status
+            """,
+            tid=task_id,
+            rid=run_id,
+            rstatus="DONE" if success else "FAILED",
+            tstatus="DONE" if success else "FAILED",
+            ended_at=datetime.datetime.utcnow().isoformat() + "Z",
+            success=success,
+            manifest_json=json.dumps(manifest, ensure_ascii=False),
+        )
+        record = result.single(strict=True)
+        expected = "DONE" if success else "FAILED"
+        if (record["tid"], record["rid"], record["status"]) != (task_id, run_id, expected):
+            raise RuntimeError("Unexpected task finalization acknowledgement")
+        result.consume()
+        tx.commit()
 
 # ---- Acceptance helpers ----
 def replace_placeholders(s: str, task_id: str) -> str:
@@ -999,8 +1018,8 @@ def execute_ready(limit: int):
     if limit < 0:
         raise ValueError("limit must be nonnegative")
 
-    # Reserve only the next task. A process interruption or uncertain
-    # database acknowledgement must not strand unstarted tasks.
+    # Discover only the next candidate. Claim and run creation occur together
+    # in q_attach_run; a losing or uncertain claim never reaches execution.
     for _ in range(limit):
         with neo_driver().session() as s:
             picked = q_pick_ready(s, limit=1)

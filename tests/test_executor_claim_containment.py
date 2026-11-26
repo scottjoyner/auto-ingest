@@ -24,13 +24,13 @@ def test_claim_only_current_task(failure):
     def pick(session, limit):
         calls.append(limit)
         selected = [k for k, v in tasks.items() if v == "READY"][:limit]
-        for tid in selected:
-            tasks[tid] = "RUNNING"
         return selected
 
     def attach(session, tid, run):
         if failure == "attach":
             raise OSError("attachment uncertain")
+        assert tasks[tid] == "READY"
+        tasks[tid] = "RUNNING"
 
     def execute(task):
         executed.append(task["id"])
@@ -52,7 +52,8 @@ def test_claim_only_current_task(failure):
     if failure:
         with pytest.raises(KeyboardInterrupt if failure == "interrupt" else OSError):
             ns["execute_ready"](3)
-        assert tasks == {"0": "RUNNING", "1": "READY", "2": "READY", "3": "READY"}
+        expected = "READY" if failure == "attach" else "RUNNING"
+        assert tasks == {"0": expected, "1": "READY", "2": "READY", "3": "READY"}
         assert calls == [1]
         assert executed == ([] if failure == "attach" else ["0"])
     else:

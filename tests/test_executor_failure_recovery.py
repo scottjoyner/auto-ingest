@@ -25,12 +25,11 @@ def test_selected_tasks_reach_terminal_states(tmp_path, failure_stage):
 
     def pick(session, limit):
         selected = [k for k, v in tasks.items() if v == "READY"][:limit]
-        for key in selected:
-            tasks[key] = "RUNNING"
         return selected
 
     def attach(session, tid, run):
-        assert tasks[tid] == "RUNNING"
+        assert tasks[tid] == "READY"
+        tasks[tid] = "RUNNING"
         assert tid not in runs
         runs[tid] = {"id": run["id"], "status": "RUNNING"}
 
