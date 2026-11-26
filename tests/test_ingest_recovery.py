@@ -45,6 +45,10 @@ class ReplayGraph:
                 parent = ("Transcription", row["parent"])
                 assert parent in self.nodes
                 self.edges.add((parent, "HAS_SEGMENT", identity))
+        return self
+
+    def consume(self):
+        return None
 
 
 def test_intermediate_replay_recovers_after_committed_batch(tmp_path):
