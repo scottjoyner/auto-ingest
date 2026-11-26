@@ -851,7 +851,7 @@ def q_attach_run(session, task_id: str, run: Dict[str, Any]):
     return res["rid"]
 
 def q_finish_run(session, task_id: str, run_id: str, success: bool, manifest: Dict[str, Any]):
-    session.run(
+    result = session.run(
         """
         MATCH (task:Task {id:$tid})-[:HAS_RUN]->(r:Run {id:$rid})
         SET r.status = $rstatus,
@@ -860,6 +860,7 @@ def q_finish_run(session, task_id: str, run_id: str, success: bool, manifest: Di
             r.manifest_json = $manifest_json,
             task.status = $tstatus,
             task.updated_at = datetime()
+        RETURN task.id AS tid, r.id AS rid, task.status AS status
         """,
         tid=task_id,
         rid=run_id,
@@ -869,6 +870,14 @@ def q_finish_run(session, task_id: str, run_id: str, success: bool, manifest: Di
         success = success,
         manifest_json = json.dumps(manifest, ensure_ascii=False),
     )
+    # Require exactly one matched task/run and a completed result before
+    # the caller announces a terminal state. An uncertain commit is not
+    # permission to re-execute a task.
+    record = result.single(strict=True)
+    expected = "DONE" if success else "FAILED"
+    if (record["tid"], record["rid"], record["status"]) != (task_id, run_id, expected):
+        raise RuntimeError("Unexpected task finalization acknowledgement")
+    result.consume()
 
 # ---- Acceptance helpers ----
 def replace_placeholders(s: str, task_id: str) -> str:
