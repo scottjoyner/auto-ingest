@@ -996,18 +996,24 @@ def approve_all(session, limit: int) -> int:
     return n
 
 def execute_ready(limit: int):
-    picked = []
-    with neo_driver().session() as s:
-        picked = q_pick_ready(s, limit=limit)
-    if not picked:
-        print("No READY tasks.")
-        return
+    if limit < 0:
+        raise ValueError("limit must be nonnegative")
 
-    for tid in picked:
+    # Reserve only the next task. A process interruption or uncertain
+    # database acknowledgement must not strand unstarted tasks.
+    for _ in range(limit):
+        with neo_driver().session() as s:
+            picked = q_pick_ready(s, limit=1)
+        if not picked:
+            print("No READY tasks.")
+            return
+        if len(picked) != 1:
+            raise RuntimeError("Unexpected task selection cardinality")
+        tid = picked[0]
         with neo_driver().session() as s:
             row = q_get_task(s, tid)
             if not row:
-                print(f"{tid}: not found"); continue
+                raise RuntimeError("Selected task could not be read")
             task = row["task"]
 
             run = {
