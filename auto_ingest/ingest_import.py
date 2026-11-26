@@ -94,6 +94,7 @@ SET n += r.props
 WITH n, r
 MATCH (p:{parent_label} {{{parent_field}: r.parent}})
 MERGE (p)-[:{edge_label}]->(n)
+RETURN r.row_index AS row_index, count(*) AS matches
 """
 
 
@@ -113,7 +114,9 @@ def import_intermediate(driver, path: str, *, batch: int = 1000,
     If ``parent_label``/``parent_field``/``edge_label`` are all given, each node
     is also attached to a parent node (matched by ``r.parent``) via
     ``(parent)-[:edge_label]->(node)`` — useful for e.g. linking a
-    :LocationSample to its :Transcription.
+    :LocationSample to its :Transcription. A linked batch is rolled back if
+    any input has missing or ambiguous relationship acknowledgements; earlier
+    committed batches remain available for replay.
     """
     if batch < 1:
         raise ValueError("batch must be >= 1")
@@ -146,8 +149,22 @@ def import_intermediate(driver, path: str, *, batch: int = 1000,
     with driver.session() as sess:
         for i in range(0, len(prepared), batch):
             chunk = prepared[i:i + batch]
-            # Consume the result so deferred failures surface before counting.
-            sess.run(cy, rows=chunk).consume()
+            if has_edge:
+                # A completed query may silently drop rows at MATCH or
+                # multiply them on ambiguous graph identities. Validate each
+                # input position within an explicit transaction before commit.
+                indexed = [dict(row, row_index=j) for j, row in enumerate(chunk)]
+                with sess.begin_transaction() as tx:
+                    result = tx.run(cy, rows=indexed)
+                    acknowledgements = [(r["row_index"], r["matches"])
+                                        for r in result]
+                    result.consume()
+                    if sorted(acknowledgements) != [(j, 1) for j in range(len(chunk))]:
+                        raise RuntimeError("Incomplete or ambiguous relationship batch")
+                    tx.commit()
+            else:
+                # Consume the result so deferred failures surface before counting.
+                sess.run(cy, rows=chunk).consume()
             total += len(chunk)
     return total
 
