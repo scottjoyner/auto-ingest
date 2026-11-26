@@ -36,10 +36,26 @@ class _FakeSession:
 
     def run(self, query, **params):
         self._log.append(_Call(query, dict(params)))
-        return _FakeResult()
+        return _FakeResult(params.get("rows", []))
+
+    def begin_transaction(self):
+        return self
+
+    def commit(self):
+        pass
 
 
 class _FakeResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def __iter__(self):
+        return iter({"row_index": r["row_index"], "matches": 1}
+                    for r in self.rows if "row_index" in r)
+
+    def consume(self):
+        return None
+
     def data(self):
         return []
 

@@ -35,6 +35,8 @@ from __future__ import annotations
 import csv
 import json
 import os
+import stat
+import uuid
 from typing import Any, Dict, Iterable, List, Optional
 
 # Allowed formats. Anything else raises ValueError at call time.
@@ -71,24 +73,42 @@ def write_intermediate(out_dir: str, key: str, stage: str,
     os.makedirs(out_dir, exist_ok=True)
     rows: List[Dict[str, Any]] = [dict(r) for r in records]
     path = _path(out_dir, key, stage, fmt)
-    if fmt == "json":
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(rows, f, ensure_ascii=False, indent=2, sort_keys=True)
-    elif fmt == "csv":
-        if not rows:
-            # Still emit a header-less empty file so the artifact exists.
-            open(path, "w", encoding="utf-8").close()
-        else:
-            fields: List[str] = []
-            for r in rows:
-                for k in r.keys():
-                    if k not in fields:
-                        fields.append(k)
-            with open(path, "w", encoding="utf-8", newline="") as f:
+    # Stage beside the target so readers only see complete artifacts.
+    # Keep the existing mode on replacement; new files honor the umask.
+    try:
+        previous = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        previous = None
+    if previous is not None and not stat.S_ISREG(previous.st_mode):
+        raise ValueError("intermediate target must be a regular file")
+    mode = stat.S_IMODE(previous.st_mode) if previous is not None else 0o666
+    temporary = f"{path}.{uuid.uuid4().hex}.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="" if fmt == "csv" else None) as f:
+            if previous is not None:
+                os.fchmod(f.fileno(), mode)
+            if fmt == "json":
+                json.dump(rows, f, ensure_ascii=False, indent=2, sort_keys=True)
+            elif rows:
+                fields: List[str] = []
+                for r in rows:
+                    for k in r.keys():
+                        if k not in fields:
+                            fields.append(k)
                 writer = csv.DictWriter(f, fieldnames=fields)
                 writer.writeheader()
                 for r in rows:
                     writer.writerow(r)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
     return path
 
 
