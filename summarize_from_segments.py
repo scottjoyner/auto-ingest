@@ -992,6 +992,11 @@ TIME: {datetime.datetime.utcnow().isoformat()}Z
     if run_id is not None:
         content += f"RUN: {run_id}\n"
     output = content.encode("utf-8")
+    if run_id is not None:
+        from auto_ingest.executor_evidence import publish_run_output
+        preserved = publish_run_output(
+            artdir, task_id=tid, run_id=run_id, output=output)
+        steps.append({"op":"preserve_run_output","path":str(preserved)})
     with out_path.open("wb") as handle:
         handle.write(output)
         handle.flush()

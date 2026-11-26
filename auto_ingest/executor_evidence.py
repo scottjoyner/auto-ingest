@@ -43,12 +43,22 @@ def publish_local_output_receipt(directory, *, task_id, run_id, output):
     the operation. File and directory fsync are attempted before returning.
     """
     data = _payload(task_id, run_id, output)
-    parent = Path(directory)
-    target = parent / f"run-{run_id}.json"
+    return _publish_create_only(Path(directory) / f"run-{run_id}.json",
+                                (json.dumps(data, sort_keys=True) + "\n").encode("utf-8"))
+
+
+def publish_run_output(directory, *, task_id, run_id, output):
+    """Preserve exact run bytes without replacing any existing run output."""
+    _payload(task_id, run_id, output)
+    return _publish_create_only(Path(directory) / f"run-{run_id}.txt", output)
+
+
+def _publish_create_only(target, output):
+    parent = target.parent
     fd, temporary = tempfile.mkstemp(prefix=".run-receipt-", dir=parent)
     try:
         with os.fdopen(fd, "wb") as handle:
-            handle.write((json.dumps(data, sort_keys=True) + "\n").encode("utf-8"))
+            handle.write(output)
             handle.flush()
             os.fsync(handle.fileno())
         # Same-directory hard link is atomic and refuses an existing target.
