@@ -19,34 +19,39 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Extras that overlap requirements.txt are pinned to the EXACT same version so
+# the two manifests cannot drift (see scripts/check_dependency_pins.py). The
+# torch/torchvision/torchaudio CPU pins are kept as-is. Packages with no pin in
+# requirements.txt (sentence-transformers, pydantic, ruff) intentionally keep a
+# lower bound — there is no authoritative version to align them to.
 # API / job trigger server (deploy/job_trigger_api.py)
-api = ["Flask>=3.0", "pydantic>=2.6", "PyYAML>=6.0"]
+api = ["Flask==3.0.3", "pydantic>=2.6", "PyYAML==6.0.1"]
 # Audio / transcript ingestion (auto_ingest.ingest, diarize)
 ingest = [
     "torch==2.6.0+cpu",
     "torchaudio==2.6.0+cpu",
-    "transformers>=4.49",
+    "transformers==4.49.0",
     "sentence-transformers>=2.0",
-    "speechbrain>=1.0",
-    "faster-whisper>=1.2",
-    "pyannote.audio>=3.1",
-    "faiss-cpu>=1.12",
-    "librosa>=0.11",
-    "soundfile>=0.13",
+    "speechbrain==1.0.2",
+    "faster-whisper==1.2.0",
+    "pyannote.audio==3.1.1",
+    "faiss-cpu==1.12.0",
+    "librosa==0.11.0",
+    "soundfile==0.13.1",
 ]
 # Dashcam (auto_ingest.dashcam): YOLO + embeddings
 dashcam = [
     "torch==2.6.0+cpu",
     "torchvision==0.21.0+cpu",
-    "ultralytics>=8.3",
-    "opencv-python>=4.10",
-    "pandas>=2.2",
-    "moviepy>=1.0",
+    "ultralytics==8.3.94",
+    "opencv-python==4.10.0.84",
+    "pandas==2.2.2",
+    "moviepy==1.0.3",
 ]
 # Content summaries (auto_ingest.content): Ollama client
-content = ["requests>=2.32"]
+content = ["requests==2.32.3"]
 # Dev / test
-dev = ["pytest>=8.0", "pytest-cov>=6.0", "ruff>=0.5"]
+dev = ["pytest==8.4.1", "pytest-cov==6.2.1", "ruff>=0.5"]
 
 [project.scripts]
 content-os = "content_os.cli:main"
