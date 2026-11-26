@@ -1,7 +1,9 @@
 """Hermetic explicit-transaction regression for linked imports."""
 import pytest
+
 from auto_ingest.ingest_import import import_intermediate
 from auto_ingest.ingest_write import write_intermediate
+
 
 class Graph:
     def __init__(self, failure=None):
