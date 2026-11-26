@@ -1005,18 +1005,29 @@ def execute_ready(limit: int):
             }
             q_attach_run(s, tid, run)
 
-        # Execute out of tx
-        manifest_exec = execute_task_minimal(task)
-        results = run_acceptance(task, tid)
-        success = all(r["passed"] for r in results) if results else True
-
-        run["manifest"].update(manifest_exec)
-        run["manifest"]["acceptance_results"] = results
+        # Execute out of tx. A task-local exception must not abandon the
+        # remaining selected tasks. Persist only stage and exception type,
+        # never arbitrary exception text (which may contain sensitive data).
+        manifest_exec = {}
+        stage = "execute"
+        try:
+            manifest_exec = execute_task_minimal(task)
+            run["manifest"].update(manifest_exec)
+            stage = "acceptance"
+            results = run_acceptance(task, tid)
+            run["manifest"]["acceptance_results"] = results
+            success = all(r["passed"] for r in results) if results else True
+        except Exception as exc:
+            success = False
+            run["manifest"]["execution_error"] = {
+                "stage": stage, "type": type(exc).__name__,
+            }
 
         with neo_driver().session() as s:
             q_finish_run(s, tid, run["id"], success, run["manifest"])
 
-        print(f"{tid}: {'DONE' if success else 'FAILED'}  artifacts={manifest_exec['artifacts_dir']}")
+        print(f"{tid}: {'DONE' if success else 'FAILED'}  artifacts={manifest_exec.get('artifacts_dir', '')}")
+
 
 # ===========
 # CLI driver
