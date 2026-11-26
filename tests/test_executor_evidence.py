@@ -74,6 +74,10 @@ def test_prior_receipt_cannot_match_replaced_output(tmp_path):
     output = (directory / "output.txt").read_bytes()
     assert inspect_local_output(receipt, output, task_id="task", run_id=first) == {
         "classification": "LOCAL_OUTPUT_UNVERIFIED", "replay_allowed": False}
+    preserved = (directory / f"run-{first}.txt").read_bytes()
+    assert inspect_local_output(receipt, preserved, task_id="task", run_id=first)[
+        "classification"] == "LOCAL_OUTPUT_BYTES_MATCH"
+    assert (directory / f"run-{second}.txt").read_bytes() == output
     current = (directory / f"run-{second}.json").read_bytes()
     assert inspect_local_output(current, output, task_id="task", run_id=second)[
         "classification"] == "LOCAL_OUTPUT_BYTES_MATCH"
@@ -119,3 +123,31 @@ def test_invalid_run_id_cannot_publish(tmp_path, rid):
     with pytest.raises(ValueError):
         publish_local_output_receipt(tmp_path, task_id="task", run_id=rid, output=b"")
     assert list(tmp_path.iterdir()) == []
+
+
+def test_duplicate_run_preserves_existing_bytes_and_alias(tmp_path):
+    ns = executor(tmp_path)
+    rid = str(uuid.uuid4())
+    ns["execute_task_minimal"]({"id": "task", "title": "first"}, run_id=rid)
+    directory = tmp_path / "task"
+    before = {p.name: p.read_bytes() for p in directory.iterdir()}
+    with pytest.raises(FileExistsError):
+        ns["execute_task_minimal"]({"id": "task", "title": "second"}, run_id=rid)
+    assert {p.name: p.read_bytes() for p in directory.iterdir()} == before
+
+
+def test_preservation_failure_does_not_overwrite_alias(tmp_path, monkeypatch):
+    from auto_ingest import executor_evidence
+    ns = executor(tmp_path)
+    ns["execute_task_minimal"]({"id": "task"})
+    directory = tmp_path / "task"
+    before = (directory / "output.txt").read_bytes()
+
+    def fail(*args):
+        raise OSError("publication failed")
+
+    monkeypatch.setattr(executor_evidence.os, "link", fail)
+    with pytest.raises(OSError):
+        ns["execute_task_minimal"]({"id": "task"}, run_id=str(uuid.uuid4()))
+    assert (directory / "output.txt").read_bytes() == before
+    assert list(directory.iterdir()) == [directory / "output.txt"]
