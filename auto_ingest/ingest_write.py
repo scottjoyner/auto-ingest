@@ -40,6 +40,12 @@ from typing import Any, Dict, Iterable, List, Optional
 # Allowed formats. Anything else raises ValueError at call time.
 SUPPORTED_FORMATS = ("json", "csv")
 
+# A "/" in a media key is encoded as "__" in the artifact filename, and
+# list_intermediates decodes "__" back to "/". That mapping is not injective:
+# a literal "__" in a key would alias a different slash-bearing key and
+# silently overwrite its stage artifact. Refuse such keys (fail closed).
+SLASH_ENCODING = "__"
+
 
 def _validate_fmt(fmt: str) -> None:
     if fmt not in SUPPORTED_FORMATS:
@@ -48,8 +54,17 @@ def _validate_fmt(fmt: str) -> None:
         )
 
 
+def _validate_key(key: str) -> None:
+    if SLASH_ENCODING in key:
+        raise ValueError(
+            f"key {key!r} contains the reserved {SLASH_ENCODING!r} sequence "
+            "used to encode '/'; refusing an ambiguous stage artifact"
+        )
+
+
 def _path(out_dir: str, key: str, stage: str, fmt: str) -> str:
     _validate_fmt(fmt)
+    _validate_key(key)
     # Keys may contain path separators (e.g. "dashcam/2026-07-14/CLT_1423_F").
     # Replace "/" so the artifact lands in out_dir as a single file and does
     # not try to create nested directories we didn't ask for.
@@ -120,6 +135,9 @@ def list_intermediates(out_dir: str, key: Optional[str] = None,
     """
     if not os.path.isdir(out_dir):
         return []
+    if key is not None:
+        # The filter can only match keys that the encoder can represent.
+        _validate_key(key)
     results: List[Dict[str, str]] = []
     for name in os.listdir(out_dir):
         # Match <safe_key>.<stage>.<fmt> with a known fmt suffix.
