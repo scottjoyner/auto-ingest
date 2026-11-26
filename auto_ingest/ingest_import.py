@@ -146,7 +146,8 @@ def import_intermediate(driver, path: str, *, batch: int = 1000,
     with driver.session() as sess:
         for i in range(0, len(prepared), batch):
             chunk = prepared[i:i + batch]
-            sess.run(cy, rows=chunk)
+            # Consume the result so deferred failures surface before counting.
+            sess.run(cy, rows=chunk).consume()
             total += len(chunk)
     return total
 

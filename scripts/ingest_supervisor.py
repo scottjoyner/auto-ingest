@@ -76,7 +76,9 @@ def pending_days(days,ledger,log=None):
 def load_ledger():
     if os.path.exists(LEDGER): return json.load(open(LEDGER))
     return {}
-def save_ledger(l): json.dump(l,open(LEDGER,'w'),indent=1)
+def save_ledger(l):
+    from auto_ingest.util.atomic import write_json_atomic
+    write_json_atomic(LEDGER, l, indent=1)
 
 def discover_days():
     days={}

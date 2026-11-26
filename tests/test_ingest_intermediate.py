@@ -40,6 +40,9 @@ class _FakeSession:
 
 
 class _FakeResult:
+    def consume(self):
+        return None
+
     def data(self):
         return []
 
