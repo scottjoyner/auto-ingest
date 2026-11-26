@@ -62,7 +62,7 @@ LLM_DISABLE_THINKING = os.getenv("LLM_DISABLE_THINKING", "1").lower() in ("1", "
 # ---- env ----
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "900"))  # seconds; was 180
 OLLAMA_USE_CLI  = os.getenv("OLLAMA_USE_CLI", "0").lower() in ("1","true","yes","on")
-SUMMARY_FAILOPEN = os.getenv("SUMMARY_FAILOPEN", "copy")  # copy | skip
+SUMMARY_FAILOPEN = os.getenv("SUMMARY_FAILOPEN", "skip")  # copy (diagnostic only) | skip
 
 # ---- prompts ----
 SUMMARIZE_INSTR = """You are given a conversation transcript composed of time-ordered items.
@@ -521,31 +521,29 @@ def _failopen_summary_from_text(full_text: str, max_chars: int = 2000) -> Dict[s
     return {"summary": summary, "bullets": bullets}
 
 def _coerce_json_dict(s: str) -> Dict[str, Any]:
-    if not s:
+    """Parse a complete JSON object; never scrape embedded or partial objects."""
+    if not isinstance(s, str) or not s.strip():
         return {}
-    s = re.sub(r"^\s*```(?:json)?\s*", "", s.strip(), flags=re.IGNORECASE)
-    s = re.sub(r"\s*```\s*$", "", s, flags=re.IGNORECASE)
-
+    s = s.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", s, flags=re.I | re.S)
+    if fenced:
+        s = fenced.group(1)
+    def unique(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ValueError("duplicate JSON key")
+            obj[key] = value
+        return obj
+    def invalid_constant(value):
+        raise ValueError("non-finite JSON number")
     try:
-        o = json.loads(s)
-        if isinstance(o, dict):
-            return o
-    except Exception:
-        pass
+        obj = json.loads(s, object_pairs_hook=unique, parse_constant=invalid_constant)
+        return obj if isinstance(obj, dict) else {}
+    except (ValueError, TypeError, RecursionError):
+        return {}
 
-    start = s.find("{"); end = s.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            o = json.loads(s[start:end+1])
-            if isinstance(o, dict):
-                return o
-        except Exception:
-            pass
-    return {}
 
-# ==================
-# Map-reduce summary
-# ==================
 def chunk(text: str, max_chars: int = 7000) -> List[str]:
     chunks, buf = [], ""
     for line in text.splitlines():
@@ -557,73 +555,87 @@ def chunk(text: str, max_chars: int = 7000) -> List[str]:
     return chunks
 
 def summarize_as_json(full_text: str) -> Dict[str, Any]:
+    def rejected():
+        if SUMMARY_FAILOPEN == "copy":
+            return {**_failopen_summary_from_text(full_text),
+                    "summary_source": "TRANSCRIPT_COPY_DIAGNOSTIC"}
+        return {"summary": "", "bullets": [], "summary_source": "INVALID_MODEL_OUTPUT"}
+
+    if not isinstance(full_text, str) or not full_text.strip():
+        return {"summary": "", "bullets": [], "summary_source": "INVALID_MODEL_OUTPUT"}
     parts = chunk(full_text)
+    if not parts:
+        return rejected()
     if len(parts) == 1:
-        obj = ollama_chat_json(SUMMARIZE_INSTR, parts[0])
-        res = _normalize_summary_obj(obj)
-        if not res["summary"].strip() and SUMMARY_FAILOPEN == "copy":
-            res = _failopen_summary_from_text(full_text)
-        return res
+        result = _normalize_summary_obj(ollama_chat_json(SUMMARIZE_INSTR, parts[0]))
+        return result if result["summary_source"] == "MODEL_OUTPUT" else rejected()
 
     partials = []
     for i, ch in enumerate(parts, 1):
-        pj = ollama_chat_json(SUMMARIZE_INSTR, f"[CHUNK {i}/{len(parts)}]\n\n{ch}")
-        partials.append(_normalize_summary_obj(pj))
-
+        partial = _normalize_summary_obj(
+            ollama_chat_json(SUMMARIZE_INSTR, f"[CHUNK {i}/{len(parts)}]\n\n{ch}"))
+        if partial["summary_source"] != "MODEL_OUTPUT":
+            return rejected()
+        partials.append({"summary": partial["summary"], "bullets": partial["bullets"]})
     combined = json.dumps(partials, ensure_ascii=False)
-    final = ollama_chat_json(
+    result = _normalize_summary_obj(ollama_chat_json(
         SUMMARIZE_INSTR,
-        "Combine these partial results into one final JSON with shape {summary, bullets}:\n" + combined
-    )
-    res = _normalize_summary_obj(final)
-    if not res["summary"].strip() and SUMMARY_FAILOPEN == "copy":
-        res = _failopen_summary_from_text(full_text)
-    return res
+        "Combine these partial results into one final JSON with shape {summary, bullets}:\n" + combined))
+    return result if result["summary_source"] == "MODEL_OUTPUT" else rejected()
+
 
 
 def _normalize_summary_obj(obj: Any) -> Dict[str, Any]:
+    """Reject coercion of nulls, numbers, lists or arbitrary objects into text."""
+    invalid = {"summary": "", "bullets": [], "summary_source": "INVALID_MODEL_OUTPUT"}
     if not isinstance(obj, dict):
-        return {"summary": str(obj), "bullets": []}
-    summary = str(obj.get("summary",""))
-    bullets = obj.get("bullets") or []
-    if not isinstance(bullets, list):
-        bullets = [str(bullets)]
-    bullets = [str(b).strip() for b in bullets if str(b).strip()]
-    return {"summary": summary, "bullets": bullets}
+        return invalid
+    summary, bullets = obj.get("summary"), obj.get("bullets")
+    if not isinstance(summary, str) or not summary.strip():
+        return invalid
+    if not isinstance(bullets, list) or any(not isinstance(b, str) or not b.strip() for b in bullets):
+        return invalid
+    return {"summary": summary.strip(), "bullets": [b.strip() for b in bullets],
+            "summary_source": "MODEL_OUTPUT"}
 
-def extract_tasks_json(summary_obj: Dict[str, Any]) -> Dict[str, Any]:
-    obj = None
-    payload = json.dumps(
-        {"summary": summary_obj.get("summary",""), "bullets": summary_obj.get("bullets",[])},
-        ensure_ascii=False
-    )
+
+def extract_tasks_json(summary_obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Only valid model summaries may reach extraction. Invalid batches are not written."""
+    if not isinstance(summary_obj, dict) or summary_obj.get("summary_source") != "MODEL_OUTPUT":
+        return None
+    validated = _normalize_summary_obj(summary_obj)
+    if validated["summary_source"] != "MODEL_OUTPUT":
+        return None
+    payload = json.dumps({"summary": validated["summary"], "bullets": validated["bullets"]},
+                         ensure_ascii=False)
+    expected_acceptance = [{"type": "file_exists", "args": {"path": "artifacts/{TASK_ID}/output.txt"}}]
     for _ in range(3):
-        try:
-            obj = ollama_chat_json("Return STRICT JSON only.", TASKS_INSTR + "\n\n" + payload)
-            if isinstance(obj, dict) and "tasks" in obj:
+        obj = ollama_chat_json("Return STRICT JSON only.", TASKS_INSTR + "\n\n" + payload)
+        if not isinstance(obj, dict) or not isinstance(obj.get("tasks"), list):
+            continue
+        tasks = []
+        for task in obj["tasks"]:
+            if not isinstance(task, dict):
                 break
-        except Exception:
-            time.sleep(0.5)
-    if not isinstance(obj, dict):
-        obj = {"summary": summary_obj.get("summary",""), "bullets": summary_obj.get("bullets",[]), "tasks": []}
+            title, description = task.get("title"), task.get("description")
+            priority, due, confidence = task.get("priority"), task.get("due"), task.get("confidence")
+            if (not isinstance(title, str) or not title.strip()
+                    or not isinstance(description, str) or not description.strip()
+                    or priority not in ("LOW", "MEDIUM", "HIGH")
+                    or "due" not in task or (due is not None and not isinstance(due, str))
+                    or type(confidence) not in (int, float) or not 0 <= confidence <= 1
+                    or task.get("acceptance") != expected_acceptance):
+                break
+            tasks.append({"title": title.strip(), "description": description.strip(),
+                          "priority": priority, "due": due, "confidence": confidence,
+                          "acceptance": expected_acceptance})
+        else:
+            # The extraction response cannot replace the validated original summary.
+            return {"summary": validated["summary"], "bullets": validated["bullets"],
+                    "tasks": tasks, "summary_source": "MODEL_OUTPUT"}
+    return None
 
-    for t in obj.get("tasks", []):
-        if not t.get("acceptance"):
-            t["acceptance"] = [{"type":"file_exists","args":{"path":"artifacts/{TASK_ID}/output.txt"}}]
-        t["title"] = str(t.get("title","")).strip() or "Untitled Task"
-        t["description"] = str(t.get("description","")).strip()
-        pri = str(t.get("priority","MEDIUM")).upper()
-        if pri not in {"LOW","MEDIUM","HIGH"}: pri = "MEDIUM"
-        t["priority"] = pri
-        try:
-            t["confidence"] = float(t.get("confidence", 0.5))
-        except Exception:
-            t["confidence"] = 0.5
-    return obj
 
-# ===============
-# Write-back
-# ===============
 def write_back(session, trans_id: str, final_obj: Dict[str, Any], write_notes: bool=False) -> str:
     """Create Summary (and optional Tasks) for a transcription. Returns summary id or '' on failure.
 
@@ -747,11 +759,15 @@ def process_one(session, tnode: Dict[str,Any], include_utterances: bool, dry_run
 
         summary_obj = summarize_as_json(text)
 
-        if not summary_obj.get("summary","").strip():
-            print(f"[{key}] ⚠️  Summarizer returned empty; skipping write (set SUMMARY_FAILOPEN=copy to auto-fill).")
+        if (not isinstance(summary_obj, dict)
+                or summary_obj.get("summary_source") != "MODEL_OUTPUT"):
+            print(f"[{key}] Model summary rejected; no task extraction or write-back.")
             return None
 
         final_obj = extract_tasks_json(summary_obj)
+        if final_obj is None:
+            print(f"[{key}] Task extraction rejected; no write-back.")
+            return None
         print(f"[{key}] Will write {len(final_obj.get('tasks', []))} task(s).")
 
         if dry_run:
