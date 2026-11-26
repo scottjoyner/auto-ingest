@@ -51,6 +51,17 @@ dev = ["pytest>=8.0", "pytest-cov>=6.0", "ruff>=0.5"]
 [project.scripts]
 content-os = "content_os.cli:main"
 
+# Explicit package discovery excludes operational directories and tests.
+[tool.setuptools]
+py-modules = ["auto_ingest_config", "summarize_from_segments"]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["auto_ingest", "auto_ingest.*", "content_os", "content_os.*", "birdcam", "birdcam.*"]
+exclude = ["*.tests", "*.tests.*"]
+namespaces = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests", "auto_ingest"]
 # Keep the suite green without the ML stack: only the lightweight, dependency-free

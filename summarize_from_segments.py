@@ -62,7 +62,7 @@ LLM_DISABLE_THINKING = os.getenv("LLM_DISABLE_THINKING", "1").lower() in ("1", "
 # ---- env ----
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "900"))  # seconds; was 180
 OLLAMA_USE_CLI  = os.getenv("OLLAMA_USE_CLI", "0").lower() in ("1","true","yes","on")
-SUMMARY_FAILOPEN = os.getenv("SUMMARY_FAILOPEN", "copy")  # copy | skip
+SUMMARY_FAILOPEN = os.getenv("SUMMARY_FAILOPEN", "skip")  # copy (diagnostic only) | skip
 
 # ---- prompts ----
 SUMMARIZE_INSTR = """You are given a conversation transcript composed of time-ordered items.
@@ -521,31 +521,29 @@ def _failopen_summary_from_text(full_text: str, max_chars: int = 2000) -> Dict[s
     return {"summary": summary, "bullets": bullets}
 
 def _coerce_json_dict(s: str) -> Dict[str, Any]:
-    if not s:
+    """Parse a complete JSON object; never scrape embedded or partial objects."""
+    if not isinstance(s, str) or not s.strip():
         return {}
-    s = re.sub(r"^\s*```(?:json)?\s*", "", s.strip(), flags=re.IGNORECASE)
-    s = re.sub(r"\s*```\s*$", "", s, flags=re.IGNORECASE)
-
+    s = s.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", s, flags=re.I | re.S)
+    if fenced:
+        s = fenced.group(1)
+    def unique(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ValueError("duplicate JSON key")
+            obj[key] = value
+        return obj
+    def invalid_constant(value):
+        raise ValueError("non-finite JSON number")
     try:
-        o = json.loads(s)
-        if isinstance(o, dict):
-            return o
-    except Exception:
-        pass
+        obj = json.loads(s, object_pairs_hook=unique, parse_constant=invalid_constant)
+        return obj if isinstance(obj, dict) else {}
+    except (ValueError, TypeError, RecursionError):
+        return {}
 
-    start = s.find("{"); end = s.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            o = json.loads(s[start:end+1])
-            if isinstance(o, dict):
-                return o
-        except Exception:
-            pass
-    return {}
 
-# ==================
-# Map-reduce summary
-# ==================
 def chunk(text: str, max_chars: int = 7000) -> List[str]:
     chunks, buf = [], ""
     for line in text.splitlines():
@@ -557,73 +555,87 @@ def chunk(text: str, max_chars: int = 7000) -> List[str]:
     return chunks
 
 def summarize_as_json(full_text: str) -> Dict[str, Any]:
+    def rejected():
+        if SUMMARY_FAILOPEN == "copy":
+            return {**_failopen_summary_from_text(full_text),
+                    "summary_source": "TRANSCRIPT_COPY_DIAGNOSTIC"}
+        return {"summary": "", "bullets": [], "summary_source": "INVALID_MODEL_OUTPUT"}
+
+    if not isinstance(full_text, str) or not full_text.strip():
+        return {"summary": "", "bullets": [], "summary_source": "INVALID_MODEL_OUTPUT"}
     parts = chunk(full_text)
+    if not parts:
+        return rejected()
     if len(parts) == 1:
-        obj = ollama_chat_json(SUMMARIZE_INSTR, parts[0])
-        res = _normalize_summary_obj(obj)
-        if not res["summary"].strip() and SUMMARY_FAILOPEN == "copy":
-            res = _failopen_summary_from_text(full_text)
-        return res
+        result = _normalize_summary_obj(ollama_chat_json(SUMMARIZE_INSTR, parts[0]))
+        return result if result["summary_source"] == "MODEL_OUTPUT" else rejected()
 
     partials = []
     for i, ch in enumerate(parts, 1):
-        pj = ollama_chat_json(SUMMARIZE_INSTR, f"[CHUNK {i}/{len(parts)}]\n\n{ch}")
-        partials.append(_normalize_summary_obj(pj))
-
+        partial = _normalize_summary_obj(
+            ollama_chat_json(SUMMARIZE_INSTR, f"[CHUNK {i}/{len(parts)}]\n\n{ch}"))
+        if partial["summary_source"] != "MODEL_OUTPUT":
+            return rejected()
+        partials.append({"summary": partial["summary"], "bullets": partial["bullets"]})
     combined = json.dumps(partials, ensure_ascii=False)
-    final = ollama_chat_json(
+    result = _normalize_summary_obj(ollama_chat_json(
         SUMMARIZE_INSTR,
-        "Combine these partial results into one final JSON with shape {summary, bullets}:\n" + combined
-    )
-    res = _normalize_summary_obj(final)
-    if not res["summary"].strip() and SUMMARY_FAILOPEN == "copy":
-        res = _failopen_summary_from_text(full_text)
-    return res
+        "Combine these partial results into one final JSON with shape {summary, bullets}:\n" + combined))
+    return result if result["summary_source"] == "MODEL_OUTPUT" else rejected()
+
 
 
 def _normalize_summary_obj(obj: Any) -> Dict[str, Any]:
+    """Reject coercion of nulls, numbers, lists or arbitrary objects into text."""
+    invalid = {"summary": "", "bullets": [], "summary_source": "INVALID_MODEL_OUTPUT"}
     if not isinstance(obj, dict):
-        return {"summary": str(obj), "bullets": []}
-    summary = str(obj.get("summary",""))
-    bullets = obj.get("bullets") or []
-    if not isinstance(bullets, list):
-        bullets = [str(bullets)]
-    bullets = [str(b).strip() for b in bullets if str(b).strip()]
-    return {"summary": summary, "bullets": bullets}
+        return invalid
+    summary, bullets = obj.get("summary"), obj.get("bullets")
+    if not isinstance(summary, str) or not summary.strip():
+        return invalid
+    if not isinstance(bullets, list) or any(not isinstance(b, str) or not b.strip() for b in bullets):
+        return invalid
+    return {"summary": summary.strip(), "bullets": [b.strip() for b in bullets],
+            "summary_source": "MODEL_OUTPUT"}
 
-def extract_tasks_json(summary_obj: Dict[str, Any]) -> Dict[str, Any]:
-    obj = None
-    payload = json.dumps(
-        {"summary": summary_obj.get("summary",""), "bullets": summary_obj.get("bullets",[])},
-        ensure_ascii=False
-    )
+
+def extract_tasks_json(summary_obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Only valid model summaries may reach extraction. Invalid batches are not written."""
+    if not isinstance(summary_obj, dict) or summary_obj.get("summary_source") != "MODEL_OUTPUT":
+        return None
+    validated = _normalize_summary_obj(summary_obj)
+    if validated["summary_source"] != "MODEL_OUTPUT":
+        return None
+    payload = json.dumps({"summary": validated["summary"], "bullets": validated["bullets"]},
+                         ensure_ascii=False)
+    expected_acceptance = [{"type": "file_exists", "args": {"path": "artifacts/{TASK_ID}/output.txt"}}]
     for _ in range(3):
-        try:
-            obj = ollama_chat_json("Return STRICT JSON only.", TASKS_INSTR + "\n\n" + payload)
-            if isinstance(obj, dict) and "tasks" in obj:
+        obj = ollama_chat_json("Return STRICT JSON only.", TASKS_INSTR + "\n\n" + payload)
+        if not isinstance(obj, dict) or not isinstance(obj.get("tasks"), list):
+            continue
+        tasks = []
+        for task in obj["tasks"]:
+            if not isinstance(task, dict):
                 break
-        except Exception:
-            time.sleep(0.5)
-    if not isinstance(obj, dict):
-        obj = {"summary": summary_obj.get("summary",""), "bullets": summary_obj.get("bullets",[]), "tasks": []}
+            title, description = task.get("title"), task.get("description")
+            priority, due, confidence = task.get("priority"), task.get("due"), task.get("confidence")
+            if (not isinstance(title, str) or not title.strip()
+                    or not isinstance(description, str) or not description.strip()
+                    or priority not in ("LOW", "MEDIUM", "HIGH")
+                    or "due" not in task or (due is not None and not isinstance(due, str))
+                    or type(confidence) not in (int, float) or not 0 <= confidence <= 1
+                    or task.get("acceptance") != expected_acceptance):
+                break
+            tasks.append({"title": title.strip(), "description": description.strip(),
+                          "priority": priority, "due": due, "confidence": confidence,
+                          "acceptance": expected_acceptance})
+        else:
+            # The extraction response cannot replace the validated original summary.
+            return {"summary": validated["summary"], "bullets": validated["bullets"],
+                    "tasks": tasks, "summary_source": "MODEL_OUTPUT"}
+    return None
 
-    for t in obj.get("tasks", []):
-        if not t.get("acceptance"):
-            t["acceptance"] = [{"type":"file_exists","args":{"path":"artifacts/{TASK_ID}/output.txt"}}]
-        t["title"] = str(t.get("title","")).strip() or "Untitled Task"
-        t["description"] = str(t.get("description","")).strip()
-        pri = str(t.get("priority","MEDIUM")).upper()
-        if pri not in {"LOW","MEDIUM","HIGH"}: pri = "MEDIUM"
-        t["priority"] = pri
-        try:
-            t["confidence"] = float(t.get("confidence", 0.5))
-        except Exception:
-            t["confidence"] = 0.5
-    return obj
 
-# ===============
-# Write-back
-# ===============
 def write_back(session, trans_id: str, final_obj: Dict[str, Any], write_notes: bool=False) -> str:
     """Create Summary (and optional Tasks) for a transcription. Returns summary id or '' on failure.
 
@@ -747,11 +759,15 @@ def process_one(session, tnode: Dict[str,Any], include_utterances: bool, dry_run
 
         summary_obj = summarize_as_json(text)
 
-        if not summary_obj.get("summary","").strip():
-            print(f"[{key}] ⚠️  Summarizer returned empty; skipping write (set SUMMARY_FAILOPEN=copy to auto-fill).")
+        if (not isinstance(summary_obj, dict)
+                or summary_obj.get("summary_source") != "MODEL_OUTPUT"):
+            print(f"[{key}] Model summary rejected; no task extraction or write-back.")
             return None
 
         final_obj = extract_tasks_json(summary_obj)
+        if final_obj is None:
+            print(f"[{key}] Task extraction rejected; no write-back.")
+            return None
         print(f"[{key}] Will write {len(final_obj.get('tasks', []))} task(s).")
 
         if dry_run:
@@ -823,52 +839,84 @@ def q_pick_ready(session, limit: int) -> List[str]:
         MATCH (task:Task {status:'READY'})
         WITH task ORDER BY coalesce(task.updated_at, datetime()) ASC
         LIMIT $limit
-        SET task.status = 'RUNNING', task.updated_at = datetime()
         RETURN task.id AS id
         """, limit=limit
     )
-    return [r["id"] for r in res]
+    candidates = [r["id"] for r in res]
+    res.consume()
+    return candidates
 
 def q_attach_run(session, task_id: str, run: Dict[str, Any]):
-    res = session.run(
-        """
-        MATCH (task:Task {id:$tid})
-        CREATE (r:Run {
-          id: $rid,
-          started_at: datetime($started_at),
-          status: $status,
-          manifest_json: $manifest_json
-        })
-        MERGE (task)-[:HAS_RUN]->(r)
-        RETURN r.id AS rid
-        """,
-        tid=task_id,
-        rid=run["id"],
-        started_at=run["started_at"],
-        status=run["status"],
-        manifest_json=json.dumps(run.get("manifest", {}), ensure_ascii=False),
-    ).single()
-    return res["rid"]
+    # Lock the candidate before re-reading status. The temporary property
+    # acquires a write lock held until transaction completion; it is not a lease.
+    # A losing worker must not execute even if it previously saw READY.
+    with session.begin_transaction() as tx:
+        result = tx.run(
+            """
+            MATCH (task:Task {id:$tid})
+            SET task._executor_lock = true
+            REMOVE task._executor_lock
+            WITH task
+            WHERE task.status = 'READY' AND task.active_run_id IS NULL
+            CREATE (r:Run {
+              id: $rid,
+              started_at: datetime($started_at),
+              status: $status,
+              manifest_json: $manifest_json
+            })
+            MERGE (task)-[:HAS_RUN]->(r)
+            SET task.status = 'RUNNING', task.active_run_id = $rid,
+                task.updated_at = datetime()
+            RETURN r.id AS rid
+            """,
+            tid=task_id,
+            rid=run["id"],
+            started_at=run["started_at"],
+            status=run["status"],
+            manifest_json=json.dumps(run.get("manifest", {}), ensure_ascii=False),
+        )
+        record = result.single(strict=True)
+        if record["rid"] != run["id"]:
+            raise RuntimeError("Unexpected run attachment acknowledgement")
+        result.consume()
+        tx.commit()
+        return record["rid"]
 
 def q_finish_run(session, task_id: str, run_id: str, success: bool, manifest: Dict[str, Any]):
-    session.run(
-        """
-        MATCH (task:Task {id:$tid})-[:HAS_RUN]->(r:Run {id:$rid})
-        SET r.status = $rstatus,
-            r.ended_at = datetime($ended_at),
-            r.success = $success,
-            r.manifest_json = $manifest_json,
-            task.status = $tstatus,
-            task.updated_at = datetime()
-        """,
-        tid=task_id,
-        rid=run_id,
-        rstatus = "DONE" if success else "FAILED",
-        tstatus = "DONE" if success else "FAILED",
-        ended_at = datetime.datetime.utcnow().isoformat() + "Z",
-        success = success,
-        manifest_json = json.dumps(manifest, ensure_ascii=False),
-    )
+    # A stale or foreign run must never overwrite the current owner's state.
+    with session.begin_transaction() as tx:
+        result = tx.run(
+            """
+            MATCH (task:Task {id:$tid})
+            SET task._executor_lock = true
+            REMOVE task._executor_lock
+            WITH task
+            WHERE task.status = 'RUNNING' AND task.active_run_id = $rid
+            MATCH (task)-[:HAS_RUN]->(r:Run {id:$rid})
+            WHERE r.status = 'RUNNING'
+            SET r.status = $rstatus,
+                r.ended_at = datetime($ended_at),
+                r.success = $success,
+                r.manifest_json = $manifest_json,
+                task.status = $tstatus,
+                task.updated_at = datetime()
+            REMOVE task.active_run_id
+            RETURN task.id AS tid, r.id AS rid, task.status AS status
+            """,
+            tid=task_id,
+            rid=run_id,
+            rstatus="DONE" if success else "FAILED",
+            tstatus="DONE" if success else "FAILED",
+            ended_at=datetime.datetime.utcnow().isoformat() + "Z",
+            success=success,
+            manifest_json=json.dumps(manifest, ensure_ascii=False),
+        )
+        record = result.single(strict=True)
+        expected = "DONE" if success else "FAILED"
+        if (record["tid"], record["rid"], record["status"]) != (task_id, run_id, expected):
+            raise RuntimeError("Unexpected task finalization acknowledgement")
+        result.consume()
+        tx.commit()
 
 # ---- Acceptance helpers ----
 def replace_placeholders(s: str, task_id: str) -> str:
@@ -937,7 +985,7 @@ def ensure_artifacts(task_id: str) -> pathlib.Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
 
-def execute_task_minimal(task: Dict[str, Any]) -> Dict[str, Any]:
+def execute_task_minimal(task: Dict[str, Any], *, run_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Minimal, safe "execution":
       - make artifacts/{TASK_ID}
@@ -957,8 +1005,24 @@ TITLE: {task.get('title','')}
 DESC: {task.get('description','')}
 TIME: {datetime.datetime.utcnow().isoformat()}Z
 """
-    out_path.write_text(content, encoding="utf-8")
-    steps.append({"op":"write_file","path":str(out_path),"bytes":len(content)})
+    if run_id is not None:
+        content += f"RUN: {run_id}\n"
+    output = content.encode("utf-8")
+    if run_id is not None:
+        from auto_ingest.executor_evidence import publish_run_output
+        preserved = publish_run_output(
+            artdir, task_id=tid, run_id=run_id, output=output)
+        steps.append({"op":"preserve_run_output","path":str(preserved)})
+    with out_path.open("wb") as handle:
+        handle.write(output)
+        handle.flush()
+        os.fsync(handle.fileno())
+    steps.append({"op":"write_file","path":str(out_path),"bytes":len(output)})
+    if run_id is not None:
+        from auto_ingest.executor_evidence import publish_local_output_receipt
+        receipt = publish_local_output_receipt(
+            artdir, task_id=tid, run_id=run_id, output=output)
+        steps.append({"op":"local_output_receipt","path":str(receipt)})
 
     for a in (task.get("acceptance") or []):
         if a.get("type") == "http_ok" and a.get("args",{}).get("url"):
@@ -983,18 +1047,24 @@ def approve_all(session, limit: int) -> int:
     return n
 
 def execute_ready(limit: int):
-    picked = []
-    with neo_driver().session() as s:
-        picked = q_pick_ready(s, limit=limit)
-    if not picked:
-        print("No READY tasks.")
-        return
+    if limit < 0:
+        raise ValueError("limit must be nonnegative")
 
-    for tid in picked:
+    # Discover only the next candidate. Claim and run creation occur together
+    # in q_attach_run; a losing or uncertain claim never reaches execution.
+    for _ in range(limit):
+        with neo_driver().session() as s:
+            picked = q_pick_ready(s, limit=1)
+        if not picked:
+            print("No READY tasks.")
+            return
+        if len(picked) != 1:
+            raise RuntimeError("Unexpected task selection cardinality")
+        tid = picked[0]
         with neo_driver().session() as s:
             row = q_get_task(s, tid)
             if not row:
-                print(f"{tid}: not found"); continue
+                raise RuntimeError("Selected task could not be read")
             task = row["task"]
 
             run = {
@@ -1005,18 +1075,28 @@ def execute_ready(limit: int):
             }
             q_attach_run(s, tid, run)
 
-        # Execute out of tx
-        manifest_exec = execute_task_minimal(task)
-        results = run_acceptance(task, tid)
-        success = all(r["passed"] for r in results) if results else True
-
-        run["manifest"].update(manifest_exec)
-        run["manifest"]["acceptance_results"] = results
+        # Execute out of tx. A task-local exception must not abandon the
+        # remaining selected tasks. Persist only stage and exception type,
+        # never arbitrary exception text (which may contain sensitive data).
+        manifest_exec = {}
+        stage = "execute"
+        try:
+            manifest_exec = execute_task_minimal(task, run_id=run["id"])
+            run["manifest"].update(manifest_exec)
+            stage = "acceptance"
+            results = run_acceptance(task, tid)
+            run["manifest"]["acceptance_results"] = results
+            success = all(r["passed"] for r in results) if results else True
+        except Exception as exc:
+            success = False
+            run["manifest"]["execution_error"] = {
+                "stage": stage, "type": type(exc).__name__,
+            }
 
         with neo_driver().session() as s:
             q_finish_run(s, tid, run["id"], success, run["manifest"])
 
-        print(f"{tid}: {'DONE' if success else 'FAILED'}  artifacts={manifest_exec['artifacts_dir']}")
+        print(f"{tid}: {'DONE' if success else 'FAILED'}  artifacts={manifest_exec.get('artifacts_dir', '')}")
 
 # ===========
 # CLI driver
