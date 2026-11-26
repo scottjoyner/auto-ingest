@@ -224,7 +224,18 @@ def verify_destination(
     root.mkdir(parents=True, exist_ok=True)
     ledger = root / DESTINATION_LEDGER
 
-    done = {} if recheck else already_verified(ledger)
+    # A destination receipt is only a proof for the digest it was written
+    # against. Skip a key only when the current source ledger still expects
+    # that exact digest. Otherwise a row proved against an older source object
+    # (the hash ledger advanced for that key) would vouch for the new bytes
+    # without ever reading them, and an orphan row for a key the source never
+    # hashed would inflate the custody count. A mismatch here re-verifies the
+    # object against its *current* expected digest; `--recheck` still forces a
+    # full re-proof even when the digests agree.
+    done = {} if recheck else {
+        key: digest for key, digest in already_verified(ledger).items()
+        if key in expected and digest == expected[key][0]
+    }
     pending = sorted(k for k in expected if k not in done)
 
     verified = missing = mismatched = failed = 0
