@@ -26,6 +26,9 @@ class ReplayGraph:
     def __exit__(self, *exc):
         return False
 
+    def begin_transaction(self):
+        return ReplayTransaction(self)
+
     def run(self, query, *, rows):
         self.calls += 1
         assert len(rows) == 1
@@ -35,7 +38,8 @@ class ReplayGraph:
         parent_query = "UNWIND $rows AS r MERGE (n:Transcription {id: r.key}) SET n += r.props"
         child_query = ("UNWIND $rows AS r MERGE (n:Segment {id: r.key}) SET n += r.props "
                        "WITH n, r MATCH (p:Transcription {id: r.parent}) "
-                       "MERGE (p)-[:HAS_SEGMENT]->(n)")
+                       "MERGE (p)-[:HAS_SEGMENT]->(n) "
+                       "RETURN r.row_index AS row_index, count(*) AS matches")
         assert q in (parent_query, child_query)
         for row in rows:
             label = "Transcription" if q == parent_query else "Segment"
@@ -45,10 +49,37 @@ class ReplayGraph:
                 parent = ("Transcription", row["parent"])
                 assert parent in self.nodes
                 self.edges.add((parent, "HAS_SEGMENT", identity))
+        self.acks = [{"row_index": r["row_index"], "matches": 1}
+                     for r in rows if "row_index" in r]
         return self
+
+    def __iter__(self):
+        return iter(self.acks)
 
     def consume(self):
         return None
+
+
+class ReplayTransaction:
+    def __init__(self, graph):
+        self.graph = graph
+        self.nodes = {k: dict(v) for k, v in graph.nodes.items()}
+        self.edges = set(graph.edges)
+        self.committed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if not self.committed:
+            self.graph.nodes = self.nodes
+            self.graph.edges = self.edges
+
+    def run(self, query, **params):
+        return self.graph.run(query, **params)
+
+    def commit(self):
+        self.committed = True
 
 
 def test_intermediate_replay_recovers_after_committed_batch(tmp_path):
