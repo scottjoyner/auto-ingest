@@ -1,116 +1,100 @@
 #!/usr/bin/env python3
-"""Fail if a pinned optional extra in pyproject.toml drifts from requirements.txt.
+"""Validate optional-extra pins against the flat, exact requirements lock.
 
-Standard library only; no new dependencies. The [project.optional-dependencies]
-table is read with a small line-based parser so this also runs on Python 3.10
-(where ``tomllib`` is not yet available).
-
-Only distributions that are pinned in requirements.txt are checked. Packages
-that appear in the extras but have no pin in requirements.txt (currently
-sentence-transformers, pydantic and ruff) are reported as skipped: there is no
-authoritative version to compare them against.
+This CI utility uses stdlib tomllib (Python 3.11+, CI runs 3.12).
+It does not change the application's Python 3.10 runtime support.
+Unsupported or ambiguous lock syntax fails closed rather than being skipped.
 """
-
 from __future__ import annotations
 
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REQUIREMENTS = ROOT / "requirements.txt"
 PYPROJECT = ROOT / "pyproject.toml"
 
-_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
-_PIN_RE = re.compile(r"==\s*([^\s;,]+)")
-_QUOTED_RE = re.compile(r'"([^"]+)"')
-_SECTION_RE = re.compile(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$")
+_NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+_NAME_RE = re.compile(r"^\s*(" + _NAME + r")(?=\s|\[|[<>=!~;@]|$)")
+_VERSION = r"[A-Za-z0-9][A-Za-z0-9.+!_-]*"
+_EXACT_RE = re.compile(r"\s*(" + _NAME + r")\s*==\s*(" + _VERSION + r")\s*")
 
 
 def normalize(name: str) -> str:
-    """PEP 503 name normalization: lowercase, collapse runs of [-_.] to '-'."""
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
 def parse_requirements(path: Path) -> dict[str, str]:
-    pins: dict[str, str] = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    pins = {}
+    for index, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
-        if not line or line.startswith("-"):
+        if not line:
             continue
-        match = _NAME_RE.match(line)
-        pin = _PIN_RE.search(line)
-        if match and pin:
-            pins[normalize(match.group(1))] = pin.group(1)
+        match = _EXACT_RE.fullmatch(line)
+        if not match:
+            raise ValueError(f"unsupported requirements lock syntax at line {index}")
+        name, version = normalize(match.group(1)), match.group(2)
+        if name in pins:
+            raise ValueError(f"duplicate normalized requirements pin: {name}")
+        pins[name] = version
+    if not pins:
+        raise ValueError("empty requirements lock")
     return pins
 
 
 def parse_extras(path: Path) -> list[tuple[str, str]]:
-    """Return (extra_name, requirement_string) pairs from the extras table."""
-    lines = path.read_text(encoding="utf-8").splitlines()
-    in_extras = False
-    current_key: str | None = None
-    collected: list[tuple[str, str]] = []
-    for raw in lines:
-        stripped = raw.strip()
-        section = _SECTION_RE.match(stripped)
-        if section:
-            in_extras = section.group(1).strip() == "project.optional-dependencies"
-            current_key = None
-            continue
-        if not in_extras or not stripped or stripped.startswith("#"):
-            continue
-        if "=" in stripped and "[" in stripped:
-            current_key = stripped.split("=", 1)[0].strip()
-        for requirement in _QUOTED_RE.findall(stripped):
-            collected.append((current_key or "<unknown>", requirement))
+    with path.open("rb") as stream:
+        project = tomllib.load(stream)
+    extras = project.get("project", {}).get("optional-dependencies")
+    if not isinstance(extras, dict) or not extras:
+        raise ValueError("missing optional-dependencies table")
+    collected = []
+    for extra, requirements in extras.items():
+        if not isinstance(requirements, list) or any(
+            not isinstance(item, str) or not item.strip() for item in requirements
+        ):
+            raise ValueError(f"invalid optional dependency array: {extra}")
+        collected.extend((extra, req) for req in requirements)
+    if not collected:
+        raise ValueError("no optional dependencies")
     return collected
 
 
-def check() -> int:
-    pins = parse_requirements(REQUIREMENTS)
-    extras = parse_extras(PYPROJECT)
-    if not pins:
-        print(f"FAIL: no pins parsed from {REQUIREMENTS}", file=sys.stderr)
+def check(requirements_path=REQUIREMENTS, pyproject_path=PYPROJECT) -> int:
+    try:
+        pins = parse_requirements(requirements_path)
+        extras = parse_extras(pyproject_path)
+    except (OSError, UnicodeError, ValueError, TypeError, AttributeError) as exc:
+        # TOML parse errors are safe to report only by type: malformed input
+        # could contain arbitrary text.
+        print(f"FAIL: invalid dependency metadata ({type(exc).__name__})", file=sys.stderr)
         return 1
-    if not extras:
-        print(f"FAIL: no extras parsed from {PYPROJECT}", file=sys.stderr)
-        return 1
-
-    errors: list[str] = []
-    skipped: list[str] = []
+    errors = []
+    skipped = []
     checked = 0
     for extra, requirement in extras:
-        match = _NAME_RE.match(requirement.strip())
-        if not match:
+        name_match = _NAME_RE.match(requirement)
+        if not name_match:
+            errors.append(f"extra '{extra}': invalid requirement name")
             continue
-        name = normalize(match.group(1))
+        name = normalize(name_match.group(1))
         if name not in pins:
-            skipped.append(f"{name} (no pin in requirements.txt)")
+            skipped.append(name)
             continue
         checked += 1
-        expected = pins[name]
-        pin = _PIN_RE.search(requirement)
-        if pin is None:
-            errors.append(
-                f"extra '{extra}': {requirement!r} is not an exact '==' pin; "
-                f"requirements.txt pins {name}=={expected}"
-            )
-        elif pin.group(1) != expected:
-            errors.append(
-                f"extra '{extra}': {requirement!r} pins {pin.group(1)}, "
-                f"requirements.txt pins {expected}"
-            )
-
-    print(
-        f"dependency pin drift check: {checked} overlapping extra(s) checked, "
-        f"{len(skipped)} skipped (no requirements.txt pin)"
-    )
+        pin = _EXACT_RE.fullmatch(requirement)
+        if pin is None or pin.group(2) != pins[name]:
+            errors.append(f"extra '{extra}': {name} must be pinned exactly to {pins[name]}")
+    if not checked:
+        errors.append("no overlapping optional dependency pins checked")
+    print(f"dependency pin drift check: {checked} overlapping extra(s) checked, {len(skipped)} skipped")
     if skipped:
-        print("  skipped: " + ", ".join(skipped))
+        print("  skipped (no requirements.txt pin): " + ", ".join(skipped))
+    for error in errors:
+        print("  DRIFT: " + error, file=sys.stderr)
     if errors:
-        for error in errors:
-            print(f"  DRIFT: {error}", file=sys.stderr)
         print(f"FAIL: {len(errors)} drift(s) detected", file=sys.stderr)
         return 1
     print("PASS: all overlapping extras match requirements.txt pins")

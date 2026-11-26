@@ -55,7 +55,9 @@ jobs:
         # Stdlib-only: no new deps and no change to the install strategy above.
         # Fails if an overlapping optional extra stops matching its exact pin
         # in requirements.txt (scripts/check_dependency_pins.py).
-        run: python scripts/check_dependency_pins.py
+        run: |
+          python scripts/test_check_dependency_pins.py
+          python scripts/check_dependency_pins.py
 
       - name: Pytest (system python — moviepy tests skip/degrade)
         run: |
