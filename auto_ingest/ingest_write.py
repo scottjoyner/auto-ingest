@@ -19,7 +19,8 @@ Why a plain file instead of a DB?
 Format
 ------
 * ``json`` (default): ``<out_dir>/<key>.<stage>.json`` — a JSON list of dict
-  rows. Human-readable, preserves types, easy to diff/claim.
+  rows. Human-readable, preserves types, easy to diff/claim. ``<key>`` is
+  percent-escaped in the filename so distinct keys never share one artifact.
 * ``csv``: ``<out_dir>/<key>.<stage>.csv`` — flat rows; good for huge tables.
 
 Idempotency
@@ -36,6 +37,7 @@ import csv
 import json
 import os
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import quote, unquote
 
 # Allowed formats. Anything else raises ValueError at call time.
 SUPPORTED_FORMATS = ("json", "csv")
@@ -51,9 +53,13 @@ def _validate_fmt(fmt: str) -> None:
 def _path(out_dir: str, key: str, stage: str, fmt: str) -> str:
     _validate_fmt(fmt)
     # Keys may contain path separators (e.g. "dashcam/2026-07-14/CLT_1423_F").
-    # Replace "/" so the artifact lands in out_dir as a single file and does
-    # not try to create nested directories we didn't ask for.
-    safe_key = key.replace("/", "__")
+    # Escape them so the artifact lands in out_dir as a single file and does not
+    # try to create nested directories we didn't ask for. The encoding must be
+    # *injective*: a plain "/" -> "__" substitution collided with keys that
+    # legitimately contain "__" (e.g. "a/b" vs "a__b"), so one key's staged
+    # artifact silently overwrote the other's. Percent-encoding is reversible
+    # and cannot collide ("%" is itself encoded), keeping one file per key.
+    safe_key = quote(key, safe="")
     return os.path.join(out_dir, f"{safe_key}.{stage}.{fmt}")
 
 
@@ -130,8 +136,10 @@ def list_intermediates(out_dir: str, key: Optional[str] = None,
             if "." not in body:
                 continue
             key_part, stage_part = body.rsplit(".", 1)
-            # Reverse the "/" -> "__" sanitization done at write time.
-            real_key = key_part.replace("__", "/")
+            # Reverse the percent-encoding done at write time (the inverse of
+            # _path's quote()). A literal "__" in a key stays "__" here, so a
+            # key that contains "/" and one that contains "__" remain distinct.
+            real_key = unquote(key_part)
             if key is not None and real_key != key:
                 continue
             if stage is not None and stage_part != stage:
