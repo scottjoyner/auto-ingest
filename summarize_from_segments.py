@@ -830,7 +830,7 @@ def q_pick_ready(session, limit: int) -> List[str]:
     return [r["id"] for r in res]
 
 def q_attach_run(session, task_id: str, run: Dict[str, Any]):
-    res = session.run(
+    result = session.run(
         """
         MATCH (task:Task {id:$tid})
         CREATE (r:Run {
@@ -847,11 +847,15 @@ def q_attach_run(session, task_id: str, run: Dict[str, Any]):
         started_at=run["started_at"],
         status=run["status"],
         manifest_json=json.dumps(run.get("manifest", {}), ensure_ascii=False),
-    ).single()
-    return res["rid"]
+    )
+    record = result.single(strict=True)
+    if record["rid"] != run["id"]:
+        raise RuntimeError("Unexpected run attachment acknowledgement")
+    result.consume()
+    return record["rid"]
 
 def q_finish_run(session, task_id: str, run_id: str, success: bool, manifest: Dict[str, Any]):
-    session.run(
+    result = session.run(
         """
         MATCH (task:Task {id:$tid})-[:HAS_RUN]->(r:Run {id:$rid})
         SET r.status = $rstatus,
@@ -860,6 +864,7 @@ def q_finish_run(session, task_id: str, run_id: str, success: bool, manifest: Di
             r.manifest_json = $manifest_json,
             task.status = $tstatus,
             task.updated_at = datetime()
+        RETURN task.id AS tid, r.id AS rid, task.status AS status
         """,
         tid=task_id,
         rid=run_id,
@@ -869,6 +874,14 @@ def q_finish_run(session, task_id: str, run_id: str, success: bool, manifest: Di
         success = success,
         manifest_json = json.dumps(manifest, ensure_ascii=False),
     )
+    # Require exactly one matched task/run and a completed result before
+    # the caller announces a terminal state. An uncertain commit is not
+    # permission to re-execute a task.
+    record = result.single(strict=True)
+    expected = "DONE" if success else "FAILED"
+    if (record["tid"], record["rid"], record["status"]) != (task_id, run_id, expected):
+        raise RuntimeError("Unexpected task finalization acknowledgement")
+    result.consume()
 
 # ---- Acceptance helpers ----
 def replace_placeholders(s: str, task_id: str) -> str:
@@ -983,18 +996,24 @@ def approve_all(session, limit: int) -> int:
     return n
 
 def execute_ready(limit: int):
-    picked = []
-    with neo_driver().session() as s:
-        picked = q_pick_ready(s, limit=limit)
-    if not picked:
-        print("No READY tasks.")
-        return
+    if limit < 0:
+        raise ValueError("limit must be nonnegative")
 
-    for tid in picked:
+    # Reserve only the next task. A process interruption or uncertain
+    # database acknowledgement must not strand unstarted tasks.
+    for _ in range(limit):
+        with neo_driver().session() as s:
+            picked = q_pick_ready(s, limit=1)
+        if not picked:
+            print("No READY tasks.")
+            return
+        if len(picked) != 1:
+            raise RuntimeError("Unexpected task selection cardinality")
+        tid = picked[0]
         with neo_driver().session() as s:
             row = q_get_task(s, tid)
             if not row:
-                print(f"{tid}: not found"); continue
+                raise RuntimeError("Selected task could not be read")
             task = row["task"]
 
             run = {
@@ -1005,18 +1024,28 @@ def execute_ready(limit: int):
             }
             q_attach_run(s, tid, run)
 
-        # Execute out of tx
-        manifest_exec = execute_task_minimal(task)
-        results = run_acceptance(task, tid)
-        success = all(r["passed"] for r in results) if results else True
-
-        run["manifest"].update(manifest_exec)
-        run["manifest"]["acceptance_results"] = results
+        # Execute out of tx. A task-local exception must not abandon the
+        # remaining selected tasks. Persist only stage and exception type,
+        # never arbitrary exception text (which may contain sensitive data).
+        manifest_exec = {}
+        stage = "execute"
+        try:
+            manifest_exec = execute_task_minimal(task)
+            run["manifest"].update(manifest_exec)
+            stage = "acceptance"
+            results = run_acceptance(task, tid)
+            run["manifest"]["acceptance_results"] = results
+            success = all(r["passed"] for r in results) if results else True
+        except Exception as exc:
+            success = False
+            run["manifest"]["execution_error"] = {
+                "stage": stage, "type": type(exc).__name__,
+            }
 
         with neo_driver().session() as s:
             q_finish_run(s, tid, run["id"], success, run["manifest"])
 
-        print(f"{tid}: {'DONE' if success else 'FAILED'}  artifacts={manifest_exec['artifacts_dir']}")
+        print(f"{tid}: {'DONE' if success else 'FAILED'}  artifacts={manifest_exec.get('artifacts_dir', '')}")
 
 # ===========
 # CLI driver
