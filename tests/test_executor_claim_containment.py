@@ -32,7 +32,8 @@ def test_claim_only_current_task(failure):
         assert tasks[tid] == "READY"
         tasks[tid] = "RUNNING"
 
-    def execute(task):
+    def execute(task, *, run_id):
+        assert uuid.UUID(run_id)
         executed.append(task["id"])
         if failure == "interrupt":
             raise KeyboardInterrupt()
