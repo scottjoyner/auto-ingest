@@ -138,3 +138,43 @@ def publish_http_outcome(directory, *, task_id, run_id, url, status):
                    status=status, intent_sha256=hashlib.sha256(intent).hexdigest())
     return _publish_create_only(_http_path(directory, identity, "outcome"),
                                 _http_bytes(payload))
+
+
+def inspect_http_observation(intent, outcome, *, task_id, run_id, url):
+    """Classify caller-supplied bytes; no I/O, remote proof or replay authority.
+
+    An absent intent is not evidence of non-dispatch. Exact canonical records
+    establish only local observation consistency, not writer authentication.
+    """
+    identity = _http_identity(task_id, run_id, url)
+    expected_intent = _http_bytes(dict(identity, state="INTENT"))
+    result = {"classification": "HTTP_EVIDENCE_UNVERIFIED", "status": None,
+              "remote_completion_verified": False, "replay_allowed": False}
+    if intent is None and outcome is None:
+        result["classification"] = "HTTP_NO_EVIDENCE"
+        return result
+    if not isinstance(intent, bytes) or intent != expected_intent:
+        return result
+    if outcome is None:
+        result["classification"] = "HTTP_INTENT_ONLY_UNCERTAIN"
+        return result
+    if not isinstance(outcome, bytes) or len(outcome) > _MAX_RECEIPT_BYTES:
+        return result
+    try:
+        actual = json.loads(outcome)
+        if not isinstance(actual, dict):
+            return result
+        status = actual.get("status")
+        if status is not None and (type(status) is not int or not 100 <= status <= 599):
+            return result
+        expected = dict(identity, state="RESPONSE_OBSERVED" if status is not None else "UNCERTAIN",
+                        status=status, intent_sha256=hashlib.sha256(intent).hexdigest())
+        # Byte equality also rejects duplicate keys, extra fields and noncanonical records.
+        if outcome != _http_bytes(expected):
+            return result
+        result["classification"] = ("HTTP_LOCAL_RESPONSE_OBSERVED" if status is not None
+                                    else "HTTP_OUTCOME_UNCERTAIN")
+        result["status"] = status
+    except (ValueError, UnicodeError, RecursionError):
+        pass
+    return result
