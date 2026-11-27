@@ -373,6 +373,12 @@ class ReconciliationEvidence:
                                     "reconciliation.destination_only", c),
             mismatched=_count(raw.get("mismatched", raw.get("mismatch")),
                               "reconciliation.mismatched", c),
+            # to_dict() persists this field, and the strict-destination-scope
+            # release gate reads it. Dropping it on read made an imported
+            # reconciliation proposal silently erase the "other campaign's files
+            # are at this destination" fact and could open SAFE_TO_RELEASE.
+            foreign_objects=_count(raw.get("foreign_objects"),
+                                   "reconciliation.foreign_objects", c),
             reconciled_at=_opt_str(raw.get("reconciled_at")),
         )
 
