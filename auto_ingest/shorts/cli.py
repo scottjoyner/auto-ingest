@@ -160,7 +160,10 @@ def _cmd_render(args) -> int:
             skip_used_clips=True, upsert=args.upsert,
             skip_history=args.skip_history,
         )
-        if not args.upsert:
+        # --upsert is the gate: render_plan persists the manifest itself when
+        # clips were rendered, so the CLI only needs the fallback for the
+        # requested-but-nothing-rendered case. Without the flag no DB write.
+        if args.upsert and not paths:
             render.upsert_manifest(driver, plan, out_dir)
     finally:
         driver.close()
