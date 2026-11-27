@@ -95,7 +95,10 @@ def get_neo4j():
 
 
 def is_readonly(cypher: str) -> bool:
-    up = cypher.upper()
+    # Cypher treats any whitespace run as a token separator. Collapse whitespace
+    # before matching: the old literal "SET " check let "SET\n" / "SET\t" (and
+    # "WITH\nWRITE") through, and main() then handed the write to Session.run().
+    up = " ".join(cypher.upper().split())
     for banned in ["CREATE", "MERGE", "DELETE", "SET ", "REMOVE", "DROP", "WITH WRITE"]:
         if banned in up:
             return False
