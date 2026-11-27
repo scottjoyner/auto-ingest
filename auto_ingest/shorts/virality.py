@@ -15,6 +15,7 @@ actionable ``suggestions``. Pure over the model; no Neo4j / no moviepy.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -28,6 +29,20 @@ _GAP_WORDS = (
     "debunk", "fixed", "broke", "changed", "miss",
 )
 _NUMERIC = tuple("0123456789")
+
+# A gap word must be a WORD, not a substring of an unrelated word: "mission"
+# must not inherit the "miss" bonus, nor "believe" the "lie" bonus. The optional
+# suffix keeps deliberate stems and ordinary inflections working ("myster" ->
+# mystery/mysterious, "broke" -> broken, "miss" -> missing, "debunk" ->
+# debunked). Word boundaries on both sides block the vacuous matches the old
+# `w in text.lower()` containment produced.
+_GAP_INFLECTIONS = r"(?:s|es|ed|ing|ly|y|ious|n|d)?"
+_GAP_RE = re.compile(
+    r"(?<!\w)(?:"
+    + "|".join(re.escape(word) for word in _GAP_WORDS)
+    + r")" + _GAP_INFLECTIONS + r"(?!\w)",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -57,8 +72,13 @@ class ViralityScore:
 
 
 def _has_gap(text: str) -> bool:
-    t = text.lower()
-    return any(w in t for w in _GAP_WORDS)
+    """True only when ``text`` contains a gap word as a word, not a substring.
+
+    The old substring containment awarded a full curiosity-gap bonus to plain
+    prose ("a mission", "I believe", "the client", "reality", "truthful"),
+    which inflated both the hook and CTR factors used to rank shorts.
+    """
+    return bool(_GAP_RE.search(text))
 
 
 def _hook_strength(cues) -> "tuple[float, List[str]]":
