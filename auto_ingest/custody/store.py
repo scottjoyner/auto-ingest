@@ -327,7 +327,13 @@ def load_campaign(bundle: str | Path) -> Campaign:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise BundleError(f"campaign record at {path} is not an object")
-    return Campaign.from_dict(raw)
+    campaign = Campaign.from_dict(raw)
+    if not campaign.campaign_id.strip() or not campaign.card_id.strip():
+        # Every status, plan and gate names this campaign/card in its report.
+        # An identity-less record cannot be attributed and would collide with
+        # any other identity-less bundle, so refuse to load it.
+        raise BundleError(f"campaign record at {path} is missing campaign/card identity")
+    return campaign
 
 
 def load_evidence(bundle: str | Path, policy: CustodyPolicy | None = None) -> CampaignEvidence:
