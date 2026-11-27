@@ -64,15 +64,16 @@ def _cmd_plan(args) -> int:
         else:
             brief = curator.curate_brief(driver, args.topic, top_papers=args.top_papers)
         anchors = backdrop.select_highway_pool(driver, limit=args.pool)
+        # Pass the live driver so real graph content is mined (reveal + myth/fact)
+        # instead of falling back to templated text (S-G10).  Mining must happen
+        # while the driver is open -- the finally block below closes it.
+        plan = planner.plan_shorts(
+            brief, anchors, short_count=args.shorts, short_dur=args.dur,
+            shots_per_short=args.shots_per_short, seed=args.seed,
+            driver=driver,
+        )
     finally:
         driver.close()
-    # Pass the live driver so real graph content is mined (reveal + myth/fact)
-    # instead of falling back to templated text (S-G10).
-    plan = planner.plan_shorts(
-        brief, anchors, short_count=args.shorts, short_dur=args.dur,
-        shots_per_short=args.shots_per_short, seed=args.seed,
-        driver=driver,
-    )
     out = args.plans_dir or DEFAULT_PLANS_DIR
     path = Path(out) / f"{args.topic}__{plan.plan_id}.json"
     plan.save(path)
