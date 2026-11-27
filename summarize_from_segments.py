@@ -1048,13 +1048,21 @@ TIME: {datetime.datetime.utcnow().isoformat()}Z
             if not isinstance(url, str) or not url or url in observed_urls:
                 continue
             observed_urls.add(url)
+            if run_id is not None:
+                from auto_ingest.executor_evidence import publish_http_intent, publish_http_outcome
+                publish_http_intent(artdir, task_id=tid, run_id=run_id, url=url)
             try:
                 r = requests.get(url, timeout=10)
                 (artdir / "http.status").write_text(str(r.status_code), encoding="utf-8")
                 (artdir / "http.body.txt").write_text((r.text or "")[:4096], encoding="utf-8")
-                steps.append({"op":"http_get","url":url,"status":r.status_code,"bytes":len(r.content)})
+                observation = {"op":"http_get","url":url,"status":r.status_code,"bytes":len(r.content)}
             except Exception as e:
-                steps.append({"op":"http_get","url":url,"error":type(e).__name__})
+                observation = {"op":"http_get","url":url,"error":type(e).__name__}
+            if run_id is not None:
+                # Publication failure leaves an uncertain intent; never retry here.
+                publish_http_outcome(artdir, task_id=tid, run_id=run_id, url=url,
+                                     status=observation.get("status"))
+            steps.append(observation)
 
     return {
         "steps": steps,
