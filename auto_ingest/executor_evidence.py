@@ -96,3 +96,45 @@ def inspect_local_output(receipt, output, *, task_id, run_id):
         except (ValueError, UnicodeError, RecursionError):
             pass
     return {"classification": classification, "replay_allowed": False}
+
+
+def _http_identity(task_id, run_id, url):
+    _validate_identity(task_id, run_id)
+    if not isinstance(url, str) or not url:
+        raise ValueError("invalid HTTP target")
+    return {"schema": "executor-http-observation-v1", "task_id": task_id,
+            "run_id": run_id, "method": "GET",
+            "target_sha256": hashlib.sha256(url.encode("utf-8")).hexdigest(),
+            "scope": "LOCAL_OBSERVATION_ONLY"}
+
+
+def _http_bytes(payload):
+    return (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _http_path(directory, identity, kind):
+    return Path(directory) / (
+        f'run-{identity["run_id"]}-http-{identity["target_sha256"]}-{kind}.json')
+
+
+def publish_http_intent(directory, *, task_id, run_id, url):
+    """Persist intent before dispatch; existing intent is never replay authority."""
+    identity = _http_identity(task_id, run_id, url)
+    return _publish_create_only(_http_path(directory, identity, "intent"),
+                                _http_bytes(dict(identity, state="INTENT")))
+
+
+def publish_http_outcome(directory, *, task_id, run_id, url, status):
+    """Record a locally observed response or uncertainty, not remote completion."""
+    identity = _http_identity(task_id, run_id, url)
+    intent = _http_bytes(dict(identity, state="INTENT"))
+    # Require the matching create-only intent, with a bounded read.
+    with _http_path(directory, identity, "intent").open("rb") as handle:
+        if handle.read(len(intent) + 1) != intent:
+            raise ValueError("HTTP intent mismatch")
+    if status is not None and (type(status) is not int or not 100 <= status <= 599):
+        raise ValueError("invalid HTTP status")
+    payload = dict(identity, state="RESPONSE_OBSERVED" if status is not None else "UNCERTAIN",
+                   status=status, intent_sha256=hashlib.sha256(intent).hexdigest())
+    return _publish_create_only(_http_path(directory, identity, "outcome"),
+                                _http_bytes(payload))

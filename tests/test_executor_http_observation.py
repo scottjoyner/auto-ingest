@@ -125,5 +125,81 @@ class HttpObservationTests(unittest.TestCase):
                          f'run-{state["run_id"]}.json').exists())
 
 
+    def test_durable_intent_precedes_get_and_outcome_matches(self):
+        import hashlib
+        import json
+        rid = str(uuid.uuid4())
+        task = self.task("/ok?synthetic=private")
+        directory = pathlib.Path(self.temp.name) / "task"
+        real_get = requests.get
+
+        def check_intent(url, **kwargs):
+            intents = list(directory.glob("*-intent.json"))
+            self.assertEqual(len(intents), 1)
+            self.assertEqual(list(directory.glob("*-outcome.json")), [])
+            self.assertNotIn("private", intents[0].read_text())
+            return real_get(url, **kwargs)
+
+        with patch.object(requests, "get", side_effect=check_intent):
+            self.ns["execute_task_minimal"](task, run_id=rid)
+        intent = next(directory.glob("*-intent.json")).read_bytes()
+        outcome = json.loads(next(directory.glob("*-outcome.json")).read_bytes())
+        self.assertEqual(outcome["intent_sha256"], hashlib.sha256(intent).hexdigest())
+        self.assertEqual(outcome["state"], "RESPONSE_OBSERVED")
+        self.assertEqual(outcome["status"], 200)
+        self.assertEqual(outcome["scope"], "LOCAL_OBSERVATION_ONLY")
+
+    def test_intent_failure_prevents_network_call(self):
+        from auto_ingest import executor_evidence
+        with patch.object(executor_evidence, "publish_http_intent",
+                          side_effect=OSError("synthetic write failure")):
+            with self.assertRaises(OSError):
+                self.ns["execute_task_minimal"](self.task("/ok"), run_id=str(uuid.uuid4()))
+        self.assertEqual(self.hits, [])
+
+    def test_outcome_failure_preserves_intent_and_no_second_get(self):
+        from auto_ingest import executor_evidence
+        rid = str(uuid.uuid4())
+        with patch.object(executor_evidence, "publish_http_outcome",
+                          side_effect=OSError("synthetic write failure")):
+            with self.assertRaises(OSError):
+                self.ns["execute_task_minimal"](self.task("/ok"), run_id=rid)
+        directory = pathlib.Path(self.temp.name) / "task"
+        self.assertEqual(len(list(directory.glob("*-intent.json"))), 1)
+        self.assertEqual(list(directory.glob("*-outcome.json")), [])
+        with self.assertRaises(FileExistsError):
+            self.ns["execute_task_minimal"](self.task("/ok"), run_id=rid)
+        self.assertEqual(self.hits, ["/ok"])
+
+    def test_timeout_leaves_uncertain_outcome(self):
+        import json
+        with patch.object(requests, "get", side_effect=requests.Timeout("private detail")):
+            self.ns["execute_task_minimal"](self.task("/timeout"), run_id=str(uuid.uuid4()))
+        directory = pathlib.Path(self.temp.name) / "task"
+        outcome = next(directory.glob("*-outcome.json"))
+        data = json.loads(outcome.read_text())
+        self.assertEqual(data["state"], "UNCERTAIN")
+        self.assertIsNone(data["status"])
+        self.assertNotIn("private detail", outcome.read_text())
+
+    def test_create_only_and_intent_mismatch(self):
+        from auto_ingest.executor_evidence import publish_http_intent, publish_http_outcome
+        directory = pathlib.Path(self.temp.name)
+        args = dict(task_id="task", run_id=str(uuid.uuid4()), url=self.base + "/ok")
+        intent = publish_http_intent(directory, **args)
+        before = intent.read_bytes()
+        with self.assertRaises(FileExistsError):
+            publish_http_intent(directory, **args)
+        self.assertEqual(intent.read_bytes(), before)
+        outcome = publish_http_outcome(directory, **args, status=503)
+        prior = outcome.read_bytes()
+        with self.assertRaises(FileExistsError):
+            publish_http_outcome(directory, **args, status=200)
+        self.assertEqual(outcome.read_bytes(), prior)
+        intent.write_bytes(b"tampered")
+        with self.assertRaises(ValueError):
+            publish_http_outcome(directory, **args, status=503)
+
+
 if __name__ == "__main__":
     unittest.main()
