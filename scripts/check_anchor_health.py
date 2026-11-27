@@ -9,6 +9,7 @@ Usage:
     python3 scripts/check_anchor_health.py [--expected N] [--json]
 """
 import argparse
+import json
 import sys
 
 from auto_ingest.speaker_health import check_anchor_health, count_is_me_global_speakers
@@ -30,7 +31,12 @@ def main() -> int:
         except Exception:
             count = None
         if args.json:
-            print(f'{{"ok": false, "expected": {args.expected}, "actual": {count if count is not None else "null"}, "error": {ex!r}}}')
+            print(json.dumps({
+                "ok": False,
+                "expected": args.expected,
+                "actual": count,
+                "error": repr(ex),
+            }))
         else:
             print(f"ANCHOR UNHEALTHY: {ex}")
             if count is not None:
@@ -38,7 +44,7 @@ def main() -> int:
         return 1
     except Exception as ex:  # connection / query failure
         if args.json:
-            print(f'{{"ok": false, "error": {ex!r}}}')
+            print(json.dumps({"ok": False, "error": repr(ex)}))
         else:
             print(f"ANCHOR CHECK FAILED: {ex}")
         return 2
