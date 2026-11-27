@@ -569,6 +569,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Linker: full-graph dominance + labeling (heavy; final pass).")
     pr.add_argument("--promote", action="store_true",
                     help="Linker: promote tentative GlobalSpeakers to confirmed by evidence. ")
+    # _link_args() copies this field into the linker namespace on every run-all
+    # that links (the default). Without it on this subparser, a plain
+    # `auto-ingest run-all` dies with AttributeError before any stage runs.
+    pr.add_argument("--promote-min-weight", type=float, default=0.0,
+                    help="Linker: minimum weight_sum for --promote (0 = linker default).")
     pr.add_argument("--dry-run", action="store_true", help="Linker: do not write to Neo4j.")
     pr.add_argument("--state-file", type=str, default="",
                     help="Linker: resume state file of processed speaker IDs.")
