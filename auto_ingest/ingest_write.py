@@ -105,7 +105,10 @@ def read_intermediate(out_dir: str, key: str, stage: str, *, fmt: str = "json") 
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     elif fmt == "csv":
-        with open(path, "r", encoding="utf-8", newline="") as f:
+        # Accept a UTF-8 BOM from NAS/Excel-authored intermediates: decoding
+        # with utf-8-sig strips the marker so the first header/value is clean.
+        # Files we wrote ourselves have no BOM and read exactly as before.
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
             return [dict(r) for r in csv.DictReader(f)]
     raise ValueError(fmt)  # pragma: no cover - _validate_fmt already guards
 
