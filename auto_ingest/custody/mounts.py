@@ -91,7 +91,13 @@ class MountObservation:
         The conjunction the release gate wants: the storage being mounted does not
         by itself make a subdirectory destination reachable.
         """
-        return bool(self.present) and self.path_exists is not False
+        if self.backing_mount_point is not None:
+            # A subdirectory of a mount can only be called present when its
+            # existence was actually observed. `None` means the stat failed
+            # (EIO on a dead network share, for example); treating that as
+            # usable would report an unchecked path as fit for release.
+            return bool(self.present) and self.path_exists is True
+        return bool(self.present)
 
     @property
     def read_only(self) -> Optional[bool]:
