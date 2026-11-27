@@ -738,6 +738,16 @@ def score_draft(text: str) -> list[tuple[str, int, str]]:
     return rows
 
 
+def _report_title(title: str) -> str:
+    """Collapse a user-controlled title to one line before putting it in a report.
+
+    ``verify`` interpolates the title into the first line of ``verification.md``.
+    Without this, a title containing newlines can inject a fake ``## pass/fail``
+    / ``PASS`` section that the verdict reader would mistake for the real one.
+    """
+    return " ".join(str(title).split())
+
+
 def verify(root: Path, rid: str) -> Path:
     path = run_dir(root, rid)
     obj = load_object(path)
@@ -748,7 +758,7 @@ def verify(root: Path, rid: str) -> Path:
     banned = avoid_slop(text)
     passed = total >= threshold and not banned and "TODO" not in text
     md = [
-        f"# Verification: {obj.title}",
+        f"# Verification: {_report_title(obj.title)}",
         "",
         "## score breakdown",
         "",
@@ -796,7 +806,17 @@ def verify(root: Path, rid: str) -> Path:
 
 
 def verification_passed(path: Path) -> bool:
-    return "## pass/fail\nPASS" in read_text(path / "verification.md")
+    """Read the verdict ``verify`` actually wrote, not a substring from a header.
+
+    A whole-file substring test can be satisfied by forged text in a
+    newline-bearing title. Bind to the canonical ``## pass/fail`` section that
+    ``verify`` emits (always the last one) and check the line after it.
+    """
+    lines = read_text(path / "verification.md").splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].strip() == "## pass/fail":
+            return i + 1 < len(lines) and lines[i + 1].strip().startswith("PASS")
+    return False
 
 
 def approve(root: Path, rid: str, force: bool = False, reason: str = "") -> None:
