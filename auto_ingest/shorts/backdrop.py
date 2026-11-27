@@ -10,12 +10,19 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
 log = logging.getLogger("shorts.backdrop")
 
 DEFAULT_MPH_MIN = float(os.getenv("SHORTS_MPH_MIN", "45.0"))
+
+# Every camera-variant suffix a graph clip key may already carry. This is the
+# same vocabulary as ``transcripts._PAT_CAM_SUFFIX`` and the keys the YOLO
+# embedder strips in ``dashcam_yolo_embeddings_ents.clip_base_key``. Longest
+# alternatives first so _FR is not mistaken for a trailing _F.
+_CAMERA_VIEW_SUFFIX = re.compile(r"_(?:FR|RF|BC(?:-\d+)?|F|R)$", re.IGNORECASE)
 
 
 def _dashcam_root() -> Path:
@@ -27,10 +34,11 @@ def _fr_path_for_key(clip_key: str, root: Path) -> Optional[Path]:
     """Resolve the front-view MP4 for a clip key under the dashcam root.
 
     Clips are stored YYYY/MM/DD/<key>_F.MP4. The key in Neo4j may already carry
-    the ``_F`` suffix or not.
+    a camera-variant suffix (``_F``/``_R``/``_FR``/``_RF``/``_BC[-N]``) or not;
+    a key that already has one must never be given a second ``_F``.
     """
     key = clip_key
-    if not key.endswith(("_F", "_R")):
+    if not _CAMERA_VIEW_SUFFIX.search(key):
         key = f"{key}_F"
     # clip keys look like 2025_1002_175045_F -> 2025/10/02/2025_1002_175045_F.MP4
     parts = key.split("_")
