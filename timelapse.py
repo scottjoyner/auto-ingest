@@ -45,13 +45,18 @@ def iter_fr_videos(root: Path, recursive: bool) -> Iterable[Path]:
             yield p
 
 
+def _frtl_name(stem: str) -> str:
+    """`<key>_FR` -> `<key>_FRTL.MP4`; any other stem is preserved verbatim."""
+    base = stem[:-3] if stem.endswith("_FR") else stem
+    return f"{base}_FRTL.MP4"
+
+
 def output_path_for(src: Path, out_dir: Optional[Path], in_place: bool) -> Path:
+    name = _frtl_name(src.stem)
     if in_place:
-        stem = src.stem  # "<key>_FR"
-        base = stem[:-3] if stem.endswith("_FR") else stem
-        return src.with_name(f"{base}_FRTL.MP4")
+        return src.with_name(name)
     out_dir = out_dir or src.parent / DEFAULT_OUT_DIRNAME
-    return out_dir / f"{src.stem}_FRTL.MP4"
+    return out_dir / name
 
 
 def _free_space_gb(path: Path) -> float:
