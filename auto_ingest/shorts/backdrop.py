@@ -39,7 +39,9 @@ def _fr_path_for_key(clip_key: str, root: Path) -> Optional[Path]:
         month = mmdd[:2]
         day = mmdd[2:]
         cand = root / year / month / day / f"{key}.MP4"
-        if cand.exists():
+        # A zero-byte MP4 is a truncated recording, not usable footage (same
+        # rule as media_pairing.find_sibling_media); a directory is not a clip.
+        if cand.is_file() and cand.stat().st_size > 0:
             return cand
     # NOTE: no recursive rglob fallback here -- scanning the whole dashcam
     # tree per clip (millions of files, often on a saturated NAS mount) is a
