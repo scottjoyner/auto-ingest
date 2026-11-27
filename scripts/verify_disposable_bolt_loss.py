@@ -225,7 +225,7 @@ def main():
         if cid:
             cmd("docker","stop","--time","5",cid,timeout=15)
             deadline=time.monotonic()+10
-            while subprocess.run(["docker","container","inspect",cid],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=3).returncode==0:
+            while fixture.fixture_present(cid):
                 if time.monotonic()>deadline:raise RuntimeError("fixture remains")
                 time.sleep(.5)
             print("FIXTURE_ABSENT",cid[:12],flush=True)
