@@ -72,7 +72,12 @@ def main() -> int:
             if _is_allowed_file(p):
                 continue
             try:
-                text = p.read_text(encoding="utf-8", errors="strict")
+                # Decode with replacement, not strict: a PEP 263 source file in
+                # another encoding can hold one non-UTF-8 byte anywhere. With
+                # strict decoding that made the *whole* file unreadable, so a
+                # bare literal on another line was silently skipped and the
+                # CI gate passed. ASCII-compatible bytes still decode here.
+                text = p.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
             for i, line in enumerate(text.splitlines(), 1):
