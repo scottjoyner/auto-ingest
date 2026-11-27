@@ -28,6 +28,21 @@ def _norm(value: Optional[str]) -> str:
     return (value or "").strip().upper()
 
 
+def _strict_bool(value: Any, name: str) -> bool:
+    """Parse a declared boolean, refusing values that are not booleans."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    raise ValueError(f"{name} must be a boolean")
+
+
 def _fingerprint(*parts: Optional[str]) -> str:
     blob = _ID_SEP.join(_norm(p) for p in parts)
     if not blob.replace(_ID_SEP, ""):
@@ -167,7 +182,7 @@ class SourceRef:
         raw = raw or {}
         return cls(
             mount_point=_opt(raw.get("mount_point") or raw.get("mount")),
-            read_only=bool(raw.get("read_only", False)),
+            read_only=_strict_bool(raw.get("read_only", False), "read_only"),
             card=CardIdentity.from_dict(raw),
         )
 
