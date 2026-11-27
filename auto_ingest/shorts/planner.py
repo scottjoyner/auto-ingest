@@ -12,6 +12,7 @@ explore variations. Nothing here touches moviepy — it is pure scheduling.
 from __future__ import annotations
 
 import logging
+import math
 import random
 import uuid
 from datetime import datetime, timedelta
@@ -410,13 +411,21 @@ def _mine_speed_events(driver, per_kind: int, limit: int) -> List[Dict[str, obje
     for r in rows:
         fps = r.get("fps") or 30.0
         frame = r.get("frame") or 0
+        # mph is an untrusted graph property: null, string, boolean and
+        # non-finite values must not abort the whole highlights plan.
+        raw_mph = r.get("mph")
+        mph = (float(raw_mph)
+               if isinstance(raw_mph, (int, float)) and not isinstance(raw_mph, bool)
+               else None)
+        if mph is not None and not math.isfinite(mph):
+            mph = None
         events.append({
             "kind": "speed",
             "clip_key": r.get("clip_key"),
             "idx": frame,
             "t_sec": float(frame) / float(fps) if fps else 0.0,
-            "mph": r.get("mph"),
-            "label": f"🚀 {r.get('mph'):.0f} mph",
+            "mph": mph,
+            "label": f"🚀 {mph:.0f} mph" if mph is not None else "🚀 speed unknown",
             "text": "",
         })
     return events
