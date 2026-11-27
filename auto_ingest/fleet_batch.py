@@ -128,7 +128,10 @@ def run_batch(args: argparse.Namespace) -> int:
         except Exception as e:
             print(f"[fleet-batch] FAILED {item}: {e}", file=sys.stderr)
     print(f"[fleet-batch] done: {created}/{len(items)} tasks created", file=sys.stderr)
-    return 0
+    # A batch is only done when every item was queued. Callers gate on this
+    # status to decide whether the date-root work is covered, so a dropped item
+    # (or a total AssistX outage) must not read as a successful run.
+    return 0 if created == len(items) else 1
 
 
 def main() -> None:
