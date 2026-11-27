@@ -271,7 +271,11 @@ class BaseAdapter:
     needs: List[str] = []
 
     def available(self) -> bool:
-        return all(os.environ.get(k) for k in self.needs)
+        # ``all([])`` is True, so an empty requirement list would attest
+        # credentials that were never declared. An adapter with no declared
+        # needs is unconfigured, not available: fail closed instead of opening
+        # the live-upload gate on a vacuous truth.
+        return bool(self.needs) and all(os.environ.get(k) for k in self.needs)
 
     def upload(self, item: QueueItem, *, dry_run: bool = True) -> Optional[str]:
         raise NotImplementedError
