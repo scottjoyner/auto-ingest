@@ -138,6 +138,20 @@ class CampaignStatus:
             },
             "created_at": campaign.created_at,
             "source_release": ev.source_release.to_dict(),
+            # `report.status_text` reads this key to print the *observed* mount
+            # answer instead of the creation-time snapshot. It was never emitted,
+            # so every human-mode status fell back to "mounted=<snapshot>
+            # (unobserved)" -- false for a network destination whose share is
+            # mounted and whose backing mount the release gate just proved.
+            # Carry the observation in the exact shape the renderer expects, so
+            # JSON and text expose the same facts.
+            "destination_observed": {
+                "observed_usable": ev.destination.observed_usable,
+                "observation": {
+                    "backing_mount_point": ev.destination.observed_backing_mount_point,
+                    "is_mount_point": ev.destination.observed_backing_mount_point is None,
+                },
+            },
             "destination": {
                 "canonical": campaign.destination.logical.canonical,
                 "host_path": campaign.destination.host_path,
