@@ -38,7 +38,11 @@ def detection_stem(filename: str) -> Optional[str]:
     m = _DETECTION_RE.search(filename)
     if not m:
         return None
-    return filename[: m.start()].rsplit("_YOLOv8n", 1)[0]
+    # The anchored regex already removed exactly one detection suffix. Do not
+    # strip a second one: a clip key may itself end in "_YOLOv8n", and a
+    # case-sensitive rsplit here would silently rename that key and pair the
+    # detection with a different (usually absent) clip.
+    return filename[: m.start()]
 
 
 def find_sibling_media(directory: str, key: str) -> Optional[str]:
