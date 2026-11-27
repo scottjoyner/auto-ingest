@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import math
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -179,14 +180,28 @@ def _coerce_num(v: Any, as_int: bool = True) -> Optional[float]:
     if v is None:
         return None
     if isinstance(v, (int, float)):
-        return int(v) if as_int else float(v)
+        # A non-finite float is not a metric value; admitting it poisons the
+        # JSONL store (NaN/Infinity) and the downstream feedback aggregates.
+        if isinstance(v, float) and not math.isfinite(v):
+            return None
+        try:
+            return int(v) if as_int else float(v)
+        except (OverflowError, ValueError):  # e.g. an int too large for float()
+            return None
     s = str(v).strip().replace(",", "").replace("%", "")
     if s == "":
         return None
     try:
-        return int(float(s)) if as_int else float(s)
-    except ValueError:
+        f = float(s)
+    except (ValueError, OverflowError):
         return None
+    # float() accepts the non-standard 'inf'/'-inf'/'nan' literals that JSON
+    # exports can carry. ``int(float('inf'))`` raises OverflowError, which the
+    # old ``except ValueError`` did not catch, aborting the whole ingest; the
+    # float path silently persisted NaN/Infinity. Both are now missing values.
+    if not math.isfinite(f):
+        return None
+    return int(f) if as_int else f
 
 
 def _coerce_str(v: Any) -> str:
