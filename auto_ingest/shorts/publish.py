@@ -128,7 +128,13 @@ def scan_rendered(out_root: Path) -> List[Publishable]:
     out: List[Publishable] = []
     if not root.exists():
         return out
-    for mp4 in sorted(root.rglob("*.mp4")):
+    # Match the extension case-insensitively: card/rip pipelines in this fleet
+    # write ``.MP4`` as routinely as ``.mp4``, and a case-sensitive glob silently
+    # dropped every upper-case render from the DB-independent staging path (the
+    # one used when Neo4j is saturated), so those shorts were never queued.
+    for mp4 in sorted(root.rglob("*")):
+        if not mp4.is_file() or mp4.suffix.lower() != ".mp4":
+            continue
         topic = mp4.parent.name
         key = mp4.stem
         out.append(Publishable(

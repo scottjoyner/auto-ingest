@@ -8,6 +8,8 @@ Covers the dry-run / metadata plumbing around the upload adapters:
   - validate_queue reports missing files / thumbnails
 """
 
+import json
+
 from auto_ingest.shorts import publish, scheduling, uploader
 from auto_ingest.shorts.models import Brief, Cue, Plan, PlannedShort
 
@@ -37,6 +39,43 @@ def test_scan_rendered_finds_mp4s(tmp_path, monkeypatch):
     assert {i.key for i in items} == {"s1", "s2"}
     assert all(i.topic == "llm" for i in items)
     assert all(i.out_path.endswith(".mp4") for i in items)
+
+
+def test_scan_rendered_finds_uppercase_mp4(tmp_path, monkeypatch):
+    """Upper-case ``.MP4`` renders must not vanish from DB-independent staging.
+
+    The dashcam/rip side of this fleet writes ``.MP4`` as routinely as
+    ``.mp4``; a case-sensitive ``*.mp4`` glob dropped those shorts from
+    ``publish queue --disk`` whenever Neo4j was unavailable.
+    """
+    monkeypatch.setattr(publish, "QUEUE_PATH", tmp_path / "queue.jsonl")
+    topic_dir = tmp_path / "llm"
+    topic_dir.mkdir()
+    (topic_dir / "s1.mp4").write_bytes(b"x")
+    (topic_dir / "s2.MP4").write_bytes(b"x")
+    (topic_dir / "s3.mP4").write_bytes(b"x")
+    (topic_dir / "notes.txt").write_text("ignore")
+
+    items = publish.scan_rendered(tmp_path)
+    assert {i.key for i in items} == {"s1", "s2", "s3"}
+    assert all(i.topic == "llm" for i in items)
+    assert all(i.out_path.lower().endswith(".mp4") for i in items)
+
+
+def test_queue_all_on_disk_stages_uppercase_mp4(tmp_path, monkeypatch):
+    monkeypatch.setattr(publish, "QUEUE_PATH", tmp_path / "queue.jsonl")
+    topic_dir = tmp_path / "llm"
+    topic_dir.mkdir()
+    (topic_dir / "s2.MP4").write_bytes(b"x")
+
+    assert publish.queue_all_on_disk(tmp_path, ["youtube_shorts"]) == 1
+    lines = [ln for ln in (tmp_path / "queue.jsonl").read_text().splitlines() if ln]
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["key"] == "s2"
+    assert rec["out_path"].endswith(".MP4")
+    # Still idempotent for the upper-case path.
+    assert publish.queue_all_on_disk(tmp_path, ["youtube_shorts"]) == 0
 
 
 def test_queue_all_on_disk_idempotent(tmp_path, monkeypatch):
