@@ -740,8 +740,20 @@ def model_rank(tag: str) -> int:
     return 9999
 
 def is_in_audio_base(p: str) -> bool:
-    try: return str(Path(p).resolve()).startswith(str(AUDIO_BASE.resolve()))
-    except Exception: return False
+    """True only when ``p`` resolves to a path *inside* ``AUDIO_BASE``.
+
+    A string ``startswith`` on the resolved paths also accepts a sibling whose
+    name merely begins with the base name (``.../audio_backup/x.json`` for base
+    ``.../audio``). Because this predicate is the first sort key in
+    ``select_best_json``, such a misclassified sidecar outranks a genuine
+    in-base transcript. Compare path components instead.
+    """
+    try:
+        base = str(Path(AUDIO_BASE).resolve())
+        candidate = str(Path(p).resolve())
+        return os.path.commonpath([base, candidate]) == base
+    except Exception:
+        return False
 
 def select_best_json(json_paths: List[str], csv_paths: List[str]) -> Optional[str]:
     if not json_paths: return None
