@@ -11,11 +11,13 @@ Run per KG:
   embed_coverage.py --uri bolt://100.64.43.123:7687 --prop emb_e5_large --labels Chunk
 """
 from __future__ import annotations
-import os
-import sys
+
 import argparse
 import logging
+import os
+
 from neo4j import GraphDatabase
+
 from auto_ingest_config import get_neo4j_password
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -39,6 +41,10 @@ def main() -> int:
     driver = GraphDatabase.driver(args.uri, auth=(args.user, args.password))
     total_nodes = 0
     total_done = 0
+    # A label whose count query fails must not silently vanish from the report:
+    # an "overall: 100%" built from a subset of the labels is a false all-clear.
+    # Keep auditing the rest, but record the omission and fail closed at the end.
+    failed_labels: list[str] = []
     with driver.session() as s:
         logging.info("=== coverage for %s prop=%s ===", args.uri, args.prop)
         for lbl in args.labels:
@@ -49,7 +55,8 @@ def main() -> int:
                     f"RETURN count(n)"
                 ).single().values()[0]
             except Exception as e:
-                logging.warning("%s: label query failed (%s)", lbl, e)
+                logging.error("%s: label query failed (%s); label omitted from coverage", lbl, e)
+                failed_labels.append(lbl)
                 continue
             done = s.run(
                 f"MATCH (n:{lbl}) WHERE n.{args.prop} IS NOT NULL RETURN count(n)"
@@ -61,8 +68,13 @@ def main() -> int:
             total_done += done
     overall = (100.0 * total_done / total_nodes) if total_nodes else 0.0
     logging.info("=== overall: %d/%d (%.1f%%) ===", total_done, total_nodes, overall)
+    if failed_labels:
+        logging.error(
+            "=== coverage incomplete: %d label(s) could not be audited: %s ===",
+            len(failed_labels), ", ".join(failed_labels),
+        )
     driver.close()
-    return 0
+    return 1 if failed_labels else 0
 
 
 if __name__ == "__main__":
