@@ -399,8 +399,10 @@ def cmd_ingest(args) -> int:
         if args.nextcloud_pass:
             cli += ["--nextcloud-pass", args.nextcloud_pass]
         cli += ["--nextcloud-root", args.nextcloud_root]
-    if args.source:
-        cli += ["--source", args.source]
+    # A local --root scan is not a Nextcloud pull. Resolve the provenance label
+    # from the selected source mode; an explicit --source still wins.
+    source = args.source or ("local" if args.root else "nextcloud")
+    cli += ["--source", source]
     cli += ["--kind", args.kind]
     if args.state:
         cli += ["--state", args.state]
@@ -629,7 +631,8 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--nextcloud-pass", help="Nextcloud WebDAV password/app-token")
     pi.add_argument("--nextcloud-root", default="Photos",
                     help="Subfolder under the user's files when URL is the bare server root")
-    pi.add_argument("--source", default="nextcloud", help="source label for MediaFile nodes")
+    pi.add_argument("--source", default=None,
+                    help="source label for MediaFile nodes (default: local for --root, nextcloud otherwise)")
     pi.add_argument("--kind", choices=["movie", "picture", "all"], default="all")
     pi.add_argument("--state", default="./media_ingest.json", help="Resume state file")
     pi.add_argument("--limit", type=int, default=0, help="Max files this run (0=all)")
