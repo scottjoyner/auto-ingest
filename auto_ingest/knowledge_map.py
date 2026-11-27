@@ -263,6 +263,11 @@ def _export_label(sess, label: str, out_root: Path, budget: int) -> int:
     """Page through one label and write one md file per node. Bounded by budget."""
     written = 0
     skip = 0
+    # `_safe_filename` folds punctuation to "_" and truncates long names, so two
+    # distinct nodes can map to the SAME file (e.g. "A/B" and "A_B"). Writing one
+    # file per node then silently replaces one node's markdown with the other's.
+    # Remember what this export emitted and disambiguate on collision instead.
+    used: set[str] = set()
     while written < budget:
         rows = sess.run(
             f"MATCH (n:`{label}`) RETURN n LIMIT $lim SKIP $skip",
@@ -277,6 +282,19 @@ def _export_label(sess, label: str, out_root: Path, budget: int) -> int:
             props = dict(node) if node is not None else {}
             name = props.get("title") or props.get("name") or props.get("key") or f"{label}_{skip}_{written}"
             fname = _safe_filename(f"{label}_{name}")
+            if fname in used:
+                # Stable for a given name, independent of where it appeared in
+                # the paging order; a numeric suffix breaks any digest tie.
+                digest = hashlib.sha256(str(name).encode("utf-8", "replace")).hexdigest()[:8]
+                stem = fname[:-3] if fname.endswith(".md") else fname
+                ext = fname[-3:] if fname.endswith(".md") else ""
+                candidate = f"{stem}-{digest}{ext}"
+                n = 2
+                while candidate in used:
+                    candidate = f"{stem}-{digest}-{n}{ext}"
+                    n += 1
+                fname = candidate
+            used.add(fname)
             md = _node_to_markdown(label, props)
             (out_root / fname).write_text(md, encoding="utf-8")
             written += 1

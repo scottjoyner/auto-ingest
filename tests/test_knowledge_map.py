@@ -92,3 +92,50 @@ def test_vault_roots_dedupe_and_resolve():
         __import__("pathlib").Path("/x/nas-knowledge"),
         __import__("pathlib").Path("/x/canonical"),
     ]
+
+
+def test_export_label_never_overwrites_a_distinct_node_on_filename_collision(tmp_path):
+    """Distinct nodes whose names sanitize to one filename must all be exported.
+
+    ``_safe_filename`` folds every non-alphanumeric char to ``_`` and truncates
+    to 120 chars. ``A/B`` and ``A_B`` therefore map to the same ``A_B.md``, as
+    do two titles sharing their first 120 characters. When the exporter writes
+    one markdown file per node, the later node silently replaces the earlier
+    one in the mirror vault - graph content lost with no error and no log line.
+    """
+    class _Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def data(self):
+            return list(self._rows)
+
+    rows = [
+        {"n": {"title": "A/B"}},
+        {"n": {"title": "A_B"}},
+        {"n": {"title": "z" * 200 + "-first"}},
+        {"n": {"title": "z" * 200 + "-second"}},
+    ]
+
+    class _Session:
+        def run(self, query, **kwargs):
+            lim, skip = kwargs["lim"], kwargs["skip"]
+            return _Result(rows[skip:skip + lim])
+
+    written = km._export_label(_Session(), "VaultDocument", tmp_path, budget=100)
+    assert written == len(rows)
+
+    files = sorted(p.name for p in tmp_path.glob("*.md"))
+    assert len(files) == len(rows), (
+        f"expected {len(rows)} distinct export files, got {files}"
+    )
+    contents = "\n".join(p.read_text(encoding="utf-8") for p in tmp_path.glob("*.md"))
+    for title in ("A/B", "A_B", "z" * 200 + "-first", "z" * 200 + "-second"):
+        assert title in contents, f"node {title!r} was silently dropped from the export"
+
+    # Disambiguation is stable: a repeat export yields the same filenames, not
+    # an ever-growing -2/-3 suffix series.
+    again = tmp_path / "again"
+    again.mkdir()
+    km._export_label(_Session(), "VaultDocument", again, budget=100)
+    assert sorted(p.name for p in again.glob("*.md")) == files
