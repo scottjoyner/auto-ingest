@@ -62,6 +62,68 @@ def verify_operator_report(root, env, target):
     return 3
 
 
+
+def verify_operation_cli(root, env, target, q, port, password):
+    """Actual installed combined report against the disposable graph.
+
+    Fixture Community admin is not a production read-only RBAC assertion.
+    """
+    from auto_ingest.executor_evidence import (
+        publish_http_intent,
+        publish_local_output_receipt,
+        publish_run_output,
+    )
+
+    directory = root / "combined-operation-fixture"
+    directory.mkdir()
+    identity = {"task_id": "report-fixture", "run_id": "22222222-2222-4222-8222-222222222222",
+                "url": "http://127.0.0.1:1/report?marker=synthetic-private"}
+    contract = json.dumps([{"type": "http_ok", "args": {"url": identity["url"]}}])
+    q("CREATE (t:Task {id:$tid,status:'RUNNING',active_run_id:$rid,acceptance_json:$contract})"
+      "-[:HAS_RUN]->(:Run {id:$rid,status:'RUNNING'})",
+      tid=identity["task_id"], rid=identity["run_id"], contract=contract)
+    publish_http_intent(directory, **identity)
+    output = ("fixture\nRUN: " + identity["run_id"] + "\n").encode()
+    local = {"task_id": identity["task_id"], "run_id": identity["run_id"], "output": output}
+    publish_run_output(directory, **local)
+    publish_local_output_receipt(directory, **local)
+    clean = {"PATH": env["PATH"], "HOME": str(root), "PYTHONDONTWRITEBYTECODE": "1",
+             "NO_PROXY": "*", "EXECUTOR_REPORT_USER": "neo4j",
+             "EXECUTOR_REPORT_PASSWORD": password}
+    if target:
+        clean["PYTHONPATH"] = str(target)
+
+    def invoke():
+        return subprocess.run(
+            [sys.executable, "-m", "auto_ingest.executor_operation_cli",
+             "--artifact-dir", str(directory), "--bolt-port", str(port), "--database", "neo4j",
+             "--confirm-read-only-admission"], cwd=root, env=clean,
+            input=json.dumps(identity), capture_output=True, text=True, timeout=15)
+
+    before = {p.name: p.read_bytes() for p in directory.iterdir()}
+    graph_query = ("MATCH (t:Task {id:$tid})-[:HAS_RUN]->(r:Run) "
+                   "RETURN properties(t) AS task,properties(r) AS run")
+    graph_before = q(graph_query, tid=identity["task_id"])
+    failure = invoke()
+    assert failure.returncode == 2 and not failure.stdout
+    assert "no replay" in failure.stderr
+    q("CREATE INDEX FOR (t:Task) ON (t.id)")
+    q("CALL db.awaitIndexes(20)")
+    success = invoke()
+    assert success.returncode == 0, "combined installed CLI failed"
+    result = json.loads(success.stdout)
+    assert result["graph_classification"] == "RUNNING_OWNER_MATCH"
+    assert result["local_output"] == "LOCAL_OUTPUT_BYTES_MATCH"
+    assert result["http"]["classification"] == "HTTP_INTENT_ONLY_UNCERTAIN"
+    assert result["replay_allowed"] is False and result["activation_allowed"] is False
+    assert result["remote_completion_verified"] is False and result["atomic_snapshot"] is False
+    assert identity["url"] not in success.stdout and password not in success.stdout + success.stderr
+    assert before == {p.name: p.read_bytes() for p in directory.iterdir()}
+    assert graph_before == q(graph_query, tid=identity["task_id"])
+    print("INSTALLED_COMBINED_OPERATION_PASS 2/2", flush=True)
+    return 2
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--wheel", required=True, type=pathlib.Path)
@@ -138,9 +200,9 @@ def main():
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(1)
-        def q(cypher):
+        def q(cypher, **params):
             with driver.session() as session:
-                return session.run(cypher).data()
+                return session.run(cypher, **params).data()
         assert q("MATCH (n) RETURN count(n) AS n") == [{"n": 0}], "fixture not empty"
         db_version = driver.get_server_info().agent
         q("CREATE (t:Transcription {id:'clip',notes:'original'})-[:HAS_SEGMENT]->"
@@ -191,12 +253,15 @@ def main():
             assert counts() == [1, 1, 1] and len(calls) == 3
             print("POSITIVE_PASS", flush=True)
             operator_cases = verify_operator_report(root, env, target)
+            combined_cases = verify_operation_cli(root, env, target, q, port, password)
         report = {"schema": 1, "commit": args.commit, "wheel": wheel.name,
                   "wheel_bytes": wheel.stat().st_size, "wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
                   "python": sys.version.split()[0], "dependencies": deps, "neo4j": db_version,
                   "negative_counts": [0, 0, 0], "terminal_counts": [1, 1, 1],
                   "fixture_http_calls": len(calls), "model_inference_calls": 0,
                   "local_receipts_verified": 1, "operator_report_cases": operator_cases,
+                  "combined_operation_report_cases": combined_cases,
+                  "production_read_only_rbac_verified": False,
                   "acceptance": "PASS",
                   "production_activation_allowed": False}
         with manifest.open("x", encoding="utf-8") as f:
