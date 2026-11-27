@@ -82,8 +82,8 @@ from .store import (
     new_campaign,
     reconcile_preview,
 )
+from .verify import VerifyUnavailable, verify_destination
 from .verify import to_evidence as verify_evidence
-from .verify import verify_destination
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -414,12 +414,19 @@ def cmd_verify(args) -> int:
         # Same recorded layout `execute` used. Verifying at the source-relative
         # path would report every staged copy as MISSING, which reads as a failed
         # transfer rather than a lookup in the wrong place.
-        result = verify_destination(
-            args.bundle, destination, algorithm=args.algorithm,
-            limit=args.limit, recheck=args.recheck,
-            staged_destinations=(None if getattr(args, "flat", False)
-                                 else read_staged_ledger(args.bundle)),
-        )
+        try:
+            result = verify_destination(
+                args.bundle, destination, algorithm=args.algorithm,
+                limit=args.limit, recheck=args.recheck,
+                staged_destinations=(None if getattr(args, "flat", False)
+                                     else read_staged_ledger(args.bundle)),
+            )
+        except VerifyUnavailable as exc:
+            # Refuse the whole pass. No destination rows were written and no
+            # evidence fragment is produced, so a partial source set cannot
+            # become a "verification_complete: true" claim on this campaign.
+            print(f"custody: {exc}", file=sys.stderr)
+            return EXIT_GATE_CLOSED
         payload["verification"] = result.to_dict()
         payload["objects_to_verify"] = result.checked
         payload["objects_already_verified"] = result.skipped_existing + result.verified
