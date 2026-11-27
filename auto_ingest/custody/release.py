@@ -12,7 +12,7 @@ stopped worker implies. It is the single boolean produced here, and it is only
 * the copy result is attested complete with a complete ledger;
 * destination verification is complete;
 * mismatches = 0, missing destination = 0;
-* no unresolved errors;
+* no unresolved or fatal errors;
 * the copy plan covered the required scope (nothing silently dropped).
 
 Every condition is evaluated on every call - the gate never short-circuits -
@@ -104,6 +104,7 @@ CONDITION_ORDER: Tuple[str, ...] = (
     "mismatch_count_zero",
     "missing_destination_zero",
     "unresolved_errors_zero",
+    "fatal_errors_zero",
     "plan_scope_covers_required_objects",
     "operator_witness_recorded",
     "destination_scope_strict",
@@ -309,6 +310,16 @@ def evaluate_release(
             "unresolved_errors",
             f"unresolved={evidence.errors.unresolved}",
             "resolve every campaign error before release",
+        ))
+    # A fatal error already blocks the derived state; the release gate must not
+    # disagree. ``unresolved`` counts open problems, while ``fatal`` records that
+    # a pass failed outright, so neither count subsumes the other.
+    if evidence.errors.fatal:
+        blockers.append(Blocker(
+            "fatal_errors_present",
+            f"fatal={evidence.errors.fatal}",
+            "read the fatal error summaries and re-run the failed pass before "
+            "considering source release",
         ))
 
     required = policy.required_objects(inv.discovered_files, hsh.verified_files)
