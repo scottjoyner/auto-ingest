@@ -636,15 +636,23 @@ def _legacy_sync_script() -> Optional[str]:
     return str(candidate) if candidate.is_file() else None
 
 
-def _queued_jobs(job_dir: Optional[str]) -> Tuple[int, ...]:
-    """Count queued ``.job`` files. A read of one directory, no enumeration of /nas."""
+def _queued_jobs(job_dir: Optional[str]) -> Optional[Tuple[str, ...]]:
+    """List queued ``.job`` files; None means the directory could not be read."""
     if not job_dir:
         return ()
     try:
         entries = os.listdir(job_dir)
     except OSError:
-        return ()
+        # A queue we cannot list is NO DATA, not an empty queue.
+        return None
     return tuple(sorted(e for e in entries if e.endswith(".job")))
+
+
+def _no_competing_jobs(queued: Optional[Tuple[str, ...]]) -> Optional[bool]:
+    """Turn a queue listing into the preflight verdict, preserving NO DATA."""
+    if queued is None:
+        return None
+    return not queued
 
 
 def cmd_preflight(args) -> int:
@@ -700,8 +708,9 @@ def cmd_preflight(args) -> int:
     add("capacity_sufficient", cap.sufficient,
         f"need={cap.total_needed} available={cap.available_bytes}",
         "free space at the destination, or point at a larger one")
-    add("no_competing_jobs", not queued,
-        f"queued={len(queued)}" + (f" {queued[:5]}" if queued else ""),
+    add("no_competing_jobs", _no_competing_jobs(queued),
+        ("queue directory unavailable" if queued is None else
+         f"queued={len(queued)}" + (f" {queued[:5]}" if queued else "")),
         "let the existing worker drain the queue, or stop it for the campaign")
 
     dest_key = campaign_obj.destination.logical.canonical
