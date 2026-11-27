@@ -663,7 +663,15 @@ def scan_foreign_objects(
 
     tolerated = {os.path.normpath(str(t)) for t in tolerate}
     foreign: List[str] = []
-    for dirpath, dirnames, filenames in os.walk(root):
+
+    def _walk_error(exc: OSError) -> None:
+        # os.walk silently skips directories it cannot open. Reporting the
+        # partial count as the whole answer would let an unreadable subtree -
+        # possibly a second campaign - vanish from strict_destination_scope.
+        # Fail the whole walk instead of laundering incomplete evidence.
+        raise exc
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_walk_error):
         rel_dir = os.path.relpath(dirpath, root)
         if rel_dir == ".":
             rel_dir = ""
