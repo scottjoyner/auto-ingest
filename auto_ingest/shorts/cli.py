@@ -369,7 +369,15 @@ def _brand_check(brand_dir: Path) -> "tuple[bool, list]":
             ok = False
             issues.append(f"bio missing for {plat}")
 
-    expected = {"avatar": (1000, 1000), "banner_youtube": (2560, 1440)}
+    # Audit every asset the generator emits (gen_brand_assets.py), with its
+    # canonical size. Omitting the platform avatars let brand-check report OK
+    # while avatar_instagram.png / avatar_tiktok.png were missing or corrupt.
+    expected = {
+        "avatar": (1000, 1000),
+        "banner_youtube": (2560, 1440),
+        "avatar_instagram": (640, 640),
+        "avatar_tiktok": (720, 720),
+    }
     for key, (ew, eh) in expected.items():
         rel = (data.get("assets") or {}).get(key)
         if not rel:

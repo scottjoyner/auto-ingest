@@ -238,6 +238,57 @@ def test_brand_check_fails_when_asset_missing(tmp_path, monkeypatch):
     assert any("asset missing" in i for i in issues)
 
 
+def test_brand_check_detects_missing_platform_avatars(tmp_path):
+    """brand-check must audit all four generator assets, not only the first two.
+
+    The manifest declares avatar_instagram.png and avatar_tiktok.png alongside
+    avatar.png / banner_youtube.png. Previously they were silently skipped, so
+    missing platform avatars still produced ``ok=True`` (fail-open).
+    """
+    import json as _json
+    import shutil
+    from pathlib import Path
+
+    from auto_ingest.shorts.cli import _brand_check
+
+    src = Path(__file__).resolve().parent.parent / "docs" / "brand"
+    manifest = _json.loads((src / "brand_manifest.json").read_text(encoding="utf-8"))
+    (tmp_path / "brand_manifest.json").write_text(
+        _json.dumps(manifest), encoding="utf-8")
+    # Ship only the two assets the old checker validated.
+    for name in ("avatar.png", "banner_youtube.png"):
+        shutil.copy(src / name, tmp_path / name)
+
+    ok, issues = _brand_check(tmp_path)
+    assert not ok
+    assert any("avatar_instagram.png" in i for i in issues)
+    assert any("avatar_tiktok.png" in i for i in issues)
+
+
+def test_brand_check_detects_wrong_platform_avatar_size(tmp_path):
+    """The platform avatar dimensions are part of the brand contract."""
+    import json as _json
+    import shutil
+    from pathlib import Path
+
+    from PIL import Image
+
+    from auto_ingest.shorts.cli import _brand_check
+
+    src = Path(__file__).resolve().parent.parent / "docs" / "brand"
+    manifest = _json.loads((src / "brand_manifest.json").read_text(encoding="utf-8"))
+    (tmp_path / "brand_manifest.json").write_text(
+        _json.dumps(manifest), encoding="utf-8")
+    for name in manifest["assets"].values():
+        shutil.copy(src / name, tmp_path / name)
+    # Corrupt one platform avatar's dimensions without removing the file.
+    Image.new("RGB", (1, 1)).save(tmp_path / "avatar_tiktok.png")
+
+    ok, issues = _brand_check(tmp_path)
+    assert not ok
+    assert any("avatar_tiktok.png" in i and "expected" in i for i in issues)
+
+
 # --------------------------------------------------------------------------- #
 # Live-publish safety guard (P-G1): publishing is held by default.
 # --------------------------------------------------------------------------- #
