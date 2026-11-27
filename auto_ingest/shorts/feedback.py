@@ -234,7 +234,11 @@ def suggest_actions(records: List[MetricsRecord]) -> List[Action]:
       * pause a topic whose average views < ``ACTION_LOW_VIEWS``
 
     Deterministic ordering: rerender, then promote, then pause; each group
-    sorted by target for stable output.
+    sorted by target for stable output. Both the rerender and promote groups
+    are de-duplicated by target (rerender keeps the lowest CTR — the strongest
+    rerender evidence — and promote keeps the highest retention), so the same
+    short delivered more than once still yields exactly one action per group,
+    independent of the order in which the rows arrived.
     """
     rerender: List[Action] = []
     promote: List[Action] = []
@@ -269,7 +273,17 @@ def suggest_actions(records: List[MetricsRecord]) -> List[Action]:
                 reason=f"avg_views {avg:.1f} < {ACTION_LOW_VIEWS} "
                        f"(pause topic; low reach)"))
 
-    rerender.sort(key=lambda a: a.target)
+    # De-dup rerender targets (keep the lowest CTR per short: the strongest
+    # rerender evidence). Without this a short delivered twice with different
+    # CTRs yields two rerender actions whose stable-sort tie on ``target``
+    # preserves delivery order, so output is not order-invariant.
+    best_rerender: Dict[str, Action] = {}
+    for a in rerender:
+        metric = a.metric if a.metric is not None else float("inf")
+        best = best_rerender.get(a.target)
+        if best is None or metric < (best.metric if best.metric is not None else float("inf")):
+            best_rerender[a.target] = a
+    rerender_sorted = sorted(best_rerender.values(), key=lambda a: a.target)
     # De-dup promote targets (keep the highest metric per target).
     best_promote: Dict[str, Action] = {}
     for a in promote:
@@ -277,5 +291,5 @@ def suggest_actions(records: List[MetricsRecord]) -> List[Action]:
             best_promote[a.target] = a
     promote_sorted = sorted(best_promote.values(), key=lambda a: a.target)
     pause.sort(key=lambda a: a.target)
-    return rerender + promote_sorted + pause
+    return rerender_sorted + promote_sorted + pause
 
