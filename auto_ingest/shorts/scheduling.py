@@ -106,11 +106,22 @@ def build_calendar(days: int = 30, schedule: Optional[Dict] = None,
         wu = _warmup_posts(d, schedule)
         lead_topic = _topic_for_day(d, schedule)
         active_platforms = [p for p in platforms if p in wu["platforms"]]
-        per_platform_target = max(1, round(wu["posts_per_day_total"] / len(active_platforms))) \
-            if active_platforms else 0
+        # Honour the declared daily total exactly. The old ``max(1, round(...))``
+        # floored every active platform at one slot, so a 1-post warm-up across
+        # three platforms emitted three posts, a 0-post day still emitted three,
+        # and a 4-post day emitted only three. Spread the integer total over the
+        # active platforms; the remainder goes to the first ones in order, which
+        # leaves the single-platform default warm-up days byte-identical.
+        total_posts = max(int(round(float(wu["posts_per_day_total"]))), 0)
+        n_plat = len(active_platforms)
+        per_platform_targets = (
+            [total_posts // n_plat + (1 if i < total_posts % n_plat else 0)
+             for i in range(n_plat)]
+            if n_plat else []
+        )
 
         day_plan = DayPlan(day=d)
-        for p in active_platforms:
+        for p, per_platform_target in zip(active_platforms, per_platform_targets):
             times = windows.get(p, ["12:00"])
             for i in range(per_platform_target):
                 t = times[i % len(times)]
