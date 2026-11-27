@@ -100,8 +100,8 @@ class _FakeSession:
             ]
             rows.sort(key=lambda r: r["claimed_at"])
             return _Rows(rows[:limit])
-        # --- reap: same predicate + bounded SET ---
-        if q.startswith("MATCH (j:IngestJob) WHERE j.owner <> '' AND j.claimed_at < $expires SET j.owner = '', j.claimed_at = 0, j.status = 'pending'"):
+        # --- reap: same predicate + bounded SET (LIMIT in a WITH before SET) ---
+        if q.startswith("MATCH (j:IngestJob) WHERE j.owner <> '' AND j.claimed_at < $expires"):
             expires = params["expires"]
             limit = params["limit"]
             cleared = 0
