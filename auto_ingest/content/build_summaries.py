@@ -15,7 +15,7 @@ Enhancements:
 
 import os, re, json, time, logging, argparse, csv
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import http.client
 from urllib.parse import urlparse
 
@@ -302,27 +302,6 @@ def _normalize_tasks(tasks_any: Any) -> List[Dict[str, Any]]:
             "owner_hint": owner_hint[:100],
             "agent": {"name": agent_name[:60], "confidence": agent_conf, "rationale": agent_rat[:200]},
             "plan": norm_plan
-        })
-        return out
-    for t in tasks_any:
-        if not isinstance(t, dict):
-            continue
-        title = str(t.get("title") or "").strip()
-        desc = str(t.get("description") or "").strip()
-        labels = t.get("labels") if isinstance(t.get("labels"), list) else []
-        labels = [str(x).strip() for x in labels if str(x).strip()]
-        priority = str(t.get("priority") or "medium").strip().lower()
-        if priority not in ("low","medium","high","urgent"):
-            priority = "medium"
-        owner_hint = str(t.get("owner_hint") or "").strip()
-        if not title and not desc:
-            continue
-        out.append({
-            "title": title[:140],
-            "description": desc[:1000],
-            "labels": list(dict.fromkeys(labels))[:10],
-            "priority": priority,
-            "owner_hint": owner_hint[:100]
         })
     return out
 
