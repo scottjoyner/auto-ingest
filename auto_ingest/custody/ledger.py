@@ -338,7 +338,12 @@ class ReconciliationResult:
                 reasons.append(f"{name}_ledger_malformed_lines={read.malformed}")
             if read.truncated:
                 reasons.append(f"{name}_ledger_truncated")
-        if self.expected_source_objects is not None and self.source_objects:
+        # Compare the counts whenever an inventory expectation exists. The old
+        # truthiness guard skipped the check when zero rows qualified, so an
+        # empty/wrong-status ledger looked like a coherent "nothing in custody"
+        # proposal even while the campaign inventory expected objects.
+        if (self.expected_source_objects is not None
+                and self.source_objects != self.expected_source_objects):
             if self.source_objects != self.expected_source_objects:
                 reasons.append(
                     f"hash_ledger_covers_{self.source_objects}_of_"
