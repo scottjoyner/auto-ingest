@@ -45,7 +45,15 @@ def _classify(ext: str) -> Optional[str]:
 
 
 def _date_for(path: Path) -> Optional[str]:
-    m = DATE_RE.search(path.as_posix())
+    # Read the stamp from the file's own name first. Searching the whole path
+    # with re.search returned the *left-most* date, so any dated ancestor (a
+    # root like /data/2019-12-31-archive/, or a YYYY/MM/DD tree) silently
+    # shadowed a more specific stamp in the filename and every clip in that
+    # tree was catalogued with the folder's date. Ancestors are only the
+    # fallback for names that carry no date of their own.
+    m = DATE_RE.search(path.name)
+    if not m:
+        m = DATE_RE.search(path.parent.as_posix())
     if m:
         return f"{m.group('y')}-{m.group('m')}-{m.group('d')}"
     try:
