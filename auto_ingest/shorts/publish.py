@@ -108,14 +108,18 @@ def mark_published(key: str, platform: str,
 
 
 def queue_all_unpublished(platform: str = "youtube_shorts", limit: int = 50) -> int:
-    """Stage every unpublished short into the publish queue. Returns count."""
-    n = 0
+    """Stage every unpublished short into the publish queue.
+
+    Returns the number of (short, platform) entries actually appended. An
+    idempotent re-run reports 0 rather than claiming shorts it did not stage;
+    this matches :func:`queue_all_on_disk`'s appended-entry count.
+    """
+    before = _queue_file_lines()
     for s in list_unpublished(limit=limit):
         if not s.out_path:
             continue
         queue_for_publish(s, platform=platform)
-        n += 1
-    return n
+    return _queue_file_lines() - before
 
 
 def scan_rendered(out_root: Path) -> List[Publishable]:
