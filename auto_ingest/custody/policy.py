@@ -115,6 +115,12 @@ class CustodyPolicy:
                 if isinstance(value, str):
                     value = [value]
                 kwargs[field_name] = tuple(str(v) for v in value)
+        limit = kwargs.get("max_summary_entries", MAX_SUMMARY_ENTRIES)
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            # Every bounded evidence/ledger diagnostic list passes through this
+            # cap. A zero/negative or non-integer value silently truncated them
+            # to one row while the policy still parsed as valid.
+            raise ValueError("max_summary_entries must be a positive integer")
         scope = str(kwargs.get("required_scope", "all_inventory"))
         if scope not in {"all_inventory", "hashed_set"}:
             raise ValueError(
