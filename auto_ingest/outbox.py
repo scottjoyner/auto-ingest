@@ -90,30 +90,43 @@ class GraphOutbox:
         pending (a real gap for re-ingest from source). When ``verify`` is None,
         ops are only counted (no mutation).
 
+        ``on_status`` is called exactly once for every op examined, including
+        dry-run and failed ops, so a report cannot silently omit an op that is
+        still counted in ``seen``. ``ok`` is True only for a drained op.
+
         Ops exceeding ``max_retries`` are marked failed and left pending.
         """
         pending = self.pending(limit=max_ops)
         summary = {"drained": 0, "kept": 0, "failed": 0, "seen": len(pending),
                    "max_retries": max_retries}
+
+        def report(op_id_: int, op_type_: str, ok: bool) -> None:
+            if on_status:
+                on_status(op_id_, op_type_, ok)
+
         for op_id, op_type, correlation_id, payload_json, retry_count in pending:
             if retry_count > max_retries:
                 self.mark_failed(op_id, "replay: exceeded max_retries")
                 summary["failed"] += 1
+                report(op_id, op_type, False)
                 continue
             try:
                 payload = json.loads(payload_json)
             except Exception as e:
                 self.mark_failed(op_id, f"replay: bad payload: {e}")
                 summary["failed"] += 1
+                report(op_id, op_type, False)
                 continue
             if verify is None:
                 summary["kept"] += 1
+                report(op_id, op_type, False)
                 continue
             try:
                 ok = bool(verify(op_type, payload))
             except Exception as e:
                 self.mark_failed(op_id, f"replay: verify error: {e}")
                 summary["failed"] += 1
+                report(op_id, op_type, False)
                 continue
             if ok:
                 self.mark_done(op_id)
@@ -122,8 +135,7 @@ class GraphOutbox:
                 # Intent not satisfied in the graph — genuine gap. Keep it
                 # pending (retry_count untouched) for a later re-ingest pass.
                 summary["kept"] += 1
-            if on_status:
-                on_status(op_id, op_type, ok)
+            report(op_id, op_type, ok)
         return summary
 
     def close(self) -> None:
