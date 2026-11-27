@@ -124,14 +124,54 @@ def _published_marker(out_path: Path) -> Path:
     return out_path.with_suffix(out_path.suffix + ".published.json")
 
 
+def _read_published(marker: Path) -> Optional[dict]:
+    """Read a marker as a dict, or None when it is absent or unreadable."""
+    try:
+        rec = json.loads(marker.read_text())
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _recorded_platforms(rec: dict) -> set:
+    """Platforms a marker proves published, including the legacy single field."""
+    out: set = set()
+    legacy = rec.get("platform")
+    if isinstance(legacy, str) and legacy:
+        out.add(legacy)
+    for platform in rec.get("platforms") or ():
+        if isinstance(platform, str) and platform:
+            out.add(platform)
+    return out
+
+
 def already_published(item: QueueItem) -> bool:
-    return _published_marker(Path(item.out_path)).exists()
+    """Whether this exact (output, platform) pair has been posted before.
+
+    The queue is per (key, platform) and one MP4 is staged for several platforms,
+    so a marker that answers for the file as a whole would suppress every other
+    platform after the first post. A marker that exists but cannot be read still
+    answers "published": a skipped post is safer than a duplicate one.
+    """
+    marker = _published_marker(Path(item.out_path))
+    if not marker.exists():
+        return False
+    rec = _read_published(marker)
+    return True if rec is None else item.platform in _recorded_platforms(rec)
 
 
 def _record_published(item: QueueItem, url: str = "") -> None:
-    rec = {"key": item.key, "platform": item.platform,
-           "url": url, "at": time.time()}
-    _published_marker(Path(item.out_path)).write_text(json.dumps(rec))
+    """Record this platform on the marker without forgetting the others."""
+    marker = _published_marker(Path(item.out_path))
+    platforms = _recorded_platforms(_read_published(marker) or {}) | {item.platform}
+    rec = {
+        "at": time.time(),
+        "key": item.key,
+        "platform": item.platform,
+        "platforms": sorted(platforms),
+        "url": url,
+    }
+    marker.write_text(json.dumps(rec, sort_keys=True))
 
 
 def _title_for(platform: str, item: QueueItem, *,
