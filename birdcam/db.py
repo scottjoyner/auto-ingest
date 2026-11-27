@@ -51,6 +51,10 @@ class DB:
             event.confidence_max, event.confidence_avg, event.detection_count, event.clip_path,
             event.thumbnail_path, event.metadata_path, int(event.protected)
         ))
+        # The events/clips rows above are replaced on a re-add, so replace their
+        # child detections too. Without this a reprocessed event keeps the old
+        # rows and detection_count no longer matches the detections table.
+        c.execute("DELETE FROM detections WHERE event_id=?", (event.event_id,))
         for d in event.detections:
             c.execute("INSERT INTO detections(event_id,ts,confidence,label,bbox) VALUES (?,?,?,?,?)", (
                 event.event_id, d.timestamp.isoformat(), d.confidence, d.label, str(d.bbox)
