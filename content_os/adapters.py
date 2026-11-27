@@ -142,7 +142,10 @@ def _segment_text(data: Any) -> str:
                     start = segment.get("start")
                     prefix = f"[{start}] " if start is not None else ""
                     parts.append(f"{prefix}{segment['text']}")
-            return "\n".join(parts)
+            # An empty/textless ``segments`` list must not mask a usable
+            # top-level text field; fall through to the generic keys below.
+            if parts:
+                return "\n".join(parts)
         for key in ["transcript", "text", "summary", "content", "description"]:
             if isinstance(data.get(key), str):
                 return data[key]
