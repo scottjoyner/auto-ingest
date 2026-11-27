@@ -294,7 +294,11 @@ class CsvAdapter:
                 if row.get(text_fields[0])
             )
         else:
-            extracted = "\n".join(json.dumps(row, sort_keys=True) for row in sample)
+            # `read_limited` already bounds the CSV to MAX_TEXT_BYTES, so every
+            # parsed row fits the text budget. Serialising only the 10-row
+            # preview silently dropped rows 11+ while `rows_read` still claimed
+            # they were present and no warning was emitted.
+            extracted = "\n".join(json.dumps(row, sort_keys=True) for row in rows)
         warnings = ["File was truncated for local ingest."] if truncated else []
         return SourceDocument(
             path=path,
