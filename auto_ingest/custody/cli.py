@@ -359,7 +359,12 @@ def cmd_status(args) -> int:
         print(status_json(status))
     else:
         sys.stdout.write(status_text(status))
-    if args.require_release and not status.source_release_allowed:
+    if args.require_release and (
+        not status.source_release_allowed or status.ledger_disagreements
+    ):
+        # A printed "ledger drift" line is not a gate if the exit code still
+        # says OK. CI callers read the exit code, so an incoherent ledger must
+        # close the same gate the human report already warns about.
         return EXIT_GATE_CLOSED
     return EXIT_OK
 
