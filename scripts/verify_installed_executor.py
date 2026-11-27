@@ -125,6 +125,8 @@ def verify_operation_cli(root, env, target, q, port, password):
 
 
 def main():
+    if not __debug__:
+        raise RuntimeError("installed acceptance requires Python assertions enabled")
     ap = argparse.ArgumentParser()
     ap.add_argument("--wheel", required=True, type=pathlib.Path)
     ap.add_argument("--manifest", required=True, type=pathlib.Path)
