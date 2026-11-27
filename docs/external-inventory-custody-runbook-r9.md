@@ -20,6 +20,15 @@ The importer is a **historical observation snapshot**, not continuous
 monitoring. Before planning any write, independently check the current source
 identity, physical NAS identity, hash receipts, and conflicting active writers.
 
+### Disk-pressure hold (2026-11-27)
+
+Under the current root-disk pressure (roughly 24 GiB free / 98% used on
+x1-370), do **not** start NAS traversal, transfers, reconciliation, cleanup,
+deletions, checkpoints or bulk staging from this runbook. All paths remain
+read-only until an independently admitted destination is verified for
+identity, custody and free-space reserve; a metadata witness alone is not
+admission. This note authorizes no new deletions or transfers.
+
 ## 2. Running the read-only inventory
 
 Entry point: `auto_ingest.custody.external_inventory.observe_metadata_csv`.
