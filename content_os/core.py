@@ -907,19 +907,17 @@ def feedback(
     md = f"# Feedback: {obj.title}\n\n- views: {views}\n- bookmarks: {bookmarks}\n- likes: {likes}\n- replies: {replies}\n- reposts: {reposts}\n- bookmark_rate: {br:.6f}\n- reply_rate: {rr:.6f}\n- engagement_rate: {er:.6f}\n\n## qualitative notes\n{notes}\n\n## proposed lessons\n- Review hooks, proof density, and avoid-slop matches. Proposed voice changes must be manually copied into voice rules.\n"
     atomic_write(path / "feedback.md", md, backup=True)
     cfg = load_config(root)
-    dest_base = (
-        root
-        / "stores"
-        / (
-            "winners"
-            if br >= float(cfg.get("winning_bookmark_rate", WIN_BOOKMARK_RATE))
-            else (
-                "losers"
-                if br <= float(cfg.get("losing_bookmark_rate", LOSE_BOOKMARK_RATE))
-                else "feedback"
-            )
-        )
-    )
+    # A zero (or negative) view count gives no denominator, so the 0.0 rate is a
+    # placeholder rather than a measured result. Never file that vacuous rate as
+    # a winner or a loser -- only observed data drives those buckets (r27).
+    observed = views > 0
+    if observed and br >= float(cfg.get("winning_bookmark_rate", WIN_BOOKMARK_RATE)):
+        bucket = "winners"
+    elif observed and br <= float(cfg.get("losing_bookmark_rate", LOSE_BOOKMARK_RATE)):
+        bucket = "losers"
+    else:
+        bucket = "feedback"
+    dest_base = root / "stores" / bucket
     atomic_write(dest_base / f"{rid}.md", md, backup=True)
     obj.next_action = "Archive after lessons are reviewed."
     save_object(path, obj)
