@@ -154,6 +154,26 @@ def _opt(value: Any) -> Optional[str]:
     return text or None
 
 
+def _read_only_bool(value: Any) -> bool:
+    """Parse the source read-only declaration without promoting junk to True.
+
+    This flag is the release gate's precondition for destroying source bytes:
+    ``evaluate_release`` blocks when it is false. A plain ``bool(value)`` reads
+    the JSON string ``"false"`` (or any non-empty string) as **true**, so a
+    bundle that explicitly declares a writable card was treated as read-only
+    and the gate opened. Anything we cannot parse as a genuine boolean must
+    therefore fail closed. Only real booleans, 0/1 and the canonical textual
+    spellings count; every other value is False.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 @dataclass(frozen=True)
 class SourceRef:
     """The removable source as observed."""
@@ -167,7 +187,7 @@ class SourceRef:
         raw = raw or {}
         return cls(
             mount_point=_opt(raw.get("mount_point") or raw.get("mount")),
-            read_only=bool(raw.get("read_only", False)),
+            read_only=_read_only_bool(raw.get("read_only", False)),
             card=CardIdentity.from_dict(raw),
         )
 
