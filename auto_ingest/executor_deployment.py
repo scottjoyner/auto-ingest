@@ -87,3 +87,51 @@ def assess_deployments(expected, observations, *, candidate_blob, now):
         "activation_allowed": False,
         "replay_allowed": False,
     }
+
+
+def assess_component_deployments(expected, observations, *, candidate_components, now):
+    """Assess pinned component hashes, not just a launcher blob.
+
+    Every deployment must supply the exact declared component inventory.
+    Caller-supplied hashes are observations, not authentication, loaded-code
+    identity or complete writer inventory. No activation or replay authority.
+    """
+    if (not isinstance(candidate_components, dict)
+            or not 1 <= len(candidate_components) <= _MAX_ENTRIES
+            or any(not _valid_id(k) or not _valid_sha(v)
+                   for k, v in candidate_components.items())):
+        raise ValueError("invalid candidate component inventory")
+    # Reuse identity, cardinality, time and process/launch-state validation.
+    # A private synthetic source marker is not an observation of a real file.
+    marker = "0" * 40
+    if not isinstance(observations, (list, tuple)):
+        raise ValueError("invalid observation collection")
+    normalized = [dict(row, source_blob=marker) if isinstance(row, dict) else row
+                  for row in observations]
+    report = assess_deployments(expected, normalized, candidate_blob=marker, now=now)
+    by_id = {row["deployment_id"]: row for row in observations}
+    for finding in report["findings"]:
+        row = by_id.get(finding["deployment_id"])
+        issues = finding["blockers"]
+        if row is None:
+            continue
+        components = row.get("component_blobs")
+        if (not isinstance(components, dict) or len(components) > _MAX_ENTRIES
+                or any(not _valid_id(key) for key in components)):
+            issues.append("COMPONENT_INVENTORY_UNVERIFIED")
+            continue
+        for key in sorted(set(candidate_components) | set(components)):
+            if key not in candidate_components:
+                issues.append("UNEXPECTED_COMPONENT:" + key)
+            elif key not in components:
+                issues.append("MISSING_COMPONENT:" + key)
+            elif not _valid_sha(components[key]):
+                issues.append("COMPONENT_UNVERIFIED:" + key)
+            elif components[key] != candidate_components[key]:
+                issues.append("COMPONENT_VERSION_MISMATCH:" + key)
+    report["inventory_status"] = (
+        "BLOCKERS_OBSERVED" if any(row["blockers"] for row in report["findings"])
+        else "DECLARED_INVENTORY_CONSISTENT")
+    report["component_scope"] = "DECLARED_COMPONENTS_ONLY"
+    report["loaded_code_identity"] = "UNVERIFIED"
+    return report
