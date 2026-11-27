@@ -120,7 +120,15 @@ def load_embed_model(name: str, engine: str = "torch") -> EmbedModel:
     """
     if engine == "onnx":
         return OrtEmbedModel(name)
-    return EmbedModel(name)
+    if engine == "torch":
+        return EmbedModel(name)
+    # Fail closed: the ingest path takes this value from EMBED_EXTRA_ENGINE /
+    # EMBED_ENGINE without argparse's choices check. A typo must not silently
+    # fall back to torch vectors under an ONNX-labelled property (recall drift).
+    raise ValueError(
+        f"Unknown embedding engine {engine!r}; expected 'torch' or 'onnx'. "
+        "Mixing engines under one vector property silently diverges recall."
+    )
 
 
 def embed_texts(texts: List[str], batch_size: int = 32, max_length: int = 512) -> List[List[float]]:
