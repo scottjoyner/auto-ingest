@@ -82,8 +82,11 @@ def status_text(status: CampaignStatus) -> str:
         f"complete={str(cpy['complete']).lower()} "
         f"interrupted={str(cpy['interrupted']).lower()}"
     )
+    # A distinct label, not a second `destination`: this report is also consumed
+    # by tooling that keys each `label  value` line by its label, where a repeated
+    # label would silently overwrite the logical path / host path line above.
     lines.append(
-        "destination        "
+        "destination_verification  "
         f"verified_files={dest['verified_files']} verified_bytes={dest['verified_bytes']} "
         f"verification_complete={str(dest['verification_complete']).lower()}"
     )
