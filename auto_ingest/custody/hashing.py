@@ -357,6 +357,10 @@ def filename_problem(key: str) -> Optional[str]:
 
     * every path component must be at most :data:`NAME_COMPONENT_LIMIT_BYTES`
       UTF-8 bytes, and the whole key at most :data:`PATH_LIMIT_BYTES`;
+    * no component may be empty - consecutive or boundary separators are
+      collapsed by the path resolver, so ``a//b`` and ``a/b`` name one file
+      and two source objects would be verified against a single destination
+      object;
     * no component may contain a character from :data:`VFAT_ILLEGAL_CHARS`;
     * no component may end in ``.`` or a space: Windows strips both, so such a
       name cannot round-trip through the destination and the key would stop
@@ -371,6 +375,10 @@ def filename_problem(key: str) -> Optional[str]:
         return (f"the whole key is {len(key.encode('utf-8'))} bytes of UTF-8; the "
                 f"strictest path limit in play is {PATH_LIMIT_BYTES}")
     for part in key.split("/"):
+        if not part:
+            return ("an empty path component cannot round-trip: the destination "
+                    "collapses it onto the adjacent separator, so two distinct "
+                    "keys would name one file")
         size = len(part.encode("utf-8"))
         if size > NAME_COMPONENT_LIMIT_BYTES:
             return (f"path component {part!r} is {size} bytes of UTF-8; vfat and exFAT "
