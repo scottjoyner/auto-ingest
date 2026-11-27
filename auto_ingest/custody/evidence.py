@@ -641,8 +641,12 @@ class CampaignEvidence:
 
     def hash_coverage_under(self, policy: "CustodyPolicy") -> int:
         """Coverage counting ONLY exemptions the policy actually honours."""
-        honoured = sum(1 for p in self.hashing.exemptions if policy.honour_exemption(p))
-        return self.hashing.verified_files + honoured
+        # Count distinct patterns, not occurrences. A document that repeats
+        # the same honoured exemption must not inflate coverage by the number
+        # of repeats - that would certify objects whose digests were never
+        # checked.
+        honoured = {p for p in self.hashing.exemptions if policy.honour_exemption(p)}
+        return self.hashing.verified_files + len(honoured)
 
     @property
     def source_released(self) -> int:
