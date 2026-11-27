@@ -53,6 +53,7 @@ from __future__ import annotations
 import errno
 import fcntl
 import os
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -270,22 +271,36 @@ def is_locked(destination_key: str, root: Optional[str | Path] = None) -> bool:
 
     Safe to call from a legacy writer that knows nothing about custody: it stats
     and attempts a non-blocking flock on one path.
+
+    Any failure to *inspect* the lock is reported as locked. This probe feeds
+    `preflight`'s unlocked check and `execute`'s refusal list, so answering False
+    on a permission error or an unexpected flock failure would turn "could not
+    check" into "checked and unlocked" and let a second writer into the
+    destination. Only a lock file that is genuinely absent is False.
     """
     path = lock_root(root) / f"campaign-{_safe(destination_key)}.lock"
-    if not path.exists():
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
         return False
+    except OSError:
+        return True
+    if not stat.S_ISREG(info.st_mode):
+        # A directory/device/symlink target at the lock path cannot be
+        # flock-probed as intended; treat the destination as occupied.
+        return True
     try:
         fd = os.open(str(path), os.O_RDWR)
     except OSError:
-        return False
+        return True
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(fd, fcntl.LOCK_UN)
         return False
     except OSError as exc:
-        if exc.errno in (errno.EACCES, errno.EAGAIN):
-            return True
-        return False
+        # EACCES/EAGAIN is another holder. Anything else is a probe failure;
+        # both must close the gate.
+        return True
     finally:
         os.close(fd)
 
