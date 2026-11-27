@@ -38,7 +38,14 @@ def haversine(lat1, lon1, lat2, lon2) -> float:
 def _bbox(lat: float, lon: float, radius_m: float):
     """Return (lat0, lat1, lon0, lon1) bounding box padded by radius_m."""
     dlat = radius_m / _M_PER_DEG_LAT
-    coslat = max(math.cos(math.radians(lat)), 1e-6)
+    # A degree of longitude is shorter at higher |latitude|. Sizing the box at
+    # the centre latitude therefore clips points inside the radius but nearer a
+    # pole, and this prefilter is the only thing bounding the Neo4j scan - a
+    # clipped point is a silently dropped match. Pad at the most poleward
+    # latitude of the band instead; the existing floor keeps the polar case
+    # finite. This only widens the prefilter; the exact haversine join decides.
+    poleward = min(90.0, abs(lat) + dlat)
+    coslat = max(math.cos(math.radians(poleward)), 1e-6)
     dlon = radius_m / (_M_PER_DEG_LAT * coslat)
     return lat - dlat, lat + dlat, lon - dlon, lon + dlon
 
