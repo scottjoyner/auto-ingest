@@ -52,7 +52,7 @@ def child():
     else:
         assert mode == "normal"
     try:
-        ns["execute_ready"](1)
+        ns["execute_ready"](cfg.get("limit", 1))
     finally:
         driver.close()
 
@@ -80,8 +80,8 @@ def execute_fixture(driver, root, connection):
         with driver.session() as session:
             return session.run(query, **params).data()
 
-    def worker(mode, expected):
-        data = json.dumps(dict(connection, artifacts=str(artifacts), mode=mode))
+    def worker(mode, expected, limit=1):
+        data = json.dumps(dict(connection, artifacts=str(artifacts), mode=mode, limit=limit))
         result = subprocess.run(
             [sys.executable, str(pathlib.Path(__file__).resolve()), "--child"],
             input=data, text=True, capture_output=True, timeout=20,
@@ -160,6 +160,33 @@ def execute_fixture(driver, root, connection):
         assert q("MATCH (r:Run) RETURN count(r) AS n") == [{"n": 5}]
         assert len(hits) == 4
         print("REAL_GRAPH_HTTP_RECOVERY_PASS 5/5", flush=True)
+        # Older malformed task is skipped only within the bounded invocation.
+        bad, good = str(uuid.uuid4()), str(uuid.uuid4())
+        url = base + "/mixed"
+        q("CREATE (:Task {id:$bad,status:'READY',updated_at:datetime('2026-01-01T00:00:00Z'),"
+          "acceptance_json:'{'}) "
+          "CREATE (:Task {id:$good,status:'READY',updated_at:datetime('2026-01-02T00:00:00Z'),"
+          "acceptance_json:$acceptance})", bad=bad, good=good,
+          acceptance=json.dumps([{"type": "http_ok", "args": {"url": url}}]))
+        before = q(snapshot_query, tid=bad)
+        worker("normal", 1, limit=1)
+        assert q(snapshot_query, tid=bad) == before
+        assert q(snapshot_query, tid=good)[0]["runs"] == 0
+        assert len(hits) == 4
+        worker("normal", 1, limit=2)
+        row = state(good)
+        assert row["status"] == row["rs"] == "DONE" and row["owner"] is None
+        assert json.loads(row["manifest"])["acceptance_results"][0]["passed"]
+        assert report(artifacts / good, task_id=good, run_id=row["rid"],
+                      url=url)["classification"] == "HTTP_LOCAL_RESPONSE_OBSERVED"
+        assert q(snapshot_query, tid=bad) == before and not (artifacts / bad).exists()
+        assert hits.count("/mixed") == 1 and len(hits) == 5
+        worker("normal", 1, limit=2)
+        assert state(good) == row and q(snapshot_query, tid=bad) == before
+        assert len(hits) == 5
+        assert q("MATCH (r:Run) RETURN count(r) AS n") == [{"n": 6}]
+        print("REAL_GRAPH_MIXED_BATCH_PASS budget1 blocked, budget2 valid DONE, "
+              "restart no replay, corrupt unchanged", flush=True)
     finally:
         server.shutdown()
         server.server_close()

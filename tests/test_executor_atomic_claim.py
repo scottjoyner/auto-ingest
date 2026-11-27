@@ -48,11 +48,12 @@ class Graph:
         self.lock = threading.Lock()
         self.failure = False
 
-    def run(self, query, *, limit):
+    def run(self, query, *, limit, excluded):
         assert "SET " not in query
         assert "status:'READY'" in query
         assert limit == 1
-        return Result([{"id": "task"}] if self.status == "READY" else [])
+        assert "WHERE NOT task.id IN $excluded" in query
+        return Result([{"id": "task"}] if self.status == "READY" and "task" not in excluded else [])
 
     def begin_transaction(self):
         return Transaction(self)
@@ -103,6 +104,13 @@ def attach(funcs, graph, rid):
     return funcs["q_attach_run"](graph, "task", {
         "id": rid, "started_at": "2026-11-26T00:00:00Z",
         "status": "RUNNING", "manifest": {}})
+
+
+def test_selection_exclusion_is_read_only(funcs):
+    graph = Graph()
+    assert funcs["q_pick_ready"](graph, 1, excluded=["task"]) == []
+    assert graph.status == "READY" and graph.owner is None and not graph.runs
+    assert funcs["q_pick_ready"](graph, 1) == ["task"]
 
 
 def test_two_workers_one_claim(funcs):
