@@ -241,6 +241,36 @@ def test_cmd_run_all_skip_flags(cli, monkeypatch):
     ]
 
 
+def test_run_all_parser_defines_promote_min_weight(cli):
+    """The real argparse namespace must expose every attribute _link_args reads.
+
+    The hand-built _make_run_all_args() helper sets promote_min_weight by hand,
+    which hid a missing `run-all --promote-min-weight` parser option: a real
+    `auto-ingest run-all` invocation would crash in _link_args with AttributeError.
+    """
+    args = cli.build_parser().parse_args(["run-all"])
+    assert hasattr(args, "promote_min_weight")
+    assert args.promote_min_weight == 0.0
+
+
+def test_run_all_link_args_from_real_parser(cli):
+    """_link_args must accept the namespace produced by the real parse_args."""
+    args = cli.build_parser().parse_args(["run-all"])
+    linked = cli._link_args(args)
+    assert linked.promote is False
+    assert linked.promote_min_weight == 0.0
+
+
+def test_run_all_promote_min_weight_forwarded(cli):
+    """--promote-min-weight on run-all reaches the linker args unchanged."""
+    args = cli.build_parser().parse_args(
+        ["run-all", "--promote", "--promote-min-weight", "42.5"]
+    )
+    linked = cli._link_args(args)
+    assert linked.promote is True
+    assert linked.promote_min_weight == 42.5
+
+
 # ---------------------------------------------------------------------------
 # cmd_link_speakers
 # ---------------------------------------------------------------------------
