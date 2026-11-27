@@ -152,7 +152,7 @@ def _title_for(platform: str, item: QueueItem, *,
     if platform.startswith("youtube"):
         # Keyword-front, informative. Avoid repeating the topic if the title
         # already contains it.
-        if base and base.lower() not in topic.lower():
+        if base and topic.lower() not in base.lower():
             return f"{topic.title()}: {base}"
         return base or topic.title()
     if platform == "tiktok":
