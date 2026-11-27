@@ -155,13 +155,14 @@ def _cmd_render(args) -> int:
         if any(not s.shots for s in plan.shorts):
             plan = planner.iterate_plan(plan, anchors, short_count=len(plan.shorts))
         out_dir = args.out_dir or DEFAULT_OUT_DIR
+        # `render_plan` owns manifest persistence via its `upsert` argument;
+        # the CLI must not run a second (inverted) upsert here, or a plain
+        # `shorts render` would write to Neo4j with --upsert absent.
         paths = render.render_plan(
             plan, out_dir, only=args.only, tts=args.tts,
             skip_used_clips=True, upsert=args.upsert,
             skip_history=args.skip_history,
         )
-        if not args.upsert:
-            render.upsert_manifest(driver, plan, out_dir)
     finally:
         driver.close()
     print(f"Rendered {len(paths)} short(s) -> {out_dir}")
