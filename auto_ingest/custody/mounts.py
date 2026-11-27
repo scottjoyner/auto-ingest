@@ -254,8 +254,13 @@ def observe_mount(
 
             try:
                 exists: Optional[bool] = os.path.exists(mount_point)
-            except OSError:  # pragma: no cover - e.g. EIO on a dead network mount
-                exists = None
+            except OSError:
+                # EIO on a dead network mount means the path could not be
+                # inspected at all. "Not checked" is not evidence that the
+                # destination is there: record it as absent so the release
+                # gate's destination_path_absent blocker fires instead of
+                # treating an uninspectable path as usable.
+                exists = False
             return _replace(backing, mount_point=str(mount_point),
                             backing_mount_point=backing.mount_point,
                             path_exists=exists)
