@@ -207,12 +207,15 @@ ORDER BY j.claimed_at ASC
 LIMIT $limit
 """
 
+# LIMIT must bound the rows that reach the SET. Placing it after
+# ``RETURN count(j)`` would cap the single aggregated result row (one), leaving
+# every expired claim cleared in a single unbounded write.
 _REAP_QUERY = """
 MATCH (j:IngestJob)
 WHERE j.owner <> '' AND j.claimed_at < $expires
+WITH j LIMIT $limit
 SET j.owner = '', j.claimed_at = 0, j.status = 'pending'
 RETURN count(j) AS cleared
-LIMIT $limit
 """
 
 
