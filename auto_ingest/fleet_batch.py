@@ -105,6 +105,7 @@ def run_batch(args: argparse.Namespace) -> int:
         return 1
     print(f"[fleet-batch] {len(items)} item(s), caps={caps}", file=sys.stderr)
     created = 0
+    failed = 0
     for item in items:
         correlation_id = str(uuid.uuid4())
         command = args.command.format(item=item) if args.command else None
@@ -126,9 +127,12 @@ def run_batch(args: argparse.Namespace) -> int:
             created += 1
             print(f"[fleet-batch] created {res.get('task_id')} <- {item}", file=sys.stderr)
         except Exception as e:
+            failed += 1
             print(f"[fleet-batch] FAILED {item}: {e}", file=sys.stderr)
     print(f"[fleet-batch] done: {created}/{len(items)} tasks created", file=sys.stderr)
-    return 0
+    # Fail closed for callers (cron/CI): a batch that could not dispatch every
+    # item is not a successful run, even when some items did succeed.
+    return 1 if failed else 0
 
 
 def main() -> None:
