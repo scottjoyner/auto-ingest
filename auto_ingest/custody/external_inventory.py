@@ -102,7 +102,13 @@ def observe_metadata_csv(
     count = 0
 
     try:
-        text = raw.decode("utf-8")
+        # NAS/Excel exports commonly prefix a UTF-8 BOM. Decode with utf-8-sig
+        # so the BOM is consumed as an encoding marker instead of sticking to
+        # the first field name (\\ufeffcard_uuid), which would otherwise make
+        # a valid, digest-pinned manifest fail the required-columns check. The
+        # pin and size checks above run on the raw bytes, so the BOM is still
+        # part of the immutable snapshot being verified.
+        text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as error:
         raise ExternalInventoryError("source observation CSV is not UTF-8") from error
     with io.StringIO(text, newline="") as stream:
