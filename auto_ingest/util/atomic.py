@@ -65,6 +65,9 @@ def write_json_atomic(path: Path | str, payload: Any, *,
     sorted so that an unchanged payload produces unchanged bytes. Values that
     json cannot represent (a ``Path``, a ``datetime``) are stringified rather
     than raising, matching the behaviour the call sites already relied on.
+    Non-finite floats are the exception: they are *rejected* rather than written
+    as the non-standard ``NaN``/``Infinity`` tokens, so every file this helper
+    publishes is readable by strict JSON consumers.
 
     Any failure - including ``KeyboardInterrupt`` - unlinks the temp file before
     re-raising, so an aborted write leaves neither a partial target nor a
@@ -82,7 +85,14 @@ def write_json_atomic(path: Path | str, payload: Any, *,
     tmp = target.with_name(f"{target.name}.{os.getpid()}.{_next_seq()}.tmp")
     try:
         with tmp.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=indent, sort_keys=sort_keys, default=str)
+            # Fail closed on non-finite floats.  json's default allow_nan=True
+            # emits NaN / Infinity / -Infinity, which are not valid JSON for
+            # strict readers (jq, JavaScript, Go, serde_json) even though
+            # Python's permissive decoder reads them back.  Rejection happens
+            # while writing the temp file; the handler below unlinks it, so the
+            # previous complete target is left untouched.
+            json.dump(payload, handle, indent=indent, sort_keys=sort_keys,
+                      default=str, allow_nan=False)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
