@@ -37,6 +37,32 @@ except Exception:  # pragma: no cover - platforms without tzdata
 #: exports, so the two agree by construction rather than by coincidence.
 LOCAL_TZ = os.getenv("LOCAL_TZ", "America/New_York")
 
+
+def _resolve_local_zone():
+    """Resolve ``LOCAL_TZ`` once, failing closed on a bad value.
+
+    A bad zone used to raise inside ``ZoneInfo(LOCAL_TZ)`` on every parse
+    attempt, where the broad ``except Exception: pass`` in
+    :func:`parse_key_datetime_utc_from_string` swallowed it. All patterns then
+    failed and ``canonicalize_key`` silently downgraded a UTC join key to a
+    camera-local basename -- two cameras covering one moment stopped joining.
+    Configuration errors must stop the run, not quietly change the key
+    contract. Kept out of the parse helpers so the swallow-all guards cannot
+    hide it.
+    """
+    if ZoneInfo is None:  # pragma: no cover - platforms without tzdata
+        return None
+    try:
+        return ZoneInfo(LOCAL_TZ)
+    except Exception as exc:
+        raise RuntimeError(
+            f"LOCAL_TZ={LOCAL_TZ!r} is not a valid IANA timezone; "
+            "refusing to derive non-UTC join keys from an unknown zone"
+        ) from exc
+
+
+_LOCAL_ZONE = _resolve_local_zone()
+
 # ---------------------------------------------------------------------------
 # Discovery patterns
 # ---------------------------------------------------------------------------
@@ -62,8 +88,8 @@ def stable_id(*parts: str) -> str:
 
 
 def _to_localized(dt: datetime) -> datetime:
-    if ZoneInfo:
-        return dt.replace(tzinfo=ZoneInfo(LOCAL_TZ))
+    if _LOCAL_ZONE is not None:
+        return dt.replace(tzinfo=_LOCAL_ZONE)
     return dt.replace(tzinfo=timezone.utc)
 
 
