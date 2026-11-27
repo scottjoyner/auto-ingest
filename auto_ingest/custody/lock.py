@@ -53,6 +53,7 @@ from __future__ import annotations
 import errno
 import fcntl
 import os
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,8 +97,14 @@ class CampaignLock:
 
     def acquire(self) -> bool:
         _ensure(self.path.parent)
-        fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o666)
+        # Never follow a symlink planted at the lock path: the open below is
+        # followed by ftruncate/write, so following it would rewrite an
+        # unrelated file outside the lock root. Reject non-regular targets too.
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(self.path), flags, 0o666)
         try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(errno.EINVAL, "lock path is not a regular file")
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             os.close(fd)
