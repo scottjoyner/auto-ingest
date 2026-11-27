@@ -132,6 +132,19 @@ class GraphOutbox:
 
 _OUTBOX: Optional[GraphOutbox] = None
 
+_TRUE_FLAGS = frozenset({"1", "true", "yes", "on", "enabled"})
+
+
+def _flag_enabled(raw: Optional[str]) -> bool:
+    """Parse an opt-in flag; only explicit true-ish spellings enable it.
+
+    ``if os.environ.get(...)`` treats every non-empty string as true, so an
+    operator exporting ``AUTO_INGEST_OUTBOX=0`` (or ``false``/``no``/``off``)
+    would silently get an outbox — and a new SQLite file in the working dir.
+    Fail closed for anything that is not an explicit enable.
+    """
+    return (raw or "").strip().lower() in _TRUE_FLAGS
+
 
 def get_outbox(sqlite_path: Optional[str] = None) -> Optional[GraphOutbox]:
     """Return the process-wide outbox (or None if disabled).
@@ -143,14 +156,12 @@ def get_outbox(sqlite_path: Optional[str] = None) -> Optional[GraphOutbox]:
     global _OUTBOX
     if _OUTBOX is not None:
         return _OUTBOX
-    env = (sqlite_path or "").strip() or ""
-    import os
-
-    if os.environ.get("AUTO_INGEST_OUTBOX"):
-        path = env or os.environ.get("AUTO_INGEST_OUTBOX_PATH", DEFAULT_OUTBOX_PATH)
-        _OUTBOX = GraphOutbox(path)
-        return _OUTBOX
-    return None
+    explicit = (sqlite_path or "").strip()
+    if not (explicit or _flag_enabled(os.environ.get("AUTO_INGEST_OUTBOX"))):
+        return None
+    path = explicit or os.environ.get("AUTO_INGEST_OUTBOX_PATH", DEFAULT_OUTBOX_PATH)
+    _OUTBOX = GraphOutbox(path)
+    return _OUTBOX
 
 
 def _verify_transcription_exists(op_type: str, payload: Dict[str, Any]) -> bool:
