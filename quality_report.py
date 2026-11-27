@@ -17,7 +17,9 @@ def is_float(value):
     try:
         float(value)
         return True
-    except ValueError:
+    except (TypeError, ValueError):
+        # A missing CSV cell arrives as None (or another non-string object).
+        # That is "not numeric" data to report, not a reason to abort the pass.
         return False
 
 def validate_rows(rows):
