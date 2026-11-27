@@ -770,9 +770,28 @@ def hash_source(
     collisions_ledger = root / COLLISION_LEDGER
 
     done = already_hashed(ledger)
-    pending = [(k, p) for k, p in sorted(keys.items()) if k not in done]
+    # Resume by key alone is not enough: a recorded digest belongs to the size
+    # it was computed over. If the source grew or shrank since that pass, the
+    # old digest is stale evidence and the object must be hashed again.
+    pending = []
+    skipped_bytes = 0
+    for key, path in sorted(keys.items()):
+        recorded = done.get(key)
+        if recorded is None:
+            pending.append((key, path))
+            continue
+        try:
+            current_size = os.path.getsize(path)
+        except OSError:
+            # Cannot prove the recorded size still applies; let the hashing
+            # attempt record the failure rather than silently reusing evidence.
+            pending.append((key, path))
+            continue
+        if current_size != recorded:
+            pending.append((key, path))
+            continue
+        skipped_bytes += recorded
     skipped = len(keys) - len(pending)
-    skipped_bytes = sum(done.values())
 
     hashed = 0
     failed = 0
