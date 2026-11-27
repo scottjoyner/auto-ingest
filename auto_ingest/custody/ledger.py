@@ -507,7 +507,15 @@ def _read_ledger(path: Path, statuses: Tuple[str, ...], max_samples: int) -> Led
             if not record.key:
                 malformed += 1
                 continue
-            objects += 1
+            # Distinct keys, not rows. A --recheck pass re-proves objects it has
+            # already proved and appends a fresh row for each, so rows outnumber
+            # objects. Counting rows here made `destination_objects` report 4 for
+            # 2 objects and fabricated 2 "unverified present" files beside a
+            # verification_complete=True proposal. Every other reader in this
+            # package already de-duplicates by key (summarize_ledger, verify.py's
+            # verified_bytes, hashing.py's already_hashed).
+            if record.key not in index:
+                objects += 1
             digest = record.digest.strip().lower() if record.digest else None
             index[record.key] = digest
             if digest is None and len(undigested) < max_samples:
