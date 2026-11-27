@@ -454,11 +454,15 @@ def cmd_run_all(args) -> int:
         return r
 
     if not args.skip_copy:
-        step("copy audio/dashcam/bodycam", lambda: (
-            _run("./audio_copy.sh", [], env) or
-            _run("./dashcam_copy.sh", [], env) or
-            _run("./bodycam_copy.sh", [], env)
-        ))
+        def _copy_media():
+            # The three copiers handle different media/destinations (audio,
+            # dashcam, bodycam). They are complementary, not fallbacks: a
+            # failure in one must never skip the others. Run all three, then
+            # report a non-zero status if any of them failed.
+            codes = [_run(script, [], env) for script in
+                     ("./audio_copy.sh", "./dashcam_copy.sh", "./bodycam_copy.sh")]
+            return next((code for code in codes if code != 0), 0)
+        step("copy audio/dashcam/bodycam", _copy_media)
 
     if not args.skip_diarize:
         step("speaker diarization", lambda: _run_module("speakers", [], env))
