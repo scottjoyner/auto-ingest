@@ -185,10 +185,8 @@ RETURN j.key AS key, j.owner AS owner, j.status AS status, j.stages AS stages
 _UPDATE_STAGE_QUERY = """
 MATCH (j:IngestJob {key:$key})
 WHERE j.owner = $owner OR $owner = ''
-SET j.stages[$stage] = true
-WITH j
-WHERE $stage = 'graph_written'
-SET j.status = 'done'
+SET j.stages[$stage] = true,
+    j.status = CASE WHEN $stage = 'graph_written' THEN 'done' ELSE j.status END
 RETURN j.key AS key, j.stages AS stages, j.status AS status
 """
 
