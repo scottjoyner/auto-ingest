@@ -121,7 +121,9 @@ def plan_shorts(brief: Brief, anchors: List[Dict[str, object]], *,
     rnd = random.Random(seed)
 
     # Choose how many points per short and rotate through them.
-    points = list(brief.points) or [brief.hook]
+    # Keep the placeholder guard below meaningful: a falsy hook must not be
+    # wrapped in a one-element list, which would hide a blank point cue.
+    points = list(brief.points) or ([brief.hook] if brief.hook else [])
     if not points:
         points = ["(no points curated)"]
 
