@@ -271,7 +271,12 @@ class BaseAdapter:
     needs: List[str] = []
 
     def available(self) -> bool:
-        return all(os.environ.get(k) for k in self.needs)
+        # ``all([])`` is True in Python: an adapter that declares no credential
+        # vars must not report itself configured. Blank/whitespace env values
+        # are not credentials either. This is the last gate before a live upload.
+        return bool(self.needs) and all(
+            (os.environ.get(k) or "").strip() for k in self.needs
+        )
 
     def upload(self, item: QueueItem, *, dry_run: bool = True) -> Optional[str]:
         raise NotImplementedError
