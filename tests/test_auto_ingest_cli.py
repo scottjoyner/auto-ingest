@@ -272,7 +272,14 @@ def test_cmd_link_speakers_flags(cli, monkeypatch):
         captured["args"] = list(args)
         return 0
 
+    def fake_run(script, args, extra_env=None):
+        captured.setdefault("script_calls", []).append((script, list(args)))
+        return 0
+
     monkeypatch.setattr(cli, "_run_module", fake_run_module)
+    # The N11 re-anchor is a separate subprocess now that its status is
+    # propagated; stub it so this test stays about linker flag construction.
+    monkeypatch.setattr(cli, "_run", fake_run)
 
     rc = cli.cmd_link_speakers(_make_link_args())
     assert rc == 0
