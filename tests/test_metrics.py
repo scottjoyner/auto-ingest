@@ -194,3 +194,35 @@ def test_suggest_actions_thresholds():
 def test_suggest_actions_empty():
     from auto_ingest.shorts.feedback import suggest_actions
     assert suggest_actions([]) == []
+
+
+def test_ingest_platform_csv_missing_file_fails_closed(tmp_path):
+    """A missing export must not be reported as a successful zero-row ingest."""
+    import pytest
+    from auto_ingest.shorts.metrics import ingest_platform_csv
+
+    store = tmp_path / "metrics.jsonl"
+    missing = tmp_path / "no-such-export.csv"
+    with pytest.raises(FileNotFoundError):
+        ingest_platform_csv("youtube", str(missing), path=store)
+    assert not store.exists()
+
+
+def test_cli_metrics_ingest_missing_file_exits_nonzero(tmp_path, capsys):
+    """`publish metrics ingest --metrics-file <bad>` must not exit 0."""
+    import argparse
+    from auto_ingest.shorts import cli
+
+    store = tmp_path / "metrics.jsonl"
+    for fmt in ("csv", "json"):
+        args = argparse.Namespace(
+            target="ingest", platform="youtube", metrics_format=fmt,
+            metrics_file=str(tmp_path / ("no-such-export." + fmt)),
+            metrics_store=store, as_json=False,
+        )
+        rc = cli._cmd_publish_metrics(args)
+        out = capsys.readouterr().out
+        assert rc == 2, (fmt, rc, out)
+        assert "Ingested 0 metric record(s)" not in out
+        assert "not found" in out.lower() or "failed" in out.lower()
+    assert not store.exists()

@@ -646,11 +646,17 @@ def _cmd_publish_metrics(args) -> int:
             print("metrics ingest requires --metrics-file")
             return 2
         platform = args.platform
-        if args.metrics_format == "json":
-            rows = json.loads(Path(args.metrics_file).read_text(encoding="utf-8"))
-            n = metrics.ingest_dicts(platform, rows, path=store)
-        else:
-            n = metrics.ingest_platform_csv(platform, args.metrics_file, path=store)
+        try:
+            if args.metrics_format == "json":
+                rows = json.loads(Path(args.metrics_file).read_text(encoding="utf-8"))
+                n = metrics.ingest_dicts(platform, rows, path=store)
+            else:
+                n = metrics.ingest_platform_csv(platform, args.metrics_file, path=store)
+        except (OSError, ValueError) as exc:
+            # Missing/unreadable/malformed input is a failed ingest, not a
+            # successful zero-row ingest that exits 0.
+            print(f"metrics ingest failed: {exc}")
+            return 2
         print(f"Ingested {n} metric record(s) for {platform}")
         return 0
     if sub == "report":
