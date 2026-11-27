@@ -230,6 +230,16 @@ def render_plan(plan: Plan, out_dir: Path, *, only: Optional[List[str]] = None,
             continue
         try:
             p = render_short(item, out_dir, tts=tts, **render_kwargs)
+            # A short with no resolvable footage is marked "rejected" by
+            # render_short, which returns the would-be output path WITHOUT
+            # writing an MP4. It must not be reported as a rendered output:
+            # callers use len(out) as the rendered count (shorts CLI prints
+            # "Rendered N short(s)"; run_narrated_mix totals len(rendered)),
+            # and the manifest upsert is gated on `out` being non-empty.
+            # Leave the rejected short's status/out_path untouched and consume
+            # no clip for it.
+            if item.status == "rejected":
+                continue
             out.append(p)
             if item.out_path:
                 item.status = "rendered"
