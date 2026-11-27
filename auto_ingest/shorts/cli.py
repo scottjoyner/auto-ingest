@@ -587,27 +587,35 @@ def _cmd_schedule(args) -> int:
         print("--date day index must be >= 1")
         return 2
 
-    plans = scheduling.build_calendar(days=args.days)
+    queued = uploader.load_queue()
+    # Back the calendar with the shorts actually rendered on disk. Without an
+    # ``available`` list every slot is NEEDS_RENDER, so --apply can never enqueue
+    # anything yet the command still exits 0 -- a silent fail-open.
+    rendered = {s.key: s for s in publish.scan_rendered(Path(args.out_root))}
+    available = [{"short_id": s.key, "topic": s.topic} for s in rendered.values()]
+    plans = scheduling.build_calendar(days=args.days, available=available)
     slots = [s for dp in plans if dp.day == day_index for s in dp.slots]
     if not slots:
         print(f"[schedule] no slots for day {day_index} (calendar has {len(plans)} days)")
         return 0
 
-    queued = uploader.load_queue()
     print(f"[schedule] day {day_index} — {len(slots)} slot(s) "
           f"(apply={args.apply}):\n")
     n_queued = 0
     for s in slots:
+        pub = rendered.get(s.short_id) if s.short_id else None
+        exists = pub is not None and Path(pub.out_path).exists()
         found = None
         if s.short_id:
             found = next((q for q in queued if q.key == s.short_id
                           and q.platform == s.platform), None)
-            title = found.title if found else s.short_id.replace("_", " ")
-            exists = found is not None and Path(found.out_path).exists()
-            status = "READY"
+            title = found.title if found else (
+                pub.title if pub else s.short_id.replace("_", " "))
+            # A slot only gets a short_id when a render was found; if that file
+            # has since vanished, say so instead of claiming READY.
+            status = "READY" if exists else "MISSING_FILE"
         else:
             title = f"({s.note or 'NEEDS_RENDER'})"
-            exists = False
             status = "NEEDS_RENDER"
 
         # Best-effort platform-native title without creds.
@@ -622,11 +630,11 @@ def _cmd_schedule(args) -> int:
         print(f"      title: {title}")
         print(f"      persona: {s.persona_source}  needs_render={s.needs_render}")
 
-        if args.apply and s.short_id and exists:
-            pub = publish.Publishable(
-                key=found.key, topic=found.topic, title=found.title,
-                out_path=found.out_path, platform=found.platform)
-            publish.queue_for_publish(pub, platform=s.platform)
+        if args.apply and exists and pub is not None:
+            publish.queue_for_publish(
+                publish.Publishable(key=pub.key, topic=pub.topic, title=pub.title,
+                                    out_path=pub.out_path, platform=s.platform),
+                platform=s.platform)
             n_queued += 1
             log.info("schedule: enqueued %s -> %s", s.short_id, s.platform)
 
