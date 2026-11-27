@@ -508,7 +508,9 @@ class SourceReleaseEvidence:
             refused=_count(raw.get("refused"), "source_release.refused", c),
             audit_records=_count(raw.get("audit_records"),
                                  "source_release.audit_records", c),
-            started=_bool(raw.get("started", bool(raw.get("complete"))
+            # Infer "started" with the same strict parsing used for "complete".
+            # bool("false") is True, which marked a not-complete release as begun.
+            started=_bool(raw.get("started", _bool(raw.get("complete"))
                                   or released.files > 0)),
             complete=_bool(raw.get("complete")),
             error_summary=_bounded(raw.get("error_summary")
