@@ -285,9 +285,17 @@ def _export_label(sess, label: str, out_root: Path, budget: int) -> int:
 
 
 def _safe_filename(name: str) -> str:
-    keep = [c if (c.isalnum() or c in "-_.") else "_" for c in str(name)]
+    # Sanitising is many-to-one (slash/space/underscore all become "_", and long
+    # names are truncated). Without a discriminant, two distinct graph nodes in
+    # one label map to the same path and _export_label silently overwrites one
+    # with the other. A short stable digest of the ORIGINAL name makes the
+    # filename injective while keeping it bounded, path-safe and deterministic.
+    text = str(name)
+    keep = [c if (c.isalnum() or c in "-_.") else "_" for c in text]
     s = "".join(keep).strip("_.")
-    return (s[:120] or "node") + ".md"
+    stem = s[:110] or "node"
+    digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
+    return f"{stem}-{digest}.md"
 
 
 def _node_to_markdown(label: str, props: dict) -> str:
