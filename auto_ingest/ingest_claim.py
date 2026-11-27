@@ -116,6 +116,12 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _require_key(key: str) -> None:
+    """Reject keys that would MERGE every unkeyed job into one shared node."""
+    if key is None or not str(key).strip():
+        raise ValueError("claim key must be a non-empty string")
+
+
 def claim(driver, key: str, owner: str, ttl_sec: int = 3600,
           now_ms: Optional[int] = None) -> bool:
     """Try to take ownership of ``key`` for ``owner``.
@@ -126,6 +132,12 @@ def claim(driver, key: str, owner: str, ttl_sec: int = 3600,
     """
     if not owner:
         raise ValueError("claim owner must be a non-empty worker id")
+    _require_key(key)
+    if isinstance(ttl_sec, bool) or not isinstance(ttl_sec, (int, float)) or ttl_sec <= 0:
+        # A zero TTL makes the expiry boundary the current instant; a negative
+        # one puts it in the future so claims never expire. Both break the
+        # single-owner invariant this function exists to enforce.
+        raise ValueError("ttl_sec must be a positive number of seconds")
     now = now_ms if now_ms is not None else _now_ms()
     expires = now - int(ttl_sec * 1000)
     with driver.session() as sess:
@@ -223,6 +235,7 @@ def create_job(driver, key: str, stages: Optional[List[str]] = None) -> Dict:
     later ``claim`` it. ``stages`` is a map of stage -> False. Returns the job
     dict (single node, index-backed on ``IngestJob(key)``).
     """
+    _require_key(key)
     stage_list = stages if stages is not None else STAGES
     with driver.session() as sess:
         rec = sess.run(
