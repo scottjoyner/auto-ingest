@@ -39,6 +39,14 @@ class TTSUnavailable(RuntimeError):
     """Raised when the Coqui TTS stack is not installed."""
 
 
+def _is_valid_reference(path: Path) -> bool:
+    """A cached voice reference is usable only if it is a non-empty regular file."""
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def _cache_dir() -> Path:
     try:
         from auto_ingest_config import get_audio_root
@@ -146,7 +154,7 @@ def owner_local_audio() -> List[Path]:
 def extract_voice_reference(force: bool = False) -> Optional[Path]:
     """Build (and cache) a ~12s clean 22.05kHz mono WAV of the owner's voice."""
     cache = _cache_dir() / "owner_voice_reference.wav"
-    if cache.exists() and not force:
+    if not force and _is_valid_reference(cache):
         return cache
     caps = owner_audio_captures() + owner_local_audio()
     if not caps:
@@ -184,7 +192,7 @@ def extract_voice_reference(force: bool = False) -> Optional[Path]:
             concat_list.unlink()
         except Exception:
             pass
-    if not cache.exists():
+    if not _is_valid_reference(cache):
         return None
     log.info("Built owner voice reference: %s", cache)
     return cache
