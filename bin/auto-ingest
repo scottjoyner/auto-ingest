@@ -78,6 +78,23 @@ def _run(script: str, args: list, extra_env: Dict[str, str] | None = None) -> in
     return subprocess.call(cmd, cwd=str(REPO), env=env)
 
 
+def _run_every(steps) -> int:
+    """Run every step; return the first non-zero code (0 only if all succeeded).
+
+    A group of steps chained with Python's ``or`` looks like "run all of these",
+    but subprocesses return 0 on success, so ``or`` silently skipped every step
+    after the first failure. For independent sources (audio/dashcam/bodycam
+    copies) that omission loses data with no error beyond the generic stage
+    warning. Every step is attempted; failures are still reported to the caller.
+    """
+    rc = 0
+    for step in steps:
+        code = step()
+        if code != 0 and rc == 0:
+            rc = code
+    return rc
+
+
 # Canonical package modules (post W-42 restructure). Kept as the single source
 # of truth so run-all never depends on flat scripts that have been archived.
 MODULE_DIARIZE = "auto_ingest.diarize.link_global_speakers"
@@ -454,11 +471,11 @@ def cmd_run_all(args) -> int:
         return r
 
     if not args.skip_copy:
-        step("copy audio/dashcam/bodycam", lambda: (
-            _run("./audio_copy.sh", [], env) or
-            _run("./dashcam_copy.sh", [], env) or
-            _run("./bodycam_copy.sh", [], env)
-        ))
+        step("copy audio/dashcam/bodycam", lambda: _run_every([
+            lambda: _run("./audio_copy.sh", [], env),
+            lambda: _run("./dashcam_copy.sh", [], env),
+            lambda: _run("./bodycam_copy.sh", [], env),
+        ]))
 
     if not args.skip_diarize:
         step("speaker diarization", lambda: _run_module("speakers", [], env))
@@ -473,10 +490,11 @@ def cmd_run_all(args) -> int:
              ], env))
 
     if not args.skip_classify:
-        step("music/lyrics segment classification",
-             lambda: _run_module("01_precompute_music_segments", ["--push-neo4j"], env) or
-                     _run_module("02_classify_lyrics",
-                                 ["--segments-source", "neo4j", "--limit", "50000"], env))
+        step("music/lyrics segment classification", lambda: _run_every([
+            lambda: _run_module("01_precompute_music_segments", ["--push-neo4j"], env),
+            lambda: _run_module("02_classify_lyrics",
+                                ["--segments-source", "neo4j", "--limit", "50000"], env),
+        ]))
 
     if not args.skip_link:
         # Delegate to the existing link-speakers orchestration (package linker).
