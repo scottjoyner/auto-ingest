@@ -6,6 +6,7 @@ with frames at highway speed. We return a pool of (clip, timecode) anchors the
 planner draws from so every short gets neutral driving B-roll, not a specific
 event.
 """
+
 from __future__ import annotations
 
 import logging
@@ -20,6 +21,7 @@ DEFAULT_MPH_MIN = float(os.getenv("SHORTS_MPH_MIN", "45.0"))
 
 def _dashcam_root() -> Path:
     from auto_ingest_config import get_dashcam_root
+
     return Path(get_dashcam_root())
 
 
@@ -38,17 +40,24 @@ def _fr_path_for_key(clip_key: str, root: Path) -> Optional[Path]:
         year, mmdd = parts[0], parts[1]
         month = mmdd[:2]
         day = mmdd[2:]
-        cand = root / year / month / day / f"{key}.MP4"
-        if cand.exists():
-            return cand
+        date_dir = root / year / month / day
+        # Real cards carry the extension in both cases (see custody/staging.py),
+        # and ffmpeg accepts either. Probing the four spellings keeps this O(1):
+        # no recursive rglob over a saturated NAS tree, which was the original
+        # reason this resolver was made direct.
+        for ext in (".MP4", ".mp4", ".Mp4", ".mP4"):
+            cand = date_dir / f"{key}{ext}"
+            if cand.is_file():
+                return cand
     # NOTE: no recursive rglob fallback here -- scanning the whole dashcam
     # tree per clip (millions of files, often on a saturated NAS mount) is a
     # pathological hang. Callers that need a missing clip resolve it lazily.
     return None
 
 
-def select_highway_pool(driver, *, mph_min: float = DEFAULT_MPH_MIN,
-                        limit: int = 400, seed_view: str = "F") -> List[Dict[str, object]]:
+def select_highway_pool(
+    driver, *, mph_min: float = DEFAULT_MPH_MIN, limit: int = 400, seed_view: str = "F"
+) -> List[Dict[str, object]]:
     """Return a pool of highway footage anchors.
 
     Each anchor: ``{"clip_key", "fr_path", "t_sec", "mph"}`` where ``fr_path`` is
@@ -66,7 +75,9 @@ def select_highway_pool(driver, *, mph_min: float = DEFAULT_MPH_MIN,
                    c.fps AS fps, c.path AS path
             LIMIT $limit
             """,
-            view=seed_view, mph=mph_min, limit=limit,
+            view=seed_view,
+            mph=mph_min,
+            limit=limit,
         ).data()
 
     anchors: List[Dict[str, object]] = []
@@ -76,24 +87,36 @@ def select_highway_pool(driver, *, mph_min: float = DEFAULT_MPH_MIN,
         frame_no = r.get("frame_no") or 0
         t_sec = float(frame_no) / float(fps) if fps else 0.0
         fr = _fr_path_for_key(clip_key, root)
-        anchors.append({
-            "clip_key": clip_key,
-            "fr_path": str(fr) if fr else None,
-            "t_sec": t_sec,
-            "mph": r.get("mph"),
-            "path": r.get("path"),
-        })
-    log.info("Highway pool: %d anchors (mph>=%.0f, view=%s); %d resolvable here",
-             len(anchors), mph_min, seed_view,
-             sum(1 for a in anchors if a["fr_path"]))
+        anchors.append(
+            {
+                "clip_key": clip_key,
+                "fr_path": str(fr) if fr else None,
+                "t_sec": t_sec,
+                "mph": r.get("mph"),
+                "path": r.get("path"),
+            }
+        )
+    log.info(
+        "Highway pool: %d anchors (mph>=%.0f, view=%s); %d resolvable here",
+        len(anchors),
+        mph_min,
+        seed_view,
+        sum(1 for a in anchors if a["fr_path"]),
+    )
     return anchors
 
 
-def pick_shots(anchors: List[Dict[str, object]], *, count: int = 3,
-               min_gap_sec: float = 8.0, clip_dur: float = 6.0,
-               rng_seed: Optional[int] = None) -> List[Dict[str, object]]:
+def pick_shots(
+    anchors: List[Dict[str, object]],
+    *,
+    count: int = 3,
+    min_gap_sec: float = 8.0,
+    clip_dur: float = 6.0,
+    rng_seed: Optional[int] = None,
+) -> List[Dict[str, object]]:
     """Pick ``count`` non-overlapping, locally-available shots from the pool."""
     import random
+
     rnd = random.Random(rng_seed)
     available = [a for a in anchors if a["fr_path"]]
     rnd.shuffle(available)
@@ -107,12 +130,14 @@ def pick_shots(anchors: List[Dict[str, object]], *, count: int = 3,
         # keep shots of the same clip separated
         if ck in last_end and start < last_end[ck] + min_gap_sec:
             continue
-        picked.append({
-            "clip_key": ck,
-            "fr_path": a["fr_path"],
-            "t_sec": start,
-            "dur": clip_dur,
-            "mph": a["mph"],
-        })
+        picked.append(
+            {
+                "clip_key": ck,
+                "fr_path": a["fr_path"],
+                "t_sec": start,
+                "dur": clip_dur,
+                "mph": a["mph"],
+            }
+        )
         last_end[ck] = start + clip_dur
     return picked
