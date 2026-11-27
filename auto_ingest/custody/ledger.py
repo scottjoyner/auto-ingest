@@ -338,7 +338,12 @@ class ReconciliationResult:
                 reasons.append(f"{name}_ledger_malformed_lines={read.malformed}")
             if read.truncated:
                 reasons.append(f"{name}_ledger_truncated")
-        if self.expected_source_objects is not None and self.source_objects:
+        if self.expected_source_objects is not None:
+            # Cross-check even when the ledger is empty. Zero proving rows against
+            # a positive inventory is the most extreme coverage shortfall, not a
+            # reason to skip the check: the old `and self.source_objects` guard let
+            # an empty hash ledger read as a clean 0-file diff and propose
+            # verification_complete=true for the whole campaign.
             if self.source_objects != self.expected_source_objects:
                 reasons.append(
                     f"hash_ledger_covers_{self.source_objects}_of_"
