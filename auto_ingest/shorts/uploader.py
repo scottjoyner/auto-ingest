@@ -164,13 +164,17 @@ def _title_for(platform: str, item: QueueItem, *,
 
 
 def _hashtags(platform: str, item: QueueItem) -> str:
-    topic = item.topic.replace("_", "")
+    # A topic is often a multi-word label, and can be blank. Emit one clean
+    # token: a bare "#" or a "#" followed by whitespace is not a hashtag, and
+    # this string is published verbatim in descriptions and plan captions.
+    topic = "".join(item.topic.replace("_", "").split())
+    hashtag_topic = [topic] if topic else []
     common = ["ai", "research", "machinelearning", "shorts"]
     if platform == "tiktok":
-        return " ".join(f"#{t}" for t in [topic] + common[:3])
+        return " ".join(f"#{t}" for t in hashtag_topic + common[:3])
     if platform == "instagram":
-        return " ".join(f"#{t}" for t in [topic, "ai", "research", "learnontiktok", "savethis"])
-    return " ".join(f"#{t}" for t in [topic] + common)
+        return " ".join(f"#{t}" for t in hashtag_topic + ["ai", "research", "learnontiktok", "savethis"])
+    return " ".join(f"#{t}" for t in hashtag_topic + common)
 
 
 def _description_for(platform: str, item: QueueItem) -> str:
