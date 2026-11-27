@@ -966,7 +966,14 @@ ACCEPTANCE_FUNCS = {
     "http_ok": acc_http_ok,
 }
 
-def run_acceptance(task: Dict[str, Any], task_id: str) -> List[Dict[str, Any]]:
+def run_acceptance(task: Dict[str, Any], task_id: str, *,
+                   execution_steps: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    # Worker acceptance consumes same-run evidence only; absence is not retry authority.
+    http_observations = {}
+    if execution_steps is not None:
+        for step in execution_steps:
+            if step.get("op") == "http_get":
+                http_observations[step["url"]] = step
     results = []
     acc_list = task.get("acceptance") or []
     for i, a in enumerate(acc_list):
@@ -975,7 +982,17 @@ def run_acceptance(task: Dict[str, Any], task_id: str) -> List[Dict[str, Any]]:
         if not f:
             results.append({"index": i, "type": typ, "passed": False, "detail": "unknown acceptance type"})
             continue
-        ok, detail = f(a.get("args", {}), task_id)
+        args = a.get("args", {})
+        if typ == "http_ok" and execution_steps is not None:
+            url = args.get("url")
+            observation = http_observations.get(url) if isinstance(url, str) else None
+            status = observation.get("status") if observation else None
+            ok = (observation is not None and "error" not in observation
+                  and type(status) is int and 200 <= status < 300)
+            detail = (f"same-run HTTP status={status}" if type(status) is int
+                      else "same-run HTTP observation unavailable or failed")
+        else:
+            ok, detail = f(args, task_id)
         results.append({"index": i, "type": typ, "passed": bool(ok), "detail": detail})
     return results
 
@@ -1024,16 +1041,20 @@ TIME: {datetime.datetime.utcnow().isoformat()}Z
             artdir, task_id=tid, run_id=run_id, output=output)
         steps.append({"op":"local_output_receipt","path":str(receipt)})
 
+    observed_urls = set()
     for a in (task.get("acceptance") or []):
-        if a.get("type") == "http_ok" and a.get("args",{}).get("url"):
-            url = a["args"]["url"]
+        if (a.get("type") or "").strip() == "http_ok":
+            url = a.get("args", {}).get("url")
+            if not isinstance(url, str) or not url or url in observed_urls:
+                continue
+            observed_urls.add(url)
             try:
                 r = requests.get(url, timeout=10)
                 (artdir / "http.status").write_text(str(r.status_code), encoding="utf-8")
                 (artdir / "http.body.txt").write_text((r.text or "")[:4096], encoding="utf-8")
                 steps.append({"op":"http_get","url":url,"status":r.status_code,"bytes":len(r.content)})
             except Exception as e:
-                steps.append({"op":"http_get","url":url,"error":str(e)})
+                steps.append({"op":"http_get","url":url,"error":type(e).__name__})
 
     return {
         "steps": steps,
@@ -1084,7 +1105,7 @@ def execute_ready(limit: int):
             manifest_exec = execute_task_minimal(task, run_id=run["id"])
             run["manifest"].update(manifest_exec)
             stage = "acceptance"
-            results = run_acceptance(task, tid)
+            results = run_acceptance(task, tid, execution_steps=manifest_exec.get("steps", []))
             run["manifest"]["acceptance_results"] = results
             success = all(r["passed"] for r in results) if results else True
         except Exception as exc:

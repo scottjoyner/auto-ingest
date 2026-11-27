@@ -48,7 +48,7 @@ def test_real_local_output_survives_unacknowledged_finalization(tmp_path):
     ns = executor(tmp_path, neo_driver=Driver, q_pick_ready=pick,
                   q_get_task=lambda s, tid: {"task": {"id": tid, "title": "café"}},
                   q_attach_run=attach, q_finish_run=finish,
-                  run_acceptance=lambda task, tid: [{"passed": True}])
+                  run_acceptance=lambda task, tid, *, execution_steps: [{"passed": True}])
     with pytest.raises(OSError):
         ns["execute_ready"](1)
     rid = state["owner"]

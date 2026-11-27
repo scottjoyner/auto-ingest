@@ -27,7 +27,7 @@ jobs:
           # tests/test_abtest.py imports it unguarded, so without it collection
           # dies before a single test runs. Not pulled in by opencv-headless.
           pip install "pydantic>=2.6" "PyYAML>=6.0" "neo4j>=5.24" \
-                      "fastapi" "python-multipart" "httpx" "numpy" \
+                      "fastapi" "python-multipart" "httpx" "requests>=2.32" "numpy" \
                       "opencv-python-headless" "Pillow" "pytest>=8.0" "pytest-cov>=6.0" \
                       "ruff>=0.5" "pydantic-settings"
 
@@ -74,7 +74,7 @@ jobs:
           # (Comment must sit ABOVE the command - a # after a \ continuation
           # swallows the rest of the line and the shell runs the next token.)
           .venv/bin/pip install "pydantic>=2.6" "PyYAML>=6.0" "neo4j>=5.24" \
-                      "fastapi" "python-multipart" "httpx" "numpy" \
+                      "fastapi" "python-multipart" "httpx" "requests>=2.32" "numpy" \
                       "opencv-python-headless" "Pillow" "pytest>=8.0" "pytest-cov>=6.0" \
                       "pydantic-settings" "moviepy==1.0.3"
           .venv/bin/python -m pytest tests/ -q

@@ -44,7 +44,7 @@ def test_selected_tasks_reach_terminal_states(tmp_path, failure_stage):
         (directory / "output.txt").write_text(tid)
         return {"artifacts_dir": str(directory), "steps": [{"op": "write_file"}]}
 
-    def acceptance(task, tid):
+    def acceptance(task, tid, *, execution_steps):
         checks.append(tid)
         if tid == "first" and failure_stage == "acceptance":
             raise ValueError("private details should not be persisted")
