@@ -21,6 +21,47 @@ import time
 from packaging.requirements import Requirement
 
 
+def verify_operator_report(root, env, target):
+    """Exercise the actual packaged operator command, without network or DB."""
+    from auto_ingest.executor_evidence import publish_http_intent, publish_http_outcome
+
+    directory = root / "operator-fixture"
+    directory.mkdir()
+    identity = {"task_id": "fixture", "run_id": "11111111-1111-4111-8111-111111111111",
+                "url": "http://127.0.0.1:1/fixture?marker=synthetic-private"}
+    # Deliberately strip all database/model environment variables.
+    clean_env = {"PATH": env["PATH"], "HOME": str(root),
+                 "PYTHONDONTWRITEBYTECODE": "1", "NO_PROXY": "*"}
+    if target:
+        clean_env["PYTHONPATH"] = str(target)
+
+    def invoke():
+        result = subprocess.run(
+            [sys.executable, "-m", "auto_ingest.executor_http_report",
+             "--artifact-dir", str(directory)],
+            input=json.dumps(identity), cwd=root, env=clean_env,
+            capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, "installed operator report failed"
+        assert "synthetic-private" not in result.stdout
+        data = json.loads(result.stdout)
+        assert data["replay_allowed"] is False
+        assert data["remote_completion_verified"] is False
+        assert data["task_id"] == identity["task_id"] and data["run_id"] == identity["run_id"]
+        assert data["target_sha256"] == hashlib.sha256(identity["url"].encode()).hexdigest()
+        return data
+
+    assert invoke()["classification"] == "HTTP_NO_EVIDENCE"
+    publish_http_intent(directory, **identity)
+    assert invoke()["classification"] == "HTTP_INTENT_ONLY_UNCERTAIN"
+    publish_http_outcome(directory, **identity, status=503)
+    before = {p.name: p.read_bytes() for p in directory.iterdir()}
+    data = invoke()
+    assert data["classification"] == "HTTP_LOCAL_RESPONSE_OBSERVED" and data["status"] == 503
+    assert before == {p.name: p.read_bytes() for p in directory.iterdir()}
+    print("INSTALLED_OPERATOR_REPORT_PASS 3/3", flush=True)
+    return 3
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--wheel", required=True, type=pathlib.Path)
@@ -149,12 +190,14 @@ def main():
             cli("--execute-ready", "1")
             assert counts() == [1, 1, 1] and len(calls) == 3
             print("POSITIVE_PASS", flush=True)
+            operator_cases = verify_operator_report(root, env, target)
         report = {"schema": 1, "commit": args.commit, "wheel": wheel.name,
                   "wheel_bytes": wheel.stat().st_size, "wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
                   "python": sys.version.split()[0], "dependencies": deps, "neo4j": db_version,
                   "negative_counts": [0, 0, 0], "terminal_counts": [1, 1, 1],
                   "fixture_http_calls": len(calls), "model_inference_calls": 0,
-                  "local_receipts_verified": 1, "acceptance": "PASS",
+                  "local_receipts_verified": 1, "operator_report_cases": operator_cases,
+                  "acceptance": "PASS",
                   "production_activation_allowed": False}
         with manifest.open("x", encoding="utf-8") as f:
             json.dump(report, f, indent=2, sort_keys=True)
