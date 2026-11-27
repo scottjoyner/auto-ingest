@@ -7,8 +7,21 @@ Pure: no network, no credentials, no real queue writes.
 
 from __future__ import annotations
 
-from auto_ingest.shorts import scheduling
+import json
+from pathlib import Path
+
+from auto_ingest.shorts import publish, scheduling, uploader
 from auto_ingest.shorts.cli import build_parser
+
+
+def _rendered_short(out_root: Path, topic: str = "large_language_models",
+                    key: str = "short_a") -> Path:
+    """Create one on-disk rendered MP4 in the layout scan_rendered expects."""
+    d = out_root / topic
+    d.mkdir(parents=True, exist_ok=True)
+    mp4 = d / f"{key}.mp4"
+    mp4.write_bytes(b"fake mp4")
+    return mp4
 
 
 def test_consume_calendar_for_day_returns_day1_slots():
@@ -55,7 +68,10 @@ def test_cli_publish_schedule_dry_run_no_queuing(capsys, monkeypatch, tmp_path):
     monkeypatch.setattr("auto_ingest.shorts.publish.QUEUE_PATH", tmp_path / "queue.jsonl")
     monkeypatch.setattr("auto_ingest.shorts.uploader.QUEUE_PATH", tmp_path / "queue.jsonl")
 
-    args = build_parser().parse_args(["publish", "schedule", "--days", "3"])
+    args = build_parser().parse_args([
+        "publish", "schedule", "--days", "3",
+        "--out-root", str(tmp_path / "rendered"),
+    ])
     assert args.action == "schedule"
     rc = args.func(args)
     out = capsys.readouterr().out
@@ -109,3 +125,56 @@ def test_calendar_to_json_needs_render_and_persona(monkeypatch):
         for s in dp["slots"]:
             assert s["persona_source"] == "stylized"
             assert s["needs_render"] is True
+
+
+def test_schedule_apply_enqueues_rendered_short(capsys, monkeypatch, tmp_path):
+    """--apply must enqueue a short that is actually rendered on disk.
+
+    Regression: the schedule action built its calendar with no ``available``
+    shorts, so every slot was NEEDS_RENDER and --apply enqueued 0 items while
+    still exiting 0 (silent fail-open).
+    """
+    out_root = tmp_path / "rendered"
+    mp4 = _rendered_short(out_root)
+    queue = tmp_path / "queue.jsonl"
+    monkeypatch.setattr(uploader, "QUEUE_PATH", queue)
+    monkeypatch.setattr(publish, "QUEUE_PATH", queue)
+
+    args = build_parser().parse_args([
+        "publish", "schedule", "--days", "1", "--apply",
+        "--out-root", str(out_root),
+    ])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "READY" in out
+    assert "1 enqueued" in out
+    rows = [json.loads(line) for line in queue.read_text().splitlines() if line.strip()]
+    assert len(rows) == 1
+    assert rows[0]["key"] == "short_a"
+    assert rows[0]["platform"] == "youtube_shorts"
+    assert rows[0]["out_path"] == str(mp4)
+
+
+def test_schedule_reports_missing_rendered_file_without_enqueue(capsys, monkeypatch, tmp_path):
+    """A slot backed by a vanished render must not be labelled READY or queued."""
+    out_root = tmp_path / "rendered"
+    _rendered_short(out_root)
+    queue = tmp_path / "queue.jsonl"
+    monkeypatch.setattr(uploader, "QUEUE_PATH", queue)
+    monkeypatch.setattr(publish, "QUEUE_PATH", queue)
+    monkeypatch.setattr(
+        publish, "scan_rendered",
+        lambda root: [publish.Publishable(
+            key="short_a", topic="large_language_models", title="short a",
+            out_path=str(tmp_path / "gone.mp4"))],
+    )
+
+    args = build_parser().parse_args([
+        "publish", "schedule", "--days", "1", "--apply",
+        "--out-root", str(out_root),
+    ])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "MISSING_FILE" in out
+    assert "0 enqueued" in out
+    assert not queue.exists()
