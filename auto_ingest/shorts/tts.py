@@ -22,6 +22,7 @@ captures (often several minutes) the clone is already high-fidelity.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import subprocess
@@ -274,6 +275,16 @@ def synthesize(text: str, ref_wav: Path, out_wav: Path) -> Path:
     return out_wav
 
 
+def _narration_cache_key(item_title: str) -> str:
+    """Stable, process-independent cache key for a short's title.
+
+    ``hash(str)`` is salted per process by ``PYTHONHASHSEED``, so it cannot name
+    an on-disk cache: a restarted process would never find the previous run's
+    narration and would re-synthesize the same script.  Use an explicit digest.
+    """
+    return hashlib.sha256(item_title.encode("utf-8")).hexdigest()[:16]
+
+
 def narrate(item_title: str, cues: List[dict]) -> Optional[Path]:
     """Build a narration WAV from a short's scripted cues.
 
@@ -286,7 +297,7 @@ def narrate(item_title: str, cues: List[dict]) -> Optional[Path]:
     script = " ".join((c.get("text") or "").strip() for c in cues if c.get("text"))
     if not script:
         return None
-    out = _cache_dir() / f"narration_{abs(hash(item_title))}.wav"
+    out = _cache_dir() / f"narration_{_narration_cache_key(item_title)}.wav"
     if out.exists():
         return out
     try:
