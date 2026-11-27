@@ -59,8 +59,14 @@ def check_anchor_health(expected: int = 1) -> int:
     from ``expected`` so the CLI can exit non-zero.
     """
     count = count_is_me_global_speakers()
-    assert count == expected, (
-        f"Expected exactly {expected} 'is_me' GlobalSpeaker node, "
-        f"found {count}."
-    )
+    # An explicit raise, not `assert`: python -O (PYTHONOPTIMIZE=1) deletes
+    # assert statements at compile time, which would let this health check
+    # report a fragmented anchor as healthy and exit 0. The exception type and
+    # message are unchanged, so callers (scripts/check_anchor_health.py) keep
+    # working exactly as before.
+    if count != expected:
+        raise AssertionError(
+            f"Expected exactly {expected} 'is_me' GlobalSpeaker node, "
+            f"found {count}."
+        )
     return count
