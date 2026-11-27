@@ -27,6 +27,40 @@ from typing import Any, Dict, Mapping, Tuple
 #: summary must stay bounded; per-file detail belongs in the external ledgers.
 MAX_SUMMARY_ENTRIES = 20
 
+#: Fine-grained knobs that may relax or tighten the release gate. They must be
+#: parsed as booleans, never left as the raw document value: a JSON policy file
+#: can carry the *string* ``"false"``, and every non-empty string is truthy in
+#: Python. That turned an explicit "do not honour exemptions" into "honour
+#: them", and the release gate read the result as permission.
+BOOL_FIELDS = frozenset({
+    "allow_hash_exemptions",
+    "require_operator_witness",
+    "strict_destination_scope",
+    "require_destination_identity",
+    "require_read_only_source",
+    "require_mounted_destination",
+})
+
+
+def _policy_bool(value: Any, field_name: str) -> bool:
+    """Parse a policy boolean, refusing values that are not booleans.
+
+    Canonical textual spellings are accepted because JSON policy overrides are
+    authored by hand; anything else is an error rather than a guess. A value we
+    cannot understand must never be silently promoted to True.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    raise ValueError(f"{field_name} must be a boolean, got {value!r}")
+
 
 @dataclass(frozen=True)
 class CustodyPolicy:
@@ -107,7 +141,8 @@ class CustodyPolicy:
         kwargs: Dict[str, Any] = {}
         for key in known:
             if key in raw and raw[key] is not None:
-                kwargs[key] = raw[key]
+                kwargs[key] = (_policy_bool(raw[key], key)
+                               if key in BOOL_FIELDS else raw[key])
         for field_name in ("declared_hash_exemptions", "declared_source_exclusions",
                            "tolerated_foreign_subtrees"):
             if field_name in kwargs:
