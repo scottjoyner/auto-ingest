@@ -14,8 +14,25 @@ usage:
 """
 import argparse, os, subprocess, sys, tempfile, time
 import csv
+import math
 
 def sh(c): return subprocess.run(c, shell=True, capture_output=True, text=True)
+
+def _rate_to_fps(rate):
+    """Parse an ffprobe rational rate into a finite, non-negative FPS.
+
+    Rates that cannot be interpreted (zero or non-numeric denominator, blank or
+    non-finite parts) degrade to 0.0 rather than aborting an entire batch with a
+    raw ZeroDivisionError/ValueError. The caller's historical ``30/1`` default
+    still applies when ffprobe omits the key entirely.
+    """
+    try:
+        num, den = (str(rate).split("/") + ["1"])[:2]
+        fps = float(num) / float(den or 1)
+    except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+    return fps if math.isfinite(fps) and fps >= 0.0 else 0.0
+
 
 def probe_fps_w_h(path):
     r = sh(f'ffprobe -v quiet -print_format json -show_streams -select_streams v:0 "{path}"')
@@ -23,8 +40,7 @@ def probe_fps_w_h(path):
     j = json.loads(r.stdout or "{}")
     st = (j.get("streams") or [{}])[0]
     rate = st.get("avg_frame_rate", "30/1")
-    num, den = (rate.split("/") + ["1"])[:2]
-    fps = float(num) / float(den or 1)
+    fps = _rate_to_fps(rate)
     return fps, int(st.get("width", 0)), int(st.get("height", 0))
 
 def main():
