@@ -17,7 +17,8 @@ def is_float(value):
     try:
         float(value)
         return True
-    except ValueError:
+    except (ValueError, TypeError):
+        # csv.DictReader yields None for a missing trailing cell.
         return False
 
 def validate_rows(rows):
@@ -29,32 +30,20 @@ def validate_rows(rows):
     prev_row = None
 
     for i, row in enumerate(rows):
-        # Skip the first row (header) if it's not a data row
-        # (DictReader already skips header by default, so only do this
-        # if you read raw lines; with DictReader, the first iteration
-        # is the first data row).
-        
-        if i == 0:
-            prev_row = row
-            continue
-
         current_key = row["Key"]
-        prev_key    = prev_row["Key"]
-
-        current_mph = row["MPH"]
-        prev_mph    = prev_row["MPH"]
-
         current_lat = row["Lat"]
-        prev_lat    = prev_row["Lat"]
-
         current_long = row["Long"]
-        prev_long    = prev_row["Long"]
-
         current_frame = row["Frame"]
-        prev_frame    = prev_row["Frame"]
 
-        # We'll collect any issues in this row here:
+        # We'll collect any issues in this row here. DictReader has already
+        # consumed the header, so i == 0 is the first *data* row: skipping it
+        # used to omit the first record entirely (bad values on a one-row CSV
+        # produced "No issues found") and misattributed its bad values to row 2.
         row_issues = []
+        if not is_float(current_lat):
+            row_issues.append(f"Lat is not numeric (value={current_lat})")
+        if not is_float(current_long):
+            row_issues.append(f"Long is not numeric (value={current_long})")
 
         # 1. Check Frame increment
         # if is_float(current_frame) and is_float(prev_frame):
@@ -73,22 +62,21 @@ def validate_rows(rows):
         # else:
         #     row_issues.append(f"MPH is not numeric (current={current_mph}, prev={prev_mph})")
 
-        # 3. Check Lat/Long difference
-        # If lat or long are not numeric, that’s an immediate issue
-        # If they are numeric, check the difference against thresholds
-        if is_float(current_lat) and is_float(prev_lat):
-            lat_diff = abs(float(current_lat) - float(prev_lat))
-            if lat_diff > MAX_LAT_CHANGE:
-                row_issues.append(f"Lat changed by {lat_diff}, exceeds threshold of {MAX_LAT_CHANGE}")
-        else:
-            row_issues.append(f"Lat is not numeric (current={current_lat}, prev={prev_lat})")
+        if prev_row is not None:
+            prev_lat = prev_row["Lat"]
+            prev_long = prev_row["Long"]
+            # 3. Check Lat/Long difference against the preceding row. Numeric
+            # validity is reported above for this row itself, so a bad value
+            # is no longer silently charged to the following row.
+            if is_float(current_lat) and is_float(prev_lat):
+                lat_diff = abs(float(current_lat) - float(prev_lat))
+                if lat_diff > MAX_LAT_CHANGE:
+                    row_issues.append(f"Lat changed by {lat_diff}, exceeds threshold of {MAX_LAT_CHANGE}")
 
-        if is_float(current_long) and is_float(prev_long):
-            long_diff = abs(float(current_long) - float(prev_long))
-            if long_diff > MAX_LONG_CHANGE:
-                row_issues.append(f"Long changed by {long_diff}, exceeds threshold of {MAX_LONG_CHANGE}")
-        else:
-            row_issues.append(f"Long is not numeric (current={current_long}, prev={prev_long})")
+            if is_float(current_long) and is_float(prev_long):
+                long_diff = abs(float(current_long) - float(prev_long))
+                if long_diff > MAX_LONG_CHANGE:
+                    row_issues.append(f"Long changed by {long_diff}, exceeds threshold of {MAX_LONG_CHANGE}")
 
         # 4. Check Key changes (optional / example)
         # If you expect the same Key for a sequence of frames, you might flag if it changes.
