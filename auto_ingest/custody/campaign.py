@@ -28,6 +28,23 @@ def _norm(value: Optional[str]) -> str:
     return (value or "").strip().upper()
 
 
+def _strict_mounted(value: Any) -> Optional[bool]:
+    """Parse the declared mount flag; None means genuinely unobserved."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    raise ValueError("mounted must be a boolean")
+
+
 def _fingerprint(*parts: Optional[str]) -> str:
     blob = _ID_SEP.join(_norm(p) for p in parts)
     if not blob.replace(_ID_SEP, ""):
@@ -224,7 +241,7 @@ class Campaign:
             ),
             host_path=(dest_raw or {}).get("host_path"),
             resolved_from=str((dest_raw or {}).get("resolved_from") or "unresolved"),
-            mounted=(dest_raw or {}).get("mounted"),
+            mounted=_strict_mounted((dest_raw or {}).get("mounted")),
             identity=StorageIdentity.from_dict((dest_raw or {}).get("identity"))
             if isinstance((dest_raw or {}).get("identity"), Mapping) else None,
         )
