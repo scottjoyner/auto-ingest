@@ -220,7 +220,14 @@ def name_problem_blockers(samples: Tuple[str, ...], limit: int) -> Tuple[Blocker
     Nothing here resolves anything. The planner has no filesystem access and no
     business renaming a key; it reports the problem and stops, and the operator
     decides which spelling the campaign keeps.
+
+    ``limit`` is a hard cap, and may be zero when an operator configures
+    ``policy.max_summary_entries`` to 0. Zero (or less) means no blockers at
+    all: the cap is checked before the first sample is considered, not only
+    after an append.
     """
+    if limit <= 0:
+        return ()
     blockers: List[Blocker] = []
     for sample in samples:
         for prefix, code, remedy in _NAME_PROBLEM_CODES:
