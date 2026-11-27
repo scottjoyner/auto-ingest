@@ -128,7 +128,14 @@ def scan_rendered(out_root: Path) -> List[Publishable]:
     out: List[Publishable] = []
     if not root.exists():
         return out
-    for mp4 in sorted(root.rglob("*.mp4")):
+    # Extension case is not meaningful for a rendered clip: staging preserves the
+    # source card's case (.MP4 is routine), so a case-sensitive rglob("*.mp4")
+    # silently skipped every uppercase render on the DB-independent staging path.
+    # Compare the suffix case-insensitively and require a real file, so a
+    # directory merely named "folder.mp4" is not staged as a publishable short.
+    for mp4 in sorted(root.rglob("*")):
+        if mp4.suffix.lower() != ".mp4" or not mp4.is_file():
+            continue
         topic = mp4.parent.name
         key = mp4.stem
         out.append(Publishable(
