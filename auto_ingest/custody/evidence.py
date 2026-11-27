@@ -172,6 +172,7 @@ class InventoryEvidence:
             "discovered_files": self.discovered_files,
             "observed_identity": (self.observed_identity.to_dict()
                                   if self.observed_identity else None),
+            "observed_at": self.observed_at,
             "roots": list(self.roots),
             "started": self.started,
             "verified": self.verified,
