@@ -33,6 +33,14 @@ class EventManager:
             self.current = EventState(id=now.strftime("evt-%Y%m%d%H%M%S%f"), start=now, last_seen=now, detections=[])
 
         if self.current and has_bird:
+            if (now - self.current.last_seen) > self.merge_window:
+                # A gap longer than the merge window is a new visit, not a
+                # continuation: close the old event instead of folding this
+                # distant detection into it.
+                done = self.current
+                self.last_event_end = now
+                self.current = None
+                return "finalized", done
             self.current.last_seen = now
             self.current.detections.extend(detections)
             return "active", self.current
