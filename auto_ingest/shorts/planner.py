@@ -99,7 +99,17 @@ def _distribute_cues(title: str, hook: str, points: List[str], sources: List,
     # Optional real myth/fact pair (misconception -> paper correction).
     if myth_fact:
         mc, fc = myth_fact
-        cues += myth_fact_pair(mc, fc)
+        # The helper defaults to an opening-hook start (0.4s). Appending the
+        # pair at the end of the cue list used to collide with the hook and the
+        # first points; schedule it after the content built so far instead.
+        mf_start = max((c.end for c in cues), default=0.4) + 0.2
+        pair = myth_fact_pair(mc, fc, start=mf_start)
+        # Keep the whole device inside the runtime when preceding content runs
+        # long: shift it left by the overflow, never before the 0.4s lead.
+        overflow = pair[-1].end - duration
+        if overflow > 0:
+            pair = myth_fact_pair(mc, fc, start=max(0.4, mf_start - overflow))
+        cues += pair
     if duration > 8.0:
         cues.append(build_payoff_cue(b, duration))
     if total_parts > 1:

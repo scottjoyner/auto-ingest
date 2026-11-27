@@ -179,9 +179,19 @@ def build_series_outro(brief: Brief, total_parts: int, short_index: int,
     )
 
 
-def myth_fact_pair(claim: str, correction: str) -> List[Cue]:
-    """Two back-to-back cues: a red 'myth' then a green 'fact' (shareable)."""
+def myth_fact_pair(claim: str, correction: str, *,
+                   start: float = 0.4) -> List[Cue]:
+    """Two back-to-back cues: a red 'myth' then a green 'fact' (shareable).
+
+    ``start`` is the first cue's start time. It defaults to ``0.4`` so standalone
+    callers keep the original opening-hook timing (byte-identical output).
+    Callers that append the pair to an existing cue list should pass that list's
+    current end so the pair is scheduled sequentially instead of colliding with
+    the hook and the early points.
+    """
+    s = round(float(start), 2)
     return [
-        Cue(start=0.4, end=3.2, text=f"Myth: {claim}", kind="myth"),
-        Cue(start=3.4, end=6.4, text=f"Fact: {correction}", kind="fact"),
+        Cue(start=s, end=round(s + 2.8, 2), text=f"Myth: {claim}", kind="myth"),
+        Cue(start=round(s + 3.0, 2), end=round(s + 6.0, 2),
+             text=f"Fact: {correction}", kind="fact"),
     ]
