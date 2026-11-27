@@ -180,7 +180,11 @@ def backend_info() -> Dict:
     mlx_available = (backend == "mlx")
     onnx_available = (backend == "onnx")
 
-    # faiss_backend() populates the cache on first call; read it back here.
+    # Probe here rather than reading the raw caches: on a fresh import they are
+    # None, so bool(None) reported "no faiss / no faiss GPU" even on a host with
+    # a GPU-capable faiss installed, until some other caller happened to invoke
+    # faiss_backend() first. The probe is cached, so repeated profiles are cheap.
+    faiss_backend()
     faiss_available = bool(_FAISS_AVAILABLE)
     faiss_gpu = bool(_FAISS_GPU)
 
