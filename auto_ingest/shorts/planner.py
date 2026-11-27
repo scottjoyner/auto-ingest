@@ -145,7 +145,13 @@ def plan_shorts(brief: Brief, anchors: List[Dict[str, object]], *,
     shorts: List[PlannedShort] = []
     for s_idx in range(short_count):
         start = s_idx * stride
-        window = points[start:start + stride] or points[:1]
+        # When there are fewer curated points than shorts, the strided slice for
+        # a later short is empty. Do not fall back to points[:1]: that repeats
+        # the first point in every extra short, breaking the disjoint partition
+        # this loop documents (and lying in `notes`). Use the same explicit
+        # placeholder as the blank-brief path so the operator can see there is
+        # no curated point for this part instead of getting duplicate content.
+        window = points[start:start + stride] or ["(no points curated)"]
 
         cues = _distribute_cues(
             title=brief.title,
