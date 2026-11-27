@@ -959,18 +959,25 @@ def to_evidence(result: HashProgress, *, algorithm: str = DEFAULT_ALGORITHM,
             "verified": result.complete and known == discovered,
             "started": True,
         }
+    # Both facts are independent and can arrive together: `custody hash --apply`
+    # passes `excluded` from the policy while the same pass may find name problems
+    # on the card. They share one `errors` block, so accumulate into a single dict
+    # rather than assigning twice - a second assignment would silently erase the
+    # first and leave the bundle claiming unresolved errors with no exclusion
+    # audit (or vice versa).
+    errors: Dict[str, Any] = {}
     if excluded:
         # Recorded, bounded, and carrying the patterns as well as the keys - so an
         # exclusion is auditable from the campaign alone, and the release gate can
         # compare it against what the policy actually declares (an exclusion the
         # policy does not honour is a blocker, same rule as hash exemptions).
-        fragment["errors"] = {
+        errors.update({
             "declared_exclusions": sorted({pattern.split("*")[0].rstrip("/")
                                            for pattern in excluded}),
             "excluded_objects": len(excluded),
-        }
+        })
     if result.name_problem_count:
-        fragment["errors"] = {
+        errors.update({
             "unresolved": result.name_problem_count,
             # Capped here as well as in the pass: this is the function that writes
             # the campaign summary, so the bound belongs at the boundary that
@@ -978,7 +985,9 @@ def to_evidence(result: HashProgress, *, algorithm: str = DEFAULT_ALGORITHM,
             # hand-edited or machine-written fragment cannot smuggle one row per
             # file into a bundle.
             "summaries": list(result.name_problems[:MAX_SUMMARY_ENTRIES]),
-        }
+        })
+    if errors:
+        fragment["errors"] = errors
     return fragment
 
 
