@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from .hashing import DEFAULT_ALGORITHM, digest_file
@@ -192,6 +192,58 @@ def ends_unterminated(ledger: Path) -> bool:
         return False
 
 
+
+def _lexical_safe_relative(value: str) -> tuple[bool, str]:
+    """Lexical safety check for a ledger key.
+
+    A key is a relative path identity. Anything absolute, empty or containing a
+    ``..`` component can never be a legitimate source key, so it is refused
+    rather than normalised. Symlinks cannot be judged here (no root is known for
+    a bare key); the destination-side check below covers the path that is
+    actually read.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return False, "empty_key"
+    pure = PurePosixPath(value)
+    if not pure.parts or pure.is_absolute() or pure.root or pure.drive:
+        return False, "absolute_destination_path"
+    if any(part == ".." for part in pure.parts):
+        return False, "key_escapes_destination"
+    return True, ""
+
+
+def _resolve_destination_path(root: Path, relative: str) -> tuple[Path | None, str]:
+    """Resolve ``relative`` under ``root`` or return ``(None, reason)``.
+
+    Fail closed: an empty/absolute/traversing path, or any path that resolves
+    through a symlink, is refused. The check is ``resolved == joined`` after
+    resolving the root first, so a link anywhere between the root and the object
+    (including one that points back inside the root) is detected rather than
+    followed. Nothing outside ``root`` is ever returned.
+    """
+    ok, reason = _lexical_safe_relative(relative)
+    if not ok:
+        # Preserve the escape reason when the traversal is in the relative path;
+        # otherwise report the lexical reason we already computed.
+        return None, reason
+    base = Path(root)
+    try:
+        base_real = base.resolve()
+    except OSError:
+        return None, "destination_root_unresolvable"
+    joined = base_real.joinpath(*PurePosixPath(relative).parts)
+    try:
+        real = joined.resolve()
+    except OSError:
+        return None, "destination_path_unresolvable"
+    if real != joined:
+        return None, "destination_symlink_not_accepted"
+    try:
+        real.relative_to(base_real)
+    except ValueError:
+        return None, "key_escapes_destination"
+    return joined, ""
+
 def verify_destination(
     bundle: str | Path,
     destination_root: str | Path,
@@ -242,7 +294,26 @@ def verify_destination(
             if limit is not None and (verified + missing + mismatched + failed) >= limit:
                 break
             want_digest, size = expected[key]
-            target = base / staged.get(key, key)
+            landed = staged.get(key, key)
+            # Fail closed on anything that cannot be contained under the
+            # destination root: a traversal, an absolute path, or a path that
+            # resolves through a symlink. Such an entry is never hashed, so a
+            # hostile or corrupt ledger cannot make the verifier read (and attest)
+            # bytes outside the destination.
+            ok, reason = _lexical_safe_relative(key)
+            target = None
+            if ok:
+                target, reason = _resolve_destination_path(base, landed)
+            if target is None:
+                failed += 1
+                if len(errors) < max_errors:
+                    errors.append(f"{key}:{reason}")
+                handle.write(_record(key, FAILED, size=size,
+                                     path=str(base / landed) if isinstance(landed, str) else None,
+                                     detail=reason))
+                handle.flush()
+                os.fsync(handle.fileno())
+                continue
             if not target.exists():
                 missing += 1
                 handle.write(_record(key, MISSING, size=size,
