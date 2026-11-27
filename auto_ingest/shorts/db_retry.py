@@ -64,10 +64,13 @@ def retry(fn: Callable[[Any], T], *,
         except Exception as e:  # noqa: BLE001 - we inspect + decide
             last = e
             if is_transient(e):
-                wait = base_wait * (i + 1)
-                log.warning("DB pressure (%s); retry %d/%d in %.0fs",
-                            type(e).__name__, i + 1, attempts, wait)
-                time.sleep(wait)
+                # The final attempt has no retry behind it: sleeping here only
+                # delays the failure report by base_wait * attempts seconds.
+                if i + 1 < attempts:
+                    wait = base_wait * (i + 1)
+                    log.warning("DB pressure (%s); retry %d/%d in %.0fs",
+                                type(e).__name__, i + 1, attempts, wait)
+                    time.sleep(wait)
                 continue
             log.error("Non-transient DB error: %s", e)
             return None
