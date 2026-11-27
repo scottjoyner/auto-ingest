@@ -373,6 +373,12 @@ class ReconciliationEvidence:
                                     "reconciliation.destination_only", c),
             mismatched=_count(raw.get("mismatched", raw.get("mismatch")),
                               "reconciliation.mismatched", c),
+            # The filesystem-scope count is part of the same diff. Dropping it
+            # here zeroed it on every evidence round trip (import --apply and
+            # reconcile_preview), so the strict-destination gate could never see
+            # stray objects at the destination - a silent fail-open.
+            foreign_objects=_count(raw.get("foreign_objects"),
+                                   "reconciliation.foreign_objects", c),
             reconciled_at=_opt_str(raw.get("reconciled_at")),
         )
 
