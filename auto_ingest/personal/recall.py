@@ -71,7 +71,10 @@ def _fmt(v: Any) -> str:
     if v is None:
         return ""
     if isinstance(v, float):
-        if math.isnan(v):
+        # Blank *all* non-finite floats, not just NaN: an infinite cosine score
+        # or distance is not data and must never render as the literal "inf"
+        # in the CLI table (r36).
+        if not math.isfinite(v):
             return ""
         return f"{v:.4f}" if abs(v) < 1000 else f"{v:.2f}"
     return str(v)
