@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -45,9 +44,22 @@ def _classify(ext: str) -> Optional[str]:
 
 
 def _date_for(path: Path) -> Optional[str]:
-    m = DATE_RE.search(path.as_posix())
-    if m:
-        return f"{m.group('y')}-{m.group('m')}-{m.group('d')}"
+    # DATE_RE only checks the shape of the digit run, not that it is a real
+    # calendar date. Taking the first match unvalidated poisoned the catalog
+    # with impossible dates ("1080-20-24" from a 1920x1080 resolution run,
+    # "2024-13-01") and hid a real date later in the same name. Walk every
+    # candidate start (including overlapping ones) and accept the first that
+    # is actually a valid date; only then fall back to mtime.
+    s = path.as_posix()
+    for pos in range(len(s)):
+        m = DATE_RE.match(s, pos)
+        if not m:
+            continue
+        try:
+            d = datetime(int(m.group("y")), int(m.group("m")), int(m.group("d")))
+        except ValueError:
+            continue
+        return d.strftime("%Y-%m-%d")
     try:
         t = path.stat().st_mtime
         return datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d")
