@@ -73,6 +73,37 @@ class AcceptanceContractTests(unittest.TestCase):
             self.ns["execute_ready"](1)
         self.assertEqual(self.calls, [])
 
+    def test_corrupt_candidate_does_not_starve_next_valid_task(self):
+        outer = self
+        selected = []
+        claimed = []
+        finished = []
+
+        class Driver:
+            def session(self):
+                return nullcontext(object())
+
+        def pick(session, limit, *, excluded=()):
+            selected.append(tuple(excluded))
+            return ["good"] if excluded else ["bad"]
+
+        def read(session, tid):
+            if tid == "bad":
+                return original(outer.session({"id": tid, "acceptance_json": "{"}), tid)
+            return {"task": {"id": tid, "acceptance": []}}
+
+        original = self.ns["q_get_task"]
+        self.ns.update(neo_driver=Driver, q_pick_ready=pick, q_get_task=read,
+                       q_attach_run=lambda s, tid, run: claimed.append(tid),
+                       execute_task_minimal=lambda task, **kw: {"steps": []},
+                       run_acceptance=lambda *a, **kw: [],
+                       q_finish_run=lambda s, tid, rid, success, manifest: finished.append((tid, success)))
+        with self.assertRaisesRegex(ValueError, "^invalid persisted acceptance contract$"):
+            self.ns["execute_ready"](2)
+        self.assertEqual(selected, [(), ("bad",)])
+        self.assertEqual(claimed, ["good"])
+        self.assertEqual(finished, [("good", True)])
+
 
 if __name__ == "__main__":
     unittest.main()

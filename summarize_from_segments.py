@@ -839,7 +839,9 @@ def q_get_task(session, task_id: str) -> Optional[Dict[str, Any]]:
                     for check in checks):
                 raise ValueError("invalid acceptance contract shape")
         except (ValueError, TypeError, RecursionError, UnicodeError):
-            raise ValueError("invalid persisted acceptance contract") from None
+            error = ValueError("invalid persisted acceptance contract")
+            error.persisted_acceptance_invalid = True
+            raise error from None
         task["acceptance"] = checks
     s = dict(rec["s"]) if rec["s"] else None
     t = dict(rec["t"]) if rec["t"] else None
@@ -857,14 +859,15 @@ def q_approve_all_review(session, limit: int) -> int:
     ).single()
     return res["n"]
 
-def q_pick_ready(session, limit: int) -> List[str]:
+def q_pick_ready(session, limit: int, *, excluded=()) -> List[str]:
     res = session.run(
         """
         MATCH (task:Task {status:'READY'})
-        WITH task ORDER BY coalesce(task.updated_at, datetime()) ASC
+        WHERE NOT task.id IN $excluded
+        WITH task ORDER BY coalesce(task.updated_at, datetime()) ASC, task.id ASC
         LIMIT $limit
         RETURN task.id AS id
-        """, limit=limit
+        """, limit=limit, excluded=list(excluded)
     )
     candidates = [r["id"] for r in res]
     res.consume()
@@ -1105,17 +1108,25 @@ def execute_ready(limit: int):
 
     # Discover only the next candidate. Claim and run creation occur together
     # in q_attach_run; a losing or uncertain claim never reaches execution.
+    rejected = []
     for _ in range(limit):
         with neo_driver().session() as s:
-            picked = q_pick_ready(s, limit=1)
+            picked = (q_pick_ready(s, limit=1, excluded=rejected) if rejected
+                      else q_pick_ready(s, limit=1))
         if not picked:
-            print("No READY tasks.")
-            return
+            print("No eligible READY tasks.")
+            break
         if len(picked) != 1:
             raise RuntimeError("Unexpected task selection cardinality")
         tid = picked[0]
         with neo_driver().session() as s:
-            row = q_get_task(s, tid)
+            try:
+                row = q_get_task(s, tid)
+            except ValueError as exc:
+                if getattr(exc, "persisted_acceptance_invalid", False) is not True:
+                    raise
+                rejected.append(tid)
+                continue
             if not row:
                 raise RuntimeError("Selected task could not be read")
             task = row["task"]
@@ -1150,6 +1161,10 @@ def execute_ready(limit: int):
             q_finish_run(s, tid, run["id"], success, run["manifest"])
 
         print(f"{tid}: {'DONE' if success else 'FAILED'}  artifacts={manifest_exec.get('artifacts_dir', '')}")
+
+    if rejected:
+        # Preserve a nonzero CLI exit; skipped tasks remain unchanged in READY.
+        raise ValueError("invalid persisted acceptance contract")
 
 # ===========
 # CLI driver
