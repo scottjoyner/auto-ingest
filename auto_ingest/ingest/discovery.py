@@ -53,10 +53,20 @@ PAT_META_CSV = re.compile(r"_metadata\.csv$", re.IGNORECASE)
 
 
 def stable_id(*parts: str) -> str:
-    """A stable id for something with no usable name."""
+    """A stable id for an ordered tuple of parts with no usable name.
+
+    The parts are joined with a ``|`` delimiter. Escape the delimiter (and the
+    escape character) before hashing: without it, a ``|`` inside one part is
+    indistinguishable from a part boundary, so tuples such as
+    ``("a|b", "c")`` and ``("a", "b|c")`` mint the *same* entity id. Callers use
+    these ids as Neo4j MERGE keys, where a collision silently fuses two distinct
+    utterances/segments/speakers into one node. Parts containing neither escape
+    character keep their legacy digest, so existing ids do not migrate.
+    """
     h = hashlib.md5()
     for p in parts:
-        h.update((p or "").encode("utf-8", errors="ignore"))
+        escaped = (p or "").replace("%", "%25").replace("|", "%7C")
+        h.update(escaped.encode("utf-8", errors="ignore"))
         h.update(b"|")
     return h.hexdigest()
 
