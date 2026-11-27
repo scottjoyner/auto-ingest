@@ -957,8 +957,12 @@ def audit_ends_unterminated(path: str | Path) -> bool:
         with p.open("rb") as handle:
             handle.seek(-1, os.SEEK_END)
             return handle.read(1) != b"\n"
-    except OSError:  # pragma: no cover - unreadable audit is reported elsewhere
-        return False
+    except OSError:
+        # Cannot inspect the tail => assume it may be damaged. Returning False
+        # here would append the next release record onto a killed producer's
+        # partial line and lose both records while the audit looked clean.
+        # Closing the line costs one newline and invents no release evidence.
+        return True
 
 
 def _dumps(row: Dict[str, Any]) -> str:
