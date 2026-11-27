@@ -166,3 +166,25 @@ def test_accepts_same_basename_when_card_and_destination_namespace_differ(tmp_pa
     result = observe_metadata_csv(path, expected_sha256=digest, expected_rows=2)
     assert result.rows == 2
     assert not result.source_release_allowed
+
+
+def test_accepts_utf8_bom_prefixed_csv_from_nas_export(tmp_path):
+    """A NAS/Excel export may prefix the CSV with a UTF-8 BOM.
+
+    The BOM is part of the pinned byte snapshot, so accepting it as an encoding
+    marker cannot smuggle in a different manifest: the digest still covers it.
+    Plain utf-8 decoding left \\ufeff on the first field name and rejected every
+    otherwise-valid BOM-prefixed export as 'required column missing'.
+    """
+    path, digest = fixture(tmp_path)
+    raw_bom = b"\xef\xbb\xbf" + path.read_bytes()
+    path.write_bytes(raw_bom)
+    pinned = sha256(raw_bom).hexdigest()
+
+    result = observe_metadata_csv(path, expected_sha256=pinned, expected_rows=1)
+    assert result.rows == 1
+    assert result.to_dict()["by_status"] == {"NAME_AND_SIZE_ONLY": 1}
+    # The digest is over the BOM-inclusive bytes: dropping the BOM changes the
+    # pin and must still fail closed.
+    with pytest.raises(ExternalInventoryError, match="digest mismatch"):
+        observe_metadata_csv(path, expected_sha256=digest, expected_rows=1)
