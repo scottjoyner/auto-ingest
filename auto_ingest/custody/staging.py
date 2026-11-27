@@ -97,14 +97,14 @@ KEY_PATTERN = re.compile(
     # Longest alternatives FIRST: with (F|R|FR) the alternation matches F and
     # leaves the R behind, so "..._FR.mp4" stages as "..._F.mp4" - a wrong
     # filename for a clip that exists.
-    r"(?:_(FR|RF|BC(?:-\d+)?|F|R))?",
+    r"(?:_(?:[0-9]{6})?(FR|RF|BC(?:-\d+)?|F|R))?",
     re.IGNORECASE,
 )
 
 #: Camera suffixes that identify two views of ONE recording. Stripped to form the
 #: recording identity so a front/rear pair shares a key. ``transcripts.py:809``
 #: carries the same list for the ingest path.
-CAMERA_SUFFIX_PATTERN = re.compile(r"_(F|R|FR|RF|BC(-\d+)?)$", re.IGNORECASE)
+CAMERA_SUFFIX_PATTERN = re.compile(r"_(?:[0-9]{6})?(?:FR|RF|BC(?:-\d+)?|F|R)$", re.IGNORECASE)
 
 #: The extension the dashcam detection path hardcodes when locating a clip beside
 #: its CSV (``yolo_embeddings.py:1697``). Staging must not fight it.
@@ -162,6 +162,9 @@ def classify(name: str) -> str:
     destination exFAT, and the real card carries ``.MP4`` and ``.mp4`` alike.
     """
     lowered = name.lower()
+    # Finder AppleDouble metadata must not masquerade as recorder video.
+    if lowered.startswith("._"):
+        return OTHER_ROLE
     if lowered.endswith("_yolov8n.csv"):
         return DETECTION_CSV_ROLE
     if lowered.endswith("_speakers.rttm"):
@@ -319,7 +322,7 @@ def destination_for(source_key: str, *, role: Optional[str] = None,
     name = posixpath.basename(source_key)
     stem_only, _, _ = name.rpartition(".")
     base = stem_only if "." in name else name
-    role = role or classify(name)
+    role = OTHER_ROLE if name.startswith("._") else (role or classify(name))
     # Scope is judged BEFORE the key. A Python file in overland/ has no
     # timestamp and never will, so "no key" describes a problem that does not
     # exist while hiding the one that does: it is not pipeline content at all.
@@ -336,6 +339,14 @@ def destination_for(source_key: str, *, role: Optional[str] = None,
             reason=f"out_of_scope:{role}",
         )
     key = derive_key(source_key)
+    # A pre-2000 timestamp on a modern dashcam is likely a clock reset.
+    # Record a review blocker instead of inventing a trusted archive date.
+    if key is not None and int(key[:4]) < 2000:
+        return StagedObject(
+            source_key=source_key, destination_key=None, role=role,
+            key=key, recording=None, camera=None,
+            reason="clock_review_pre2000", key_source="filename",
+        )
     key_source = "filename" if key is not None else None
     if key is None and allow_mtime_key and mtime is not None:
         # A DVR writes MOVI0000.avi with nothing in the name identifying when it
