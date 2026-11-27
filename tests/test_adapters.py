@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 from content_os.adapters import extract_source, scan_path
@@ -76,3 +77,27 @@ def test_rule_based_adapter_handles_custom_json_extension(tmp_path: Path):
     assert doc.title == "Custom Title"
     assert doc.text == "Custom body proof"
     assert doc.sha256
+
+
+def test_csv_adapter_accepts_bom_prefixed_text_column(tmp_path: Path):
+    """A NAS/Excel UTF-8 BOM must not stick to the first CSV header."""
+    csv_file = tmp_path / "bom_notes.csv"
+    csv_file.write_bytes(b"\xef\xbb\xbfid,notes\r\n1,Useful proof\r\n2,Second proof\r\n")
+
+    doc = extract_source(csv_file)
+
+    assert doc.metadata["columns"] == ["id", "notes"]
+    assert "\ufeff" not in doc.text
+    assert "Useful proof" in doc.text
+    assert "Second proof" in doc.text
+
+
+def test_csv_adapter_bom_keeps_byte_digest(tmp_path: Path):
+    """BOM normalization for parsing must not weaken the pinned byte digest."""
+    payload = b"\xef\xbb\xbfid,value\r\na1,7\r\n"
+    csv_file = tmp_path / "bom_digest.csv"
+    csv_file.write_bytes(payload)
+
+    doc = extract_source(csv_file)
+
+    assert doc.sha256 == hashlib.sha256(payload).hexdigest()
