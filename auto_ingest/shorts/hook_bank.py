@@ -13,6 +13,7 @@ are unit-testable without the graph.
 """
 from __future__ import annotations
 
+import re
 from typing import List, Optional
 
 from auto_ingest.shorts.models import Brief, Cue
@@ -60,16 +61,25 @@ _DEFAULT_TEMPLATES = [
 ]
 
 
+def _mentions(blob: str, *terms: str) -> bool:
+    """Whole-term match, so a keyword cannot hide inside an unrelated word.
+
+    Plain ``in`` classified "misTAKEs" as an opinion and "wallPAPER" as a
+    research paper, which silently picked the wrong cold-open hook.
+    """
+    return any(re.search(r"\b" + re.escape(term) + r"\b", blob) for term in terms)
+
+
 def topic_type_of(brief: Brief) -> str:
     """Infer a topic type from brief metadata (tags / topic / title)."""
     t = (brief.topic or "").lower()
     tags = {str(x).lower() for x in (brief.tags or [])}
     blob = f"{t} {' '.join(tags)}"
-    if "debate" in blob or "vs" in blob:
+    if _mentions(blob, "debate", "vs"):
         return "debate"
-    if "opinion" in blob or "hot take" in blob or "take" in blob:
+    if _mentions(blob, "opinion", "hot take", "take"):
         return "opinion"
-    if "paper" in blob or "arxiv" in blob or "2024" in blob or "study" in blob:
+    if _mentions(blob, "paper", "arxiv", "2024", "study"):
         return "paper"
     if "utterance" in tags or t == "":
         return "utterance"

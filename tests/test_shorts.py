@@ -600,6 +600,23 @@ def test_topic_type_of_infers():
     assert hook_bank.topic_type_of(Brief(topic="t", title="T", hook="h", tags=["concept"])) == "concept"
 
 
+def test_topic_type_of_requires_whole_terms():
+    """Substring matching mislabels ordinary topics: 'misTAKEs' became an
+    opinion and 'wallPAPER' became a research paper, which selects the wrong
+    cold-open hook template for the short.
+    """
+    def typ(topic):
+        return hook_bank.topic_type_of(Brief(topic=topic, title="T", hook="h"))
+
+    # Substrings of a keyword are not signals.
+    assert typ("Common mistakes in ML") == "concept"
+    assert typ("wallpaper textures") == "concept"
+    # Real, whole-term signals still classify as before.
+    assert typ("Take on the paper") == "opinion"
+    assert typ("Scott vs Kipnerter") == "debate"
+    assert typ("new arXiv study") == "paper"
+
+
 def test_build_hook_cues_single_part():
     b = Brief(topic="t", title="Cool Topic", hook="h", points=["p"],
               tags=["concept"])
