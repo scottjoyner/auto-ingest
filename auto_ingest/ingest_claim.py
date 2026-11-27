@@ -207,12 +207,15 @@ ORDER BY j.claimed_at ASC
 LIMIT $limit
 """
 
+# LIMIT must sit in a WITH before the SET. After `RETURN count(j)` it would
+# truncate only the single aggregate row, not the rows being mutated, so the
+# reaper would clear every expired claim regardless of the caller's limit.
 _REAP_QUERY = """
 MATCH (j:IngestJob)
 WHERE j.owner <> '' AND j.claimed_at < $expires
+WITH j LIMIT $limit
 SET j.owner = '', j.claimed_at = 0, j.status = 'pending'
 RETURN count(j) AS cleared
-LIMIT $limit
 """
 
 
