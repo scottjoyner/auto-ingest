@@ -219,7 +219,10 @@ def ingest_dicts(platform: str, rows: List[Dict[str, Any]], *,
             fetched_at=_coerce_str(_pick(row, _COLUMN_ALIASES["fetched_at"]))
             or _coerce_str(row.get("fetched_at")),
         )
-        if not rec.short_id:
+        # `_coerce_str` preserves whitespace, so an ID made only of spaces,
+        # tabs or newlines used to pass this guard and become a phantom record
+        # keyed by a blank ID in `upsert_metric`.
+        if not rec.short_id or not rec.short_id.strip():
             log.warning("Skipping row with no short_id: %s", row)
             continue
         upsert_metric(rec, path=path)
