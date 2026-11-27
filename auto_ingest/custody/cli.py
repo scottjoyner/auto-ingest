@@ -89,6 +89,27 @@ EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_GATE_CLOSED = 3
 
+
+class SourceKeyCollision(ValueError):
+    """Two source objects resolved to the same custody key.
+
+    The custody key is the POSIX-relative path and is the join identity for both
+    ledgers. Two roots holding the same relative path are two different files
+    that cannot share one key: overwriting the dict entry silently drops one of
+    them from the hash ledger, and therefore from the copy. Refuse instead.
+    """
+
+    def __init__(self, key: str, first: Path, second: Path) -> None:
+        super().__init__(
+            f"custody key {key!r} is claimed by two source objects: "
+            f"{first} and {second}; pass disjoint --root paths "
+            "(the key is relative to each root)"
+        )
+        self.key = key
+        self.first = first
+        self.second = second
+
+
 EXECUTE_REFUSED = (
     "refusing to execute: destination verification is performed by an "
     "operator-authorized executor outside auto_ingest.custody. This command "
@@ -815,8 +836,23 @@ def _discover_keys(roots: Sequence[str], pattern: Optional[str],
                 if policy is not None and policy.excludes_source(key):
                     excluded.append(key)
                     continue
+                if key in found:
+                    raise SourceKeyCollision(key, found[key], full)
                 found[key] = full
     return found, sorted(excluded)
+
+
+def _discover_or_refuse(args, policy) -> Optional["tuple[Dict[str, Path], List[str]]"]:
+    """Walk the roots; on a cross-root key collision, report and refuse.
+
+    A collision means one source file would vanish from the ledger without a
+    trace. ``None`` tells the caller to exit closed before hashing or planning.
+    """
+    try:
+        return _discover_keys(args.root, None, policy)
+    except SourceKeyCollision as exc:
+        sys.stderr.write(f"custody: {exc}\n")
+        return None
 
 
 def cmd_hash(args) -> int:
@@ -835,7 +871,10 @@ def cmd_hash(args) -> int:
             return EXIT_USAGE
         args.root = [campaign_obj.source.mount_point]
 
-    keys, excluded = _discover_keys(args.root, None, policy)
+    walked = _discover_or_refuse(args, policy)
+    if walked is None:
+        return EXIT_GATE_CLOSED
+    keys, excluded = walked
     result = hash_source(args.bundle, keys, algorithm=args.algorithm,
                          limit=args.limit)
     payload = dict(result.to_dict())
@@ -955,7 +994,10 @@ def cmd_stage(args) -> int:
             return EXIT_USAGE
         args.root = [campaign_obj.source.mount_point]
 
-    walked_paths, excluded_by_policy = _discover_keys(args.root, None, policy)
+    walked = _discover_or_refuse(args, policy)
+    if walked is None:
+        return EXIT_GATE_CLOSED
+    walked_paths, excluded_by_policy = walked
 
     # mtimes are collected only when asked for: stat() on 60k objects to derive a
     # date nobody wanted is wasted work, and the whole card is walked here.

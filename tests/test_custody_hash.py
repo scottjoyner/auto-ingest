@@ -1278,3 +1278,68 @@ def test_the_walk_reports_what_it_excluded_rather_than_hiding_it(tmp_path):
     assert sorted(keys) == ["DCIM/IMG_0001.JPG", "VIDEO/2026_0101_120000_F.MP4"]
     assert len(excluded) == 2
     assert ".Trashes/501/loc.json" in excluded
+
+
+# ---------------------------------------------------------------------------
+# Cross-root key collision: a second root must not silently overwrite the first
+# ---------------------------------------------------------------------------
+def _two_roots_with_same_relative_path(tmp_path):
+    """Two cards holding the same relative path, with different bytes."""
+    roots = []
+    for label in ("a", "b"):
+        root = tmp_path / f"card-{label}"
+        p = root / "DCIM" / "IMG_0001.JPG"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(label.encode() * 16)
+        roots.append(str(root))
+    return roots
+
+
+def test_cross_root_key_collision_is_refused_not_overwritten(tmp_path):
+    """The walk used to keep only the last file, dropping the first without a word."""
+    from auto_ingest.custody.cli import SourceKeyCollision, _discover_keys
+    from auto_ingest.custody.policy import CustodyPolicy
+
+    roots = _two_roots_with_same_relative_path(tmp_path)
+    with pytest.raises(SourceKeyCollision) as excinfo:
+        _discover_keys(roots, None, CustodyPolicy())
+    assert excinfo.value.key == "DCIM/IMG_0001.JPG"
+    assert "card-a" in str(excinfo.value) and "card-b" in str(excinfo.value)
+
+
+def test_disjoint_roots_are_both_discovered(tmp_path):
+    """Refusal must not fire for genuinely distinct keys."""
+    from auto_ingest.custody.cli import _discover_keys
+    from auto_ingest.custody.policy import CustodyPolicy
+
+    roots = []
+    for label in ("a", "b"):
+        root = tmp_path / f"card-{label}"
+        p = root / f"DCIM/IMG_{label.upper()}.JPG"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x" * 16)
+        roots.append(str(root))
+
+    keys, excluded = _discover_keys(roots, None, CustodyPolicy())
+    assert sorted(keys) == ["DCIM/IMG_A.JPG", "DCIM/IMG_B.JPG"]
+    assert excluded == []
+
+
+def test_hash_cli_refuses_a_cross_root_collision(tmp_path, capsys):
+    """Exit closed, say which key collided, and write no ledger or evidence."""
+    from auto_ingest.custody.cli import EXIT_GATE_CLOSED
+    from auto_ingest.custody.ledger import HASH_LEDGER, ledger_dir
+
+    bundle = write_bundle(tmp_path / "b", campaign(), evidence())
+    before = (bundle / "evidence.json").read_text(encoding="utf-8")
+    argv = ["hash", "--bundle", str(bundle)]
+    for root in _two_roots_with_same_relative_path(tmp_path):
+        argv += ["--root", root]
+
+    code = main(argv + ["--apply", "--json"])
+    assert code == EXIT_GATE_CLOSED
+    captured = capsys.readouterr()
+    assert "DCIM/IMG_0001.JPG" in captured.err
+    assert captured.out == ""
+    assert (bundle / "evidence.json").read_text(encoding="utf-8") == before
+    assert not (ledger_dir(bundle) / HASH_LEDGER).exists()
