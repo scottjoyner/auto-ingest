@@ -27,6 +27,7 @@ Three quantities, reported separately so an operator can tell them apart:
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -85,6 +86,17 @@ def outstanding_bytes(evidence: Any) -> int:
     return int(round(evidence.inventory.discovered_bytes / inventory_files * outstanding))
 
 
+def _finite_nonnegative(value: Any, name: str) -> int:
+    """Reject malformed numeric inputs instead of guessing a capacity verdict."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a non-negative number")
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    if value < 0:
+        raise ValueError(f"{name} must be a non-negative number")
+    return value
+
+
 def headroom_for(outstanding: int,
                  headroom_fraction: float = DEFAULT_HEADROOM_FRACTION,
                  headroom_min_bytes: int = DEFAULT_HEADROOM_MIN_BYTES) -> int:
@@ -93,7 +105,9 @@ def headroom_for(outstanding: int,
     "Exactly enough" is how a copy dies at 99%, so there is always a margin - and
     a floor, so a tiny requirement on a nearly-full volume still fails.
     """
-    return max(int(outstanding * headroom_fraction), headroom_min_bytes)
+    fraction = _finite_nonnegative(headroom_fraction, "headroom_fraction")
+    minimum = _finite_nonnegative(headroom_min_bytes, "headroom_min_bytes")
+    return max(int(outstanding * fraction), int(minimum))
 
 
 def required_bytes(evidence: Any, *, headroom_fraction: float = DEFAULT_HEADROOM_FRACTION,
@@ -116,23 +130,25 @@ def check_capacity(
     reason rather than raising: for custody, "I could not check" must never read
     as "fine".
     """
+    need_input = int(_finite_nonnegative(needed_bytes, "needed_bytes"))
+    headroom_input = int(_finite_nonnegative(headroom_bytes, "headroom_bytes"))
     if not path:
         return CapacityReport(
-            path=None, checked=False, required_bytes=needed_bytes,
+            path=None, checked=False, required_bytes=need_input,
             sufficient=False, reason="destination_unresolved",
         )
     try:
         st = os.statvfs(path)
     except OSError as exc:
         return CapacityReport(
-            path=path, checked=False, required_bytes=needed_bytes,
+            path=path, checked=False, required_bytes=need_input,
             sufficient=False, reason=f"destination_unstatable:{exc.strerror or exc}",
         )
 
     fragment = st.f_frsize or st.f_bsize
     available = int(st.f_bavail) * fragment
     total = int(st.f_blocks) * fragment
-    need = max(int(needed_bytes) + max(int(headroom_bytes), 0), 0)
+    need = need_input + headroom_input
     sufficient = available >= need
     return CapacityReport(
         path=path,
@@ -140,7 +156,7 @@ def check_capacity(
         required_bytes=need,
         available_bytes=available,
         total_bytes=total,
-        headroom_bytes=max(int(headroom_bytes), 0),
+        headroom_bytes=headroom_input,
         sufficient=sufficient,
         reason="" if sufficient else (
             f"insufficient_space:need={need},available={available},short={need - available}"
