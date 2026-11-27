@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -33,11 +34,35 @@ from auto_ingest.executor_cutover import inspect_cutover
 IMAGE = "sha256:468584de930e2da70f06a23c9faa19fe85c14b18cca4ac6b2c888fe9d7d7578e"
 
 
+DOCKER_SOCKET = "/var/run/docker.sock"
+
+
 def cmd(*args, timeout=15):
+    if args and args[0] == "docker":
+        # Always address the local daemon explicitly, including cleanup. Reject
+        # environment overrides rather than silently accepting a remote context.
+        if any(os.environ.get(key) for key in ("DOCKER_HOST", "DOCKER_CONTEXT")):
+            raise RuntimeError("Docker endpoint overrides are not admitted")
+        if not stat.S_ISSOCK(os.stat(DOCKER_SOCKET).st_mode):
+            raise RuntimeError("local Docker socket unavailable")
+        args = ("docker", "--host", "unix://" + DOCKER_SOCKET, *args[1:])
     return subprocess.check_output(args, text=True, stderr=subprocess.PIPE, timeout=timeout).strip()
 
 
+def fixture_present(cid):
+    """Confirm absence only after a successful local daemon inventory call."""
+    if not re.fullmatch(r"[a-f0-9]{64}", cid):
+        raise ValueError("invalid fixture container identity")
+    result = cmd("docker", "ps", "--all", "--no-trunc", "--filter", "id=" + cid,
+                 "--format", "{{.ID}}", timeout=5)
+    if result not in ("", cid):
+        raise RuntimeError("unexpected fixture inventory response")
+    return result == cid
+
+
 def guard():
+    if not __debug__:
+        raise RuntimeError("fixture acceptance requires Python assertions enabled")
     m = {x.split(':')[0]: int(x.split()[1]) for x in open('/proc/meminfo')
          if x.startswith(('MemAvailable:', 'SwapFree:'))}
     assert m['MemAvailable'] >= 8*1024*1024 and m['SwapFree'] >= 1024*1024
@@ -169,7 +194,7 @@ def main():
         if cid:
             cmd('docker','stop','--time','5',cid,timeout=15)
             deadline=time.monotonic()+10
-            while subprocess.run(['docker','container','inspect',cid],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=3).returncode==0:
+            while fixture_present(cid):
                 if time.monotonic()>deadline:raise RuntimeError('fixture remains')
                 time.sleep(.5)
             print('FIXTURE_ABSENT',cid[:12],flush=True)
