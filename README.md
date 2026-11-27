@@ -19,6 +19,12 @@
 
 Containerized pipeline that ingests dashcam, audio, and bodycam recordings into a Neo4j knowledge graph. Features distributed workers, a NAS-drop job queue, REST API for triggering jobs, and scheduled cron workers.
 
+> **Branch lineage (2026-11-26):** the October `feat/pipeline-staging` work was
+> squash-merged into `main` via PR #20 (`0d7f21d9`). The three NAS
+> external-inventory/custody commits that were not part of that PR are being
+> brought forward on `agent/custody-external-inventory-forward-20261126`.
+> `feat/pipeline-staging` is superseded and must not be used as a base.
+
 ## Documentation
 
 | Document | Description |
