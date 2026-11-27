@@ -88,7 +88,11 @@ def parse_key_datetime_utc_from_string(s: str) -> Optional[datetime]:
             return _to_utc(_to_localized(
                 datetime.strptime(m.group("dt14"), "%Y%m%d%H%M%S")))
         except Exception:
-            pass
+            # A specific stamp that matched but cannot be a real date is
+            # malformed evidence, not absent evidence. Falling through to a
+            # looser pattern could re-key the object to a plausible but wrong
+            # instant (e.g. 20260230_120000 under a 2026/02/28 directory).
+            return None
     for pat, fmt in [
         (r"(\d{4})_(\d{4})_(\d{6})", "%Y_%m%d_%H%M%S"),
         (r"(\d{8})_(\d{6})", "%Y%m%d_%H%M%S"),
@@ -101,7 +105,10 @@ def parse_key_datetime_utc_from_string(s: str) -> Optional[datetime]:
             try:
                 return _to_utc(_to_localized(datetime.strptime(m2.group(0), fmt)))
             except Exception:
-                pass
+                # Same rule for every named pattern: a matched but impossible
+                # date refuses the parse rather than delegating to a weaker
+                # fallback that would invent a different recording time.
+                return None
     m = re.search(r"/(?P<Y>\d{4})/(?P<M>\d{2})/(?P<D>\d{2})/", s)
     if m:
         Y, M, D = m.group("Y"), m.group("M"), m.group("D")
@@ -111,7 +118,10 @@ def parse_key_datetime_utc_from_string(s: str) -> Optional[datetime]:
                 return _to_utc(_to_localized(datetime.strptime(
                     f"{Y}{M}{D}{m2.group(1)}", "%Y%m%d%H%M%S")))
             except Exception:
-                pass
+                # Same rule for every named pattern: a matched but impossible
+                # date refuses the parse rather than delegating to a weaker
+                # fallback that would invent a different recording time.
+                return None
     return None
 
 
