@@ -136,6 +136,27 @@ def execute_fixture(driver, root, connection):
             assert len(hits) - before == expected_hits
             print("PASS", mode, endpoint, expected_status, expected_class,
                   "GETs", expected_hits, flush=True)
+        # Real stored corruption must not become an empty success contract.
+        for invalid in ("{", "null", '[{"type":"http_ok","type":"file_exists"}]'):
+            tid = str(uuid.uuid4())
+            q("CREATE (:Task {id:$tid,status:'READY',updated_at:datetime(),"
+              "acceptance_json:$acceptance})", tid=tid, acceptance=invalid)
+            snapshot_query = ("MATCH (t:Task {id:$tid}) OPTIONAL MATCH (t)-[:HAS_RUN]->(r:Run) "
+                              "RETURN properties(t) AS task,count(r) AS runs")
+            before = q(snapshot_query, tid=tid)
+            assert before[0]["runs"] == 0
+            before_hits = len(hits)
+            for _ in range(2):
+                worker("normal", 1)
+                assert q(snapshot_query, tid=tid) == before
+                assert len(hits) == before_hits
+                assert not (artifacts / tid).exists()
+            # Remove only the synthetic task in this disposable graph so the
+            # next independent case can be selected.
+            q("MATCH (t:Task {id:$tid}) DELETE t", tid=tid)
+            print("PASS corrupt persisted contract: two rejected worker attempts, "
+                  "unchanged READY task, no run/artifact/GET", flush=True)
+        print("REAL_GRAPH_CORRUPT_CONTRACT_PASS 3/3", flush=True)
         assert q("MATCH (r:Run) RETURN count(r) AS n") == [{"n": 5}]
         assert len(hits) == 4
         print("REAL_GRAPH_HTTP_RECOVERY_PASS 5/5", flush=True)
