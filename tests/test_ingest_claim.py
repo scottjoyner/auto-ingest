@@ -100,13 +100,21 @@ class _FakeSession:
             ]
             rows.sort(key=lambda r: r["claimed_at"])
             return _Rows(rows[:limit])
-        # --- reap: same predicate + bounded SET ---
-        if q.startswith("MATCH (j:IngestJob) WHERE j.owner <> '' AND j.claimed_at < $expires SET j.owner = '', j.claimed_at = 0, j.status = 'pending'"):
+        # --- reap: MATCH expired, then SET + count ---
+        if (q.startswith("MATCH (j:IngestJob) WHERE j.owner <> '' AND j.claimed_at < $expires")
+                and "SET j.owner" in q):
             expires = params["expires"]
             limit = params["limit"]
+            # Faithful Cypher: LIMIT caps writes only when it appears in a WITH
+            # before the SET. A LIMIT attached to the final RETURN count(j)
+            # bounds the single aggregated row, not how many nodes were SET.
+            set_pos = q.index("SET j.owner")
+            limit_pos = q.find("LIMIT $limit")
+            bounds_writes = 0 <= limit_pos < set_pos
+            effective_limit = limit if bounds_writes else len(self._store)
             cleared = 0
             for k, j in self._store.items():
-                if cleared >= limit:
+                if cleared >= effective_limit:
                     break
                 if j["owner"] != "" and j["claimed_at"] < expires:
                     j["owner"] = ""
@@ -309,3 +317,32 @@ def test_expired_claims_and_reap_bounded():
     # fresh claims untouched
     assert d.store["fresh"]["owner"] == "hostA"
     assert d.store["fresh2"]["owner"] == "hostB"
+
+
+def test_reap_limit_bounds_writes_not_just_the_returned_row():
+    """The reaper's LIMIT must cap how many claims are cleared.
+
+    In Cypher, ``RETURN count(j) AS cleared LIMIT $limit`` bounds the single
+    aggregated result row, not the SET that ran before it. A LIMIT that only
+    follows the RETURN clears *every* expired claim in one transaction - which
+    is exactly the unbounded write the bounded reaper is meant to prevent.
+    The fake above mirrors that real Cypher semantics (it bounds writes only
+    when LIMIT appears in a WITH before the SET).
+    """
+    d = _FakeDriver()
+    base = 200_000_000
+    for i in range(5):
+        ingest_claim.claim(d, f"old{i}", f"host{i}", ttl_sec=3600,
+                           now_ms=base - 7200 * 1000)
+    # With a limit of 2, at most two of the five expired claims may be cleared.
+    assert ingest_claim.reap(d, ttl_sec=3600, limit=2, now_ms=base) == 2
+    remaining = ingest_claim.expired_claims(d, ttl_sec=3600, limit=50, now_ms=base)
+    assert len(remaining) == 3
+
+
+def test_reap_query_bounds_mutation_before_set():
+    """Lock the query contract: LIMIT belongs in a WITH before the SET."""
+    q = " ".join(ingest_claim._REAP_QUERY.split())
+    assert "WITH j LIMIT $limit" in q
+    assert q.index("LIMIT $limit") < q.index("SET j.owner")
+    assert q.count("LIMIT") == 1
