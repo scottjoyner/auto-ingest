@@ -84,11 +84,14 @@ def _stage_map(stages: List[str]) -> Dict[str, bool]:
 # ``IngestJob(key)``. If those indexes are absent the queries still function but
 # are not OOM-safe; the follow-up doc lists creating them as a prerequisite.
 
+# A MERGE-created IngestJob has no owner/claimed_at properties at all, so both
+# read back as NULL; in Cypher `NULL = ''` and `NULL < x` are unknown (not true),
+# which would filter out the row and leave a brand-new key unclaimable forever.
 _CLAIM_QUERY = """
 MERGE (j:IngestJob {key:$key})
 SET j.updated_at = timestamp()
 WITH j
-WHERE j.owner = '' OR j.claimed_at < $expires
+WHERE j.owner IS NULL OR j.owner = '' OR j.claimed_at < $expires
 SET j.owner = $owner,
     j.claimed_at = $now,
     j.status = CASE WHEN j.status IS NULL THEN 'claimed' ELSE j.status END
