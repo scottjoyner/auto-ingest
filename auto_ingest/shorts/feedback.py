@@ -110,9 +110,13 @@ def feedback_report(records: List[MetricsRecord]) -> dict:
     max_views = max((_num(v) for v in view_vals), default=0.0)
     errs: List[float] = []
     for r in records:
-        if r.views is None or r.pred_virality is None or max_views == 0.0:
+        if r.views is None or r.pred_virality is None:
             continue
-        norm = 100.0 * _num(r.views) / max_views
+        # When every observed view count is zero there is no spread to scale by,
+        # so each post's normalized actual is simply 0. Skipping the whole loop
+        # here would silently drop every matched post (n=0, MAE=None) and hide a
+        # badly calibrated predictor behind "not enough data".
+        norm = (100.0 * _num(r.views) / max_views) if max_views else 0.0
         errs.append(abs(norm - _num(r.pred_virality)))
     mae = round(_avg(errs), 1) if errs else None
     pred_vs_actual = {"mean_abs_error": mae, "n": len(errs)}
