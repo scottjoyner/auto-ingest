@@ -149,16 +149,23 @@ def consume_calendar_for_day(day: int, available: Optional[List[Dict]] = None,
     """Return the posting slots scheduled for a given ``day`` (1-indexed).
 
     Pure (no network/creds): wraps :func:`build_calendar` with ``days=day``
-    and returns ``plans[day-1].slots``. Useful for the scheduler to know what a
+    and returns that day's slots. Useful for the scheduler to know what a
     specific day should post (e.g. "today" = day 1).
+
+    The day plan is looked up by its ``day`` number, NOT by list position:
+    :func:`build_calendar` only emits a DayPlan for days that actually have
+    slots, so a schedule with posting-free days yields a *sparse* list. Using
+    ``plans[day - 1]`` pointed at a later day (or ran off the end) whenever an
+    earlier day was skipped.
     """
     if day < 1:
         raise ValueError("day must be >= 1")
     plans = build_calendar(days=day, schedule=schedule, available=available,
                            persona_source=persona_source)
-    if not plans or day > plans[-1].day:
-        return []
-    return plans[day - 1].slots
+    for plan in plans:
+        if plan.day == day:
+            return plan.slots
+    return []
 
 
 def calendar_to_queue_slots(plans: List[DayPlan]) -> List[PostSlot]:

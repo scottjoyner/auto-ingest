@@ -230,11 +230,15 @@ def ingest_dicts(platform: str, rows: List[Dict[str, Any]], *,
 def ingest_platform_csv(platform: str, csv_path: str, *,
                         short_id_field: str = "short_id",
                         path: Optional[Path] = None) -> int:
-    """Read a platform analytics CSV export and ingest it as MetricsRecords."""
+    """Read a platform analytics CSV export and ingest it as MetricsRecords.
+
+    A missing export is an error, not a zero-row success. Callers print the
+    return value as ``Ingested N metric record(s)`` and exit 0 on it, so a
+    typo'd ``--metrics-file`` must never come back as a successful 0.
+    """
     p = Path(csv_path)
     if not p.exists():
-        log.error("Metrics CSV not found: %s", csv_path)
-        return 0
+        raise FileNotFoundError(f"Metrics CSV not found: {csv_path}")
     rows: List[Dict[str, Any]] = []
     with p.open(newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
