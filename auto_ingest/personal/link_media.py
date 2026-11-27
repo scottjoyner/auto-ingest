@@ -72,7 +72,12 @@ def _db() -> str:
 
 
 def _fetch_unlinked(driver, limit: int, done: set) -> List[dict]:
-    """MediaFiles with GPS and linked_at IS NULL (bounded)."""
+    """MediaFiles with GPS and linked_at IS NULL (bounded).
+
+    The checkpoint filter runs in Python, i.e. *after* Cypher's LIMIT. Ask for
+    `limit + len(done)` rows so checkpointed SHAs at the head of the queue cannot
+    shrink the batch to zero and stall a resumed run while unlinked media remain.
+    """
     q = (
         "MATCH (m:MediaFile) "
         "WHERE m.gps_lat IS NOT NULL AND m.gps_lon IS NOT NULL "
@@ -80,9 +85,10 @@ def _fetch_unlinked(driver, limit: int, done: set) -> List[dict]:
         "RETURN m.sha256 AS sha, m.gps_lat AS lat, m.gps_lon AS lon "
         "LIMIT $limit"
     )
+    n = max(0, int(limit))
     with driver.session(database=_db()) as sess:
-        rows = sess.run(q, limit=int(limit)).data()
-    return [r for r in rows if r["sha"] not in done]
+        rows = sess.run(q, limit=n + len(done)).data()
+    return [r for r in rows if r["sha"] not in done][:n]
 
 
 def _mark_linked(driver, sha: str) -> None:
