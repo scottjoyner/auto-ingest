@@ -85,6 +85,13 @@ def outstanding_bytes(evidence: Any) -> int:
     return int(round(evidence.inventory.discovered_bytes / inventory_files * outstanding))
 
 
+def _nonnegative_number(value: Any, name: str) -> float:
+    """Reject malformed margin inputs instead of quietly shrinking the margin."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise ValueError(f"{name} must be a non-negative number")
+    return float(value)
+
+
 def headroom_for(outstanding: int,
                  headroom_fraction: float = DEFAULT_HEADROOM_FRACTION,
                  headroom_min_bytes: int = DEFAULT_HEADROOM_MIN_BYTES) -> int:
@@ -93,7 +100,9 @@ def headroom_for(outstanding: int,
     "Exactly enough" is how a copy dies at 99%, so there is always a margin - and
     a floor, so a tiny requirement on a nearly-full volume still fails.
     """
-    return max(int(outstanding * headroom_fraction), headroom_min_bytes)
+    fraction = _nonnegative_number(headroom_fraction, "headroom_fraction")
+    minimum = _nonnegative_number(headroom_min_bytes, "headroom_min_bytes")
+    return max(int(outstanding * fraction), int(minimum))
 
 
 def required_bytes(evidence: Any, *, headroom_fraction: float = DEFAULT_HEADROOM_FRACTION,
@@ -116,6 +125,8 @@ def check_capacity(
     reason rather than raising: for custody, "I could not check" must never read
     as "fine".
     """
+    if isinstance(headroom_bytes, bool) or not isinstance(headroom_bytes, (int, float)) or headroom_bytes < 0:
+        raise ValueError("headroom_bytes must be a non-negative number")
     if not path:
         return CapacityReport(
             path=None, checked=False, required_bytes=needed_bytes,
