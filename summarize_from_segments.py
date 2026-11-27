@@ -1008,7 +1008,7 @@ def execute_ready(limit: int):
         # Execute out of tx
         manifest_exec = execute_task_minimal(task)
         results = run_acceptance(task, tid)
-        success = all(r["passed"] for r in results) if results else True
+        success = bool(results) and all(r["passed"] for r in results)
 
         run["manifest"].update(manifest_exec)
         run["manifest"]["acceptance_results"] = results
