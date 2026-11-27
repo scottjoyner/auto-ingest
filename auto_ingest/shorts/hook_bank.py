@@ -170,7 +170,8 @@ def build_series_outro(brief: Brief, total_parts: int, short_index: int,
     """
     start = round(max(0.4, duration - 2.6), 2)
     if short_index + 1 >= total_parts:
-        text = f"Series complete — {brief.title or brief.topic}"
+        label = (brief.title or brief.topic or "Series").strip()
+        text = f"Series complete — {label}"
     else:
         text = f"Next: Part {short_index + 2} of {total_parts}"
     return Cue(
