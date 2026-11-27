@@ -361,3 +361,64 @@ def test_cmd_link_speakers_no_merge_on_failure(cli, monkeypatch):
     # No merge when the linker failed.
     assert captured.get("script_calls", []) == []
 
+
+# ---------------------------------------------------------------------------
+# cmd_recall
+# ---------------------------------------------------------------------------
+def _make_recall_args(*rest):
+    class A:
+        pass
+
+    a = A()
+    a.rest = list(rest)
+    return a
+
+
+def test_cmd_recall_forwards_to_module_not_repo_script(cli, monkeypatch):
+    """`auto-ingest recall` invokes the package, never a `<REPO>/python3` script."""
+    calls = {"module": [], "script": []}
+
+    def fake_run_module(mod, args, extra_env=None):
+        calls["module"].append((mod, list(args)))
+        return 42
+
+    def fake_run(script, args, extra_env=None):
+        calls["script"].append((script, list(args)))
+        return 0
+
+    monkeypatch.setattr(cli, "_run_module", fake_run_module)
+    monkeypatch.setattr(cli, "_run", fake_run)
+
+    rc = cli.cmd_recall(_make_recall_args("similar-media", "--sha256", "abc"))
+
+    # The child's exit status is propagated, and no repo-relative script path is
+    # used for what is a module entrypoint (cf. cmd_shorts).
+    assert rc == 42
+    assert calls["script"] == []
+    assert calls["module"] == [
+        ("auto_ingest.personal.recall", ["similar-media", "--sha256", "abc"])
+    ]
+
+
+def test_cmd_recall_builds_module_command(cli, monkeypatch):
+    """The real command construction must be `-m`, not an interpreter opening a path."""
+    seen = {}
+
+    def fake_call(cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        seen["cwd"] = kwargs.get("cwd")
+        return 0
+
+    monkeypatch.setattr(cli, "neo4j_env", lambda: {})
+    monkeypatch.setattr(cli.subprocess, "call", fake_call)
+
+    rc = cli.cmd_recall(_make_recall_args("geo-media", "--lat", "1", "--lon", "2"))
+
+    assert rc == 0
+    assert seen["cmd"] == [
+        sys.executable, "-u", "-m", "auto_ingest.personal.recall",
+        "geo-media", "--lat", "1", "--lon", "2",
+    ]
+    assert str(cli.REPO) not in seen["cmd"]
+    assert seen["cwd"] == str(cli.REPO)
+
