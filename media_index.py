@@ -45,9 +45,14 @@ def _classify(ext: str) -> Optional[str]:
 
 
 def _date_for(path: Path) -> Optional[str]:
-    m = DATE_RE.search(path.as_posix())
-    if m:
-        return f"{m.group('y')}-{m.group('m')}-{m.group('d')}"
+    # A date-bearing ancestor directory (a YYYY/MM/DD ingest tree, or a dated
+    # mount root) is shared by every file beneath it and is not the media's
+    # capture date. Prefer the filename; fall back to the full path only for
+    # legacy date-less names, then to mtime.
+    for candidate in (path.name, path.as_posix()):
+        m = DATE_RE.search(candidate)
+        if m:
+            return f"{m.group('y')}-{m.group('m')}-{m.group('d')}"
     try:
         t = path.stat().st_mtime
         return datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d")
