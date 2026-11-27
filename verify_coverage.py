@@ -32,8 +32,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from auto_ingest_config import get_neo4j_config
 from neo4j import GraphDatabase
+
+from auto_ingest_config import get_neo4j_config
 
 # Text props to probe when deciding whether a label is "text-bearing".
 TEXT_PROPS = ["text"]
@@ -48,15 +49,25 @@ def _driver(cfg):
     )
 
 
+# Labels that carry vectors but no user-facing text. A missing vector on a
+# Frame is not a lost recording, and counting those nodes is a full scan, so
+# they are not part of text recovery.
+NON_TEXT_LABELS = frozenset({"Frame", "GlobalSpeaker", "DashcamEmbedding"})
+
+
 def text_bearing_labels(sess, indexed: dict[str, list[str]]) -> list[str]:
-    """Labels worth auditing: the canonical text labels plus any label that
-    actually carries an embedding index on a text property. Non-text labels
-    (Frame, GlobalSpeaker, DashcamEmbedding, ...) are excluded — counting their
-    nodes is a full scan and they are not part of text recovery.
+    """Labels worth auditing: canonical text labels plus indexed text labels.
+
+    The canonical labels are audited *unconditionally*. A label whose vector
+    index was never created (or was dropped) is exactly the one most likely to
+    be hiding a gap, so intersecting with the indexed labels and dropping it
+    would turn a real gap into a false "OK". Labels that gained an embedding
+    index at runtime are added so a new text-bearing label cannot silently opt
+    out of recovery. Known non-text labels are excluded.
     """
-    canonical = ["Segment", "Utterance", "Transcription", "Summary"]
-    from_index = [lbl for lbls in indexed.values() for lbl in lbls]
-    return sorted(set(canonical) & set(from_index)) or canonical
+    canonical = {"Segment", "Utterance", "Transcription", "Summary"}
+    from_index = {lbl for lbls in indexed.values() for lbl in lbls}
+    return sorted(canonical | (from_index - NON_TEXT_LABELS))
 
 
 def indexed_props(sess) -> dict[str, list[str]]:
@@ -117,7 +128,7 @@ def main(argv=None) -> int:
         with driver.session() as sess:
             props_map = indexed_props(sess)
             if args.label:
-                labels = [l.strip() for l in args.label.split(",") if l.strip()]
+                labels = [part.strip() for part in args.label.split(",") if part.strip()]
             else:
                 labels = text_bearing_labels(sess, props_map)
             if args.prop:
