@@ -14,9 +14,9 @@ import stat
 import sys
 
 from auto_ingest.executor_evidence import (
+    _MAX_RECEIPT_BYTES,
     _http_identity,
     _http_path,
-    _MAX_RECEIPT_BYTES,
     inspect_http_observation,
 )
 
