@@ -116,6 +116,18 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _require_ttl(ttl_sec: int) -> None:
+    """A non-positive TTL breaks expiry and can make the reaper clear live claims."""
+    if isinstance(ttl_sec, bool) or not isinstance(ttl_sec, (int, float)) or ttl_sec <= 0:
+        raise ValueError("ttl_sec must be a positive number of seconds")
+
+
+def _require_limit(limit: int) -> None:
+    """A bounded reader/reaper needs a strictly positive LIMIT."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise ValueError("limit must be a positive integer")
+
+
 def claim(driver, key: str, owner: str, ttl_sec: int = 3600,
           now_ms: Optional[int] = None) -> bool:
     """Try to take ownership of ``key`` for ``owner``.
@@ -126,6 +138,7 @@ def claim(driver, key: str, owner: str, ttl_sec: int = 3600,
     """
     if not owner:
         raise ValueError("claim owner must be a non-empty worker id")
+    _require_ttl(ttl_sec)
     now = now_ms if now_ms is not None else _now_ms()
     expires = now - int(ttl_sec * 1000)
     with driver.session() as sess:
@@ -155,6 +168,8 @@ def list_claims(driver, *, ttl_sec: int = 3600, limit: int = 200,
     bounded by ``LIMIT`` — never scans the whole graph. Safe to run against the
     live 21M-node database.
     """
+    _require_ttl(ttl_sec)
+    _require_limit(limit)
     now = now_ms if now_ms is not None else _now_ms()
     since = now - int(ttl_sec * 1000)
     with driver.session() as sess:
@@ -281,6 +296,8 @@ def expired_claims(driver, ttl_sec: int = 3600, limit: int = 200,
     Index-backed on ``IngestJob(owner)`` and bounded by ``LIMIT`` — never scans
     the whole graph. Safe against the 21M-node DB.
     """
+    _require_ttl(ttl_sec)
+    _require_limit(limit)
     now = now_ms if now_ms is not None else _now_ms()
     expires = now - int(ttl_sec * 1000)
     with driver.session() as sess:
@@ -302,6 +319,8 @@ def reap(driver, ttl_sec: int = 3600, limit: int = 200,
     Bounded by ``LIMIT`` and index-backed on ``IngestJob(owner)``. Returns the
     number of claims cleared. Safe to run on a schedule (the reaper).
     """
+    _require_ttl(ttl_sec)
+    _require_limit(limit)
     now = now_ms if now_ms is not None else _now_ms()
     expires = now - int(ttl_sec * 1000)
     with driver.session() as sess:
