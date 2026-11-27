@@ -702,7 +702,13 @@ def ends_unterminated(ledger: Path) -> bool:
     would be *glued onto* the partial one and be lost with it - one crash would
     then cost two objects instead of one.
     """
-    if not ledger.is_file():
+    try:
+        is_file = ledger.is_file()
+    except OSError:
+        # is_file() swallows most errors, but an OSError here means the path
+        # could not be inspected at all. Treat the tail as possibly damaged.
+        return True
+    if not is_file:
         return False
     try:
         if ledger.stat().st_size == 0:
@@ -710,8 +716,10 @@ def ends_unterminated(ledger: Path) -> bool:
         with ledger.open("rb") as handle:
             handle.seek(-1, os.SEEK_END)
             return handle.read(1) != b"\n"
-    except OSError:  # pragma: no cover - unreadable ledger is handled elsewhere
-        return False
+    except OSError:
+        # Cannot inspect the tail => assume it may be damaged. Returning False
+        # would append the next digest onto a killed producer's partial line.
+        return True
 
 
 def _terminate_partial_line(handle: Any) -> bool:
