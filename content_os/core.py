@@ -703,6 +703,18 @@ def avoid_slop(text: str) -> list[str]:
     return issues
 
 
+def has_unresolved_placeholder(text: str) -> bool:
+    """True when the text still contains an unresolved ``TODO`` placeholder.
+
+    Placeholder detection must be case-insensitive, like the banned-pattern
+    checks in :func:`avoid_slop`: a draft that says ``todo``/``Todo`` is just as
+    unfinished as one that says ``TODO``. The verification gate previously did
+    a case-sensitive ``"TODO" in text`` check, so lowercase/mixed-case
+    placeholders slipped through and such a draft could be marked PASS.
+    """
+    return "TODO" in text.upper()
+
+
 def score_draft(text: str) -> list[tuple[str, int, str]]:
     lower = text.lower()
     heuristics = [
@@ -746,7 +758,11 @@ def verify(root: Path, rid: str) -> Path:
     total = sum(r[1] for r in rows)
     threshold = int(load_config(root).get("score_threshold", DEFAULT_SCORE_THRESHOLD))
     banned = avoid_slop(text)
-    passed = total >= threshold and not banned and "TODO" not in text
+    passed = (
+        total >= threshold
+        and not banned
+        and not has_unresolved_placeholder(text)
+    )
     md = [
         f"# Verification: {obj.title}",
         "",
@@ -767,7 +783,7 @@ def verify(root: Path, rid: str) -> Path:
     if not passed:
         if total < threshold:
             md.append(f"- Score below threshold by {threshold-total} point(s).")
-        if "TODO" in text:
+        if has_unresolved_placeholder(text):
             md.append("- Draft still contains TODO placeholders.")
         for b in banned:
             md.append(f"- Banned phrase/pattern matched: `{b}`")
