@@ -811,12 +811,36 @@ def q_get_task(session, task_id: str) -> Optional[Dict[str, Any]]:
     if not rec:
         return None
     task = dict(rec["task"])
-    # 🔎 hydrate acceptance from JSON text if present
-    if "acceptance_json" in task and isinstance(task["acceptance_json"], str):
+    # A corrupt persisted contract is not an empty acceptance checklist.
+    # Reject before claim/dispatch; do not expose stored content in errors.
+    if "acceptance_json" in task:
+        raw = task["acceptance_json"]
+
+        def unique(pairs):
+            values = {}
+            for key, value in pairs:
+                if key in values:
+                    raise ValueError("duplicate acceptance key")
+                values[key] = value
+            return values
+
+        def reject_constant(_value):
+            raise ValueError("nonfinite acceptance constant")
+
         try:
-            task["acceptance"] = json.loads(task["acceptance_json"])
-        except Exception:
-            task["acceptance"] = []
+            if not isinstance(raw, str):
+                raise ValueError("invalid acceptance JSON type")
+            checks = json.loads(raw, object_pairs_hook=unique, parse_constant=reject_constant)
+            if not isinstance(checks, list) or any(
+                    not isinstance(check, dict)
+                    or not isinstance(check.get("type"), str)
+                    or not check["type"].strip()
+                    or not isinstance(check.get("args", {}), dict)
+                    for check in checks):
+                raise ValueError("invalid acceptance contract shape")
+        except (ValueError, TypeError, RecursionError, UnicodeError):
+            raise ValueError("invalid persisted acceptance contract") from None
+        task["acceptance"] = checks
     s = dict(rec["s"]) if rec["s"] else None
     t = dict(rec["t"]) if rec["t"] else None
     return {"task": task, "summary": s, "transcription": t}
