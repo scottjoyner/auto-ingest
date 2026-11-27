@@ -26,7 +26,10 @@ def myth_fact_for_topic(driver, topic: str) -> Optional[Tuple[str, str]]:
             (an older, highly-cited paper's stated assumption vs. a newer
             correction), otherwise a clearly-labelled generic stem.
     fact  : a real, citable correction sourced verbatim from a top paper's Chunk
-            on the same Topic.
+            on the same Topic. Papers without a qualifying Chunk are never a
+            substitute: if no row carries citable text this returns ``None`` so
+            the planner can fall back to its explicitly templated device rather
+            than publishing an uncited claim that reads as a citation.
 
     When ``driver`` is None the query runs through ``db_retry.with_driver`` so
     transient Neo4j pressure doesn't abort the plan (S-G18-compliant).
@@ -73,11 +76,13 @@ def _myth_fact_impl(driver, topic: str) -> Optional[Tuple[str, str]]:
         if old_year and new_year and new_year > old_year:
             myth = (f"Back in {old_year}, {topic.replace('_', ' ')} was assumed "
                     f"to work the simple way — {new_year} changed that")
-    if excerpt:
-        fact = excerpt
-    else:
-        fact = f"Research ({best.get('ptitle', 'a recent paper')}) shows otherwise"
-    return myth, fact
+    # OPTIONAL MATCH keeps papers whose Chunk failed the size/text filter, so a
+    # result with rows can still contain zero citable text. Do not mint a
+    # paper-attributed "fact" from paper metadata alone: it reads as a citation
+    # but quotes nothing, and the myth/fact pair would ship it as research.
+    if not excerpt:
+        return None
+    return myth, excerpt
 
 
 def reveal_twist_for_topic(driver, topic: str) -> Optional[str]:
