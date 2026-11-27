@@ -157,7 +157,7 @@ def _cmd_render(args) -> int:
         out_dir = args.out_dir or DEFAULT_OUT_DIR
         paths = render.render_plan(
             plan, out_dir, only=args.only, tts=args.tts,
-            skip_used_clips=True, upsert=args.upsert,
+            skip_used_clips=args.skip_used, upsert=args.upsert,
             skip_history=args.skip_history,
         )
         if not args.upsert:
@@ -232,8 +232,10 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--pool", type=int, default=400)
     pr.add_argument("--tts", action="store_true",
                     help="Narrate shorts in the owner's voice (XTTS-v2 clone)")
-    pr.add_argument("--skip-used", action="store_true",
-                    help="Skip shorts whose B-roll was used in a prior rendered short")
+    pr.add_argument("--skip-used", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="Skip shorts whose B-roll clip is reused within this plan "
+                         "(default on; --no-skip-used renders them all)")
     pr.add_argument("--upsert", action="store_true",
                     help="Persist :ShortPlan/:Short manifest (status/published) to Neo4j")
     pr.add_argument("--skip-history", action="store_true",
