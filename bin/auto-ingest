@@ -292,7 +292,14 @@ def cmd_link_speakers(args) -> int:
         merge_cli = ["--merge"]
         if args.dry_run:
             merge_cli = ["--dry-run"]
-        _run("scripts/anchor_speaker_me.py", merge_cli, extra_env=neo4j_env())
+        # N11's re-anchor is part of this command, not a best-effort side effect.
+        # Swallowing its status made a failed merge (and a still-fragmented
+        # canonical "me" GlobalSpeaker) look like a successful link pass to
+        # run-all and to callers that gate on this exit code.
+        anchor_rc = _run("scripts/anchor_speaker_me.py", merge_cli, extra_env=neo4j_env())
+        if anchor_rc != 0:
+            print(f"[auto-ingest] WARNING: anchor re-anchor exited {anchor_rc}", flush=True)
+            rc = anchor_rc
     return rc
 
 
