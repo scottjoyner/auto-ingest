@@ -555,7 +555,14 @@ def _cue_word_timings(
             we = w.get("end")
             if ws is None or we is None:
                 continue
-            out.append((str(w.get("word", "")).strip(), float(ws), float(we)))
+            try:
+                ws_f, we_f = float(ws), float(we)
+            except (TypeError, ValueError):
+                # One malformed export row must not abort the render: skip it.
+                # If no usable row remains, the even-split fallback below covers
+                # the cue instead.
+                continue
+            out.append((str(w.get("word", "")).strip(), ws_f, we_f))
         if out:
             return out
     span = max(end - start, 0.1)
