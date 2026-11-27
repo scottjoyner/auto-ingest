@@ -63,7 +63,29 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font, max_w: int) -> list:
             cur = [w]
     if cur:
         lines.append(" ".join(cur))
-    return lines[:3]
+
+    # Hard guard: a single unbroken token (URL, hashtag, filename slug) can be
+    # wider than the whole band. captions._wrap_text carries the same guard so
+    # a caption never overflows; without it the cover title silently spills
+    # past the darkened band and off the canvas. Break any oversized line at
+    # character boundaries so every emitted line fits ``max_w``.
+    safe = max(1, max_w)
+    fitted: list = []
+    for line in lines:
+        if draw.textlength(line, font=font) <= safe:
+            fitted.append(line)
+            continue
+        piece = ""
+        for ch in line:
+            candidate = piece + ch
+            if draw.textlength(candidate, font=font) <= safe or not piece:
+                piece = candidate
+            else:
+                fitted.append(piece)
+                piece = ch
+        if piece:
+            fitted.append(piece)
+    return fitted[:3]
 
 
 def make_thumbnail(mp4: Path, out_path: Path, *,
