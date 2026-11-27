@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib.util
 import json
 import re
-import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -276,7 +276,11 @@ class CsvAdapter:
 
     def extract(self, path: Path) -> SourceDocument:
         raw, truncated = read_limited(path)
-        reader = csv.DictReader(raw.splitlines())
+        # NAS/Excel exports may prefix the CSV with a UTF-8 BOM. read_limited
+        # decodes with plain utf-8, which leaves \ufeff on the first header and
+        # hides text-like columns from the detection below. Strip the marker
+        # from the parsed text only: file_sha256 still digests the exact bytes.
+        reader = csv.DictReader(raw.removeprefix("\ufeff").splitlines())
         rows = list(reader)
         sample = rows[:10]
         columns = reader.fieldnames or []
