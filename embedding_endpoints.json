@@ -68,5 +68,6 @@
       "ip": "100.114.88.89",
       "blocker": "Only 3.7G RAM, no lm-studio. Too weak for reliable embedding serving; skip unless needed."
     }
-  ]
+  ],
+  "embedding_dimensions": 768
 }
