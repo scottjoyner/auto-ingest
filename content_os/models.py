@@ -128,6 +128,15 @@ def _transition(obj: ContentObject, new_state: str, *, force: bool = False) -> b
         return False
     expected = ALLOWED_TRANSITIONS.get(old)
     if expected == new_state or force:
+        # ``force`` bypasses the one-step ORDERING constraint, but it must not
+        # admit a state outside the vocabulary: ``State`` is documented as the
+        # total set of states, and an unrecognised value persisted here makes
+        # the object unroutable for every consumer of STATE_ORDER /
+        # ALLOWED_TRANSITIONS (status, planner, the non-forced transition path).
+        if new_state not in STATE_ORDER:
+            raise ValueError(
+                f"Unknown state {new_state!r}; expected one of {STATE_ORDER}"
+            )
         obj.state = new_state
         obj.updated_at = now_iso()
         return True
