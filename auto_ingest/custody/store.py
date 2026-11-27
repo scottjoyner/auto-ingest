@@ -433,7 +433,15 @@ def merge_evidence_documents(
     declared ``0``), and what it does not mention is preserved. Unknown keys -
     including a declared ``state`` - are dropped.
     """
-    incoming = incoming or {}
+    incoming = dict(incoming or {})
+    # Both spellings name the same hash evidence. Canonical documents emit
+    # ``hash``; older producers used ``hashing``. Without normalising the
+    # legacy spelling, it was merged beside the recorded ``hash`` block and
+    # then ignored by CampaignEvidence.from_dict (which prefers ``hash``), so
+    # an incoming hash observation left the recorded count silently stale.
+    if "hashing" in incoming and "hash" not in incoming:
+        incoming["hash"] = incoming["hashing"]
+        del incoming["hashing"]
     merged: Dict[str, Any] = {}
     for key in EVIDENCE_BLOCKS:
         old, new = existing.get(key), incoming.get(key)
