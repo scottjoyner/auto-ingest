@@ -163,6 +163,23 @@ def capacity_report(
     """
     outstanding = outstanding_bytes(evidence)
     headroom = headroom_for(outstanding, headroom_fraction, headroom_min_bytes)
+    # Fail closed when the byte accounting is missing or negative. A source
+    # inventory that discovered files but recorded zero (or negative) bytes is
+    # NOT a zero-byte copy: scaling by a mean object size of 0 silently turned
+    # "we cannot tell how much is left" into "nothing is left", so a nearly-full
+    # destination passed this precondition and then filled up mid-copy. The
+    # state machine already treats "inventory incomplete but work underway" as a
+    # real state, so this is reachable before the byte total has been recorded.
+    outstanding_files = evidence.inventory_files - max(evidence.verified_at_destination, 0)
+    if outstanding_files > 0 and evidence.inventory.discovered_bytes <= 0:
+        return CapacityReport(
+            path=campaign.destination.host_path,
+            checked=False,
+            required_bytes=outstanding,
+            headroom_bytes=headroom,
+            sufficient=False,
+            reason="inventory_bytes_unknown",
+        )
     report = check_capacity(campaign.destination.host_path, outstanding,
                             headroom_bytes=headroom)
     if not report.checked:
