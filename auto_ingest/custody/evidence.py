@@ -115,9 +115,19 @@ class Counts:
                   coerced: Optional[List[str]] = None) -> "Counts":
         c = coerced if coerced is not None else []
         if not isinstance(raw, Mapping):
-            return cls(_count(raw, f"{where}.files", c), 0)
-        return cls(_count(raw.get("files"), f"{where}.files", c),
-                   _count(raw.get("bytes"), f"{where}.bytes", c))
+            files, nbytes = _count(raw, f"{where}.files", c), 0
+        else:
+            files = _count(raw.get("files"), f"{where}.files", c)
+            nbytes = _count(raw.get("bytes"), f"{where}.bytes", c)
+        # A negative count cannot describe files/bytes. Clamp it and record a
+        # diagnostic so the state machine blocks on malformed evidence.
+        if files < 0:
+            c.append(f"{where}.files={files} (negative)")
+            files = 0
+        if nbytes < 0:
+            c.append(f"{where}.bytes={nbytes} (negative)")
+            nbytes = 0
+        return cls(files, nbytes)
 
     def to_dict(self) -> Dict[str, int]:
         return {"bytes": self.bytes, "files": self.files}
