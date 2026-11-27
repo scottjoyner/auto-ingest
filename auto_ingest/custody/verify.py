@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from .executor import _safe_join  # the same containment rule the copy side enforces
 from .hashing import DEFAULT_ALGORITHM, digest_file
 from .ledger import DESTINATION_LEDGER, HASH_LEDGER, ledger_dir, read_records
 from .policy import MAX_SUMMARY_ENTRIES
@@ -218,6 +219,10 @@ def verify_destination(
     right for a flat copy and wrong for every staged one - and it fails in the
     worst direction, reporting a completed copy as MISSING. Omitted, the behaviour
     is unchanged.
+
+    A staged key is a relative path from an on-disk ledger, so it is resolved with
+    the copy side's containment rule: a key that escapes ``destination_root`` is
+    a FAILED finding, never a VERIFIED one.
     """
     expected = source_digests(bundle)
     root = ledger_dir(bundle)
@@ -242,7 +247,21 @@ def verify_destination(
             if limit is not None and (verified + missing + mismatched + failed) >= limit:
                 break
             want_digest, size = expected[key]
-            target = base / staged.get(key, key)
+            landed = staged.get(key, key)
+            target = _safe_join(base, landed)
+            if target is None:
+                # The copy side refuses a staged key that resolves outside the
+                # destination root. Verification must apply the same rule: a
+                # staged.jsonl row naming a file elsewhere on the host must
+                # never be hashed and recorded as custody for this key.
+                failed += 1
+                if len(errors) < max_errors:
+                    errors.append(f"{key}:key_escapes_destination")
+                handle.write(_record(key, FAILED, size=size,
+                                     detail="key_escapes_destination"))
+                handle.flush()
+                os.fsync(handle.fileno())
+                continue
             if not target.exists():
                 missing += 1
                 handle.write(_record(key, MISSING, size=size,
