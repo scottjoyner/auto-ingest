@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import sys
+from itertools import zip_longest
 from pathlib import Path
 from typing import List
 
@@ -433,10 +434,12 @@ def _cmd_ab_list(args) -> int:
         return 0
     for pl in plans:
         winner = pl.winner if pl.winner is not None else "-"
+        count = max(len(pl.thumb_variants), len(pl.title_variants))
         print(f"{pl.short_id:18} {pl.platform:14} "
-              f"variants={len(pl.thumb_variants)} "
+              f"variants={count} "
               f"active={pl.active_variant} winner={winner}")
-        for i, (t, h) in enumerate(zip(pl.thumb_variants, pl.title_variants)):
+        for i, (t, h) in enumerate(zip_longest(
+                pl.thumb_variants, pl.title_variants, fillvalue="-")):
             mark = "*" if i == pl.active_variant else " "
             print(f"  {mark}v{i}: thumb={t}  title={h}")
     return 0
@@ -445,9 +448,13 @@ def _cmd_ab_list(args) -> int:
 def _cmd_ab_choose(args) -> int:
     from auto_ingest.shorts import abtest
 
+    if args.variant is None:
+        print("ab choose requires --variant N (0-based variant index)")
+        return 2
     plan = abtest.choose_winner(args.key, args.platform, args.variant)
     if plan is None:
-        print(f"No variant plan for key={args.key} platform={args.platform}")
+        print(f"No variant plan or invalid --variant for "
+              f"key={args.key} platform={args.platform} variant={args.variant}")
         return 1
     print(f"Recorded winner=v{plan.winner} for {args.key}/{args.platform} "
           f"at {plan.chosen_at}")

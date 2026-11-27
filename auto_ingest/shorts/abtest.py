@@ -266,16 +266,31 @@ def load_variants(short_id: Optional[str] = None,
     return plans
 
 
-def choose_winner(short_id: str, platform: str, variant: int) -> Optional[VariantPlan]:
+def choose_winner(short_id: str, platform: str, variant: Optional[int]) -> Optional[VariantPlan]:
     """Record ``variant`` as the winning variant for ``short_id``/``platform``.
 
-    Returns the updated plan, or ``None`` if no matching plan exists.
+    Returns the updated plan, or ``None`` if no matching plan exists or the
+    index is missing/out of range. An invalid index must never be persisted:
+    the stored winner is what an operator reads back to decide what shipped,
+    and a winner that names no real variant silently reports a result nobody
+    ever produced.
     """
     plans = _load_all()
     found = None
     for pl in plans:
         if pl.short_id == short_id and pl.platform == platform:
-            pl.winner = int(variant)
+            try:
+                index = int(variant)
+            except (TypeError, ValueError):
+                log.warning("No valid variant index for %s/%s: %r",
+                            short_id, platform, variant)
+                return None
+            count = max(len(pl.thumb_variants), len(pl.title_variants))
+            if not 0 <= index < count:
+                log.warning("Variant %d out of range for %s/%s (0..%d)",
+                            index, short_id, platform, count - 1)
+                return None
+            pl.winner = index
             pl.chosen_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             found = pl
             break
