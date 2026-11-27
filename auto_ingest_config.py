@@ -170,6 +170,8 @@ def _require_mounted(path):
     p = Path(str(path))
     if not p.exists():
         raise RuntimeError(f"Required mount path does not exist: {p}")
+    if not p.is_dir():
+        raise RuntimeError(f"Required mount path is not a directory: {p}")
     if not os.path.ismount(p):
         try:
             is_empty = p.is_dir() and not any(p.iterdir())
