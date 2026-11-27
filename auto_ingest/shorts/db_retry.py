@@ -34,7 +34,11 @@ _TRANSIENT_MARKERS = (
 def is_transient(e: Exception) -> bool:
     etype = type(e).__name__
     text = str(e)
-    return any(m in (etype + text) for m in _TRANSIENT_MARKERS)
+    # Search each field separately. Concatenating them first lets a marker be
+    # assembled across the artificial type/message boundary (e.g. type
+    # "Service" + message "Unavailable: ..." looked like "ServiceUnavailable"),
+    # which misclassified an ordinary non-transient error as retryable.
+    return any(m in etype or m in text for m in _TRANSIENT_MARKERS)
 
 
 def retry(fn: Callable[[Any], T], *,
