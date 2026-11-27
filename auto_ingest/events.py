@@ -18,7 +18,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-
 try:
     from assistx.contracts.event_envelope import (
         Actor,
@@ -112,13 +111,19 @@ def emit(event_type: str, payload: Dict[str, Any], correlation_id: Optional[str]
     the work. ``correlation_id`` is REQUIRED (UUID) and is auto-generated when
     not supplied (contract enforcement, LLD §2).
     """
+    # The canonical assistx EventEnvelope requires a UUID string for
+    # correlation_id and a list for links (the local mirror below silently
+    # coerced both). Supply them here so the two paths agree with this
+    # function's documented contract.
+    if correlation_id is None:
+        correlation_id = str(uuid.uuid4())
     return EventEnvelope(
         schema_version=SCHEMA_VERSION,
         source_repo=SOURCE_REPO,
         event_type=event_type,
         correlation_id=correlation_id,
         payload=payload,
-        links=links,
+        links=links or [],
     )
 
 
