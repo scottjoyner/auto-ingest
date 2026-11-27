@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib.util
 import json
 import re
-import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -461,7 +461,14 @@ def iter_supported_files(base: Path, limit: int = 100) -> list[Path]:
     for path in sorted(base.rglob("*")):
         if len(files) >= limit:
             break
-        if not path.is_file() or any(part in IGNORED_PARTS for part in path.parts):
+        if not path.is_file():
+            continue
+        # IGNORED_PARTS names directories to prune *inside* the scan tree.
+        # Checking path.parts would also match an ancestor of `base` (e.g. a
+        # checkout under build/ or venv/) and silently drop every file in the
+        # scan. Only inspect directories relative to the requested root.
+        rel_parts = path.relative_to(base).parts
+        if any(part in IGNORED_PARTS for part in rel_parts[:-1]):
             continue
         files.append(path)
     return files
