@@ -7,11 +7,26 @@ JSON so planning is reproducible and refinable.
 from __future__ import annotations
 
 import json
+import math
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+def _finite_seconds(v: object) -> Optional[float]:
+    """Return v as a finite float, or None for any unusable timing value.
+
+    Timing fields on a persisted Plan can be null, a string, a bool or a
+    non-finite float (JSON accepts NaN/Infinity). None of those is a meaningful
+    number of seconds and all of them make the aggregate below raise or return
+    a non-numeric duration.
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    f = float(v)
+    return f if math.isfinite(f) else None
 
 
 @dataclass
@@ -122,9 +137,11 @@ class PlannedShort:
     persona: Optional[str] = None  # stylized | photo | video (on-screen personality)
 
     def duration(self) -> float:
-        if not self.cues:
-            return sum(s.dur for s in self.shots)
-        return max(c.end for c in self.cues)
+        if self.cues:
+            ends = [e for e in (_finite_seconds(c.end) for c in self.cues) if e is not None]
+            return max(ends, default=0.0)
+        durs = [d for d in (_finite_seconds(s.dur) for s in self.shots) if d is not None]
+        return sum(durs, 0.0)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
