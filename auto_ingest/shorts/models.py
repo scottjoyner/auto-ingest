@@ -14,6 +14,20 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+def _string_list(value: Any, field: str) -> List[str]:
+    """Return a list-of-strings field, or fail closed on a malformed one.
+
+    ``Brief.to_dict`` always emits a list for ``points`` and ``tags``. Calling
+    ``list(...)`` on a string that an older/edited artifact supplied silently
+    produced one element per character, which downstream planning then renders
+    as a caption per character. Reject the type at the deserialization boundary
+    instead of manufacturing corrupt content.
+    """
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{field} must be a list of strings")
+    return list(value)
+
+
 @dataclass
 class SourceRef:
     """A research source (paper / vault doc / concept) backing a short."""
@@ -63,9 +77,9 @@ class Brief:
             topic=d["topic"],
             title=d.get("title", d["topic"]),
             hook=d.get("hook", ""),
-            points=list(d.get("points", [])),
+            points=_string_list(d.get("points", []), "points"),
             sources=[SourceRef.from_dict(s) for s in d.get("sources", [])],
-            tags=list(d.get("tags", [])),
+            tags=_string_list(d.get("tags", []), "tags"),
             topic_type=d.get("topic_type"),
             series_id=d.get("series_id"),
         )
