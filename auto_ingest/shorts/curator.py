@@ -301,6 +301,12 @@ def brief_from_discussions(topic: str, clips: List[DiscussionClip],
     seen: set = set()
     points: List[str] = []
     sources: List[SourceRef] = []
+    # Tags must describe only the clips that actually became points/sources.
+    # A clip dropped as a duplicate or as degenerate short text still has a
+    # `concept`, but leaking that concept into tags can flip the derived
+    # `topic_type` (and therefore the hook template) to a topic no surviving
+    # utterance supports.
+    used_concepts: set = set()
     for c in clips:
         key = (c.utterance_id, c.text)
         if key in seen:
@@ -309,6 +315,8 @@ def brief_from_discussions(topic: str, clips: List[DiscussionClip],
         text = (c.text or "").strip().replace("\n", " ")
         if len(text) < 20:
             continue
+        if len(points) < 6:  # mirrors the points[:6]/sources[:6] trim below
+            used_concepts.add(c.concept)
         points.append(text[:240])
         sources.append(SourceRef(
             kind="utterance",
@@ -327,7 +335,7 @@ def brief_from_discussions(topic: str, clips: List[DiscussionClip],
         hook=hook,
         points=points[:6],
         sources=sources[:6],
-        tags=sorted({c.concept for c in clips}),
+        tags=sorted(used_concepts),
     )
     brief.topic_type = topic_type_of(brief)
     return brief
