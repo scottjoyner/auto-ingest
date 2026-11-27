@@ -63,7 +63,10 @@ class PersonaConfig:
 
     @classmethod
     def from_env(cls) -> "PersonaConfig":
-        src = os.getenv("PERSONA_SOURCE", "stylized")
+        # Normalize exactly like scheduling.default_persona_source(): both read
+        # PERSONA_SOURCE, so padded/upper-case values must not silently select a
+        # different face source in the renderer than the calendar planned.
+        src = os.getenv("PERSONA_SOURCE", "stylized").strip().lower()
         if src not in ("stylized", "photo", "video"):
             src = "stylized"
         return cls(
