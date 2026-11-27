@@ -697,10 +697,14 @@ def _cmd_publish_metrics(args) -> int:
         plan = __import__("json").loads(Path(args.plan_file).read_text(encoding="utf-8"))
         shorts = plan.get("shorts", [])
         platform = args.platform or "youtube_shorts"
+        from auto_ingest.shorts.models import PlannedShort
         n = 0
         for sd in shorts:
-            from auto_ingest.shorts.models import Plan
-            sh = Plan.from_dict({"shorts": [sd]}).shorts[0]
+            # Each entry of a plan's "shorts" list is already a serialized
+            # PlannedShort. Wrapping it in a Plan dict needs "topic"/"brief"
+            # keys that a bare short has, and raised KeyError before any
+            # prediction was stored.
+            sh = PlannedShort.from_dict(sd)
             _m.store_prediction_for_short(sh, platform, topic=sh.brief_topic or "",
                                           path=store)
             n += 1
