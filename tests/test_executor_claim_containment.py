@@ -47,7 +47,7 @@ def test_claim_only_current_task(failure):
     ns = dict(neo_driver=Driver, q_pick_ready=pick,
               q_get_task=lambda s, tid: {"task": {"id": tid}},
               q_attach_run=attach, execute_task_minimal=execute,
-              run_acceptance=lambda task, tid: [{"passed": True}],
+              run_acceptance=lambda task, tid, *, execution_steps: [{"passed": True}],
               q_finish_run=finish, datetime=datetime, uuid=uuid)
     exec(compile(ast.Module(body=[fn], type_ignores=[]), str(source), "exec"), ns)
     if failure:
