@@ -428,8 +428,12 @@ def cmd_ingest(args) -> int:
 # ---------------------------------------------------------------------------
 def cmd_recall(args) -> int:
     """Forward to the personal recall package (embed + graph-linked search)."""
-    return _run("python3", ["-m", "auto_ingest.personal.recall"] + args.rest,
-                extra_env=neo4j_env())
+    # This is a package CLI, not a repo-root script. `_run` would resolve the
+    # first argument against REPO and ask the interpreter to open
+    # `<REPO>/python3`, so every invocation exited 2 before the recall module
+    # was imported. `_run_module` is the module entrypoint (cf. cmd_shorts).
+    return _run_module("auto_ingest.personal.recall", list(args.rest),
+                       extra_env=neo4j_env())
 
 
 # ---------------------------------------------------------------------------
