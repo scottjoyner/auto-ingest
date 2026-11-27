@@ -97,6 +97,18 @@ class LedgerRecord:
         )
 
 
+def _ledger_size(raw: Dict[str, Any]) -> Optional[int]:
+    """Return a usable non-negative row size, or None for malformed evidence."""
+    value = raw.get("size", raw.get("bytes", 0))
+    if isinstance(value, bool):
+        return None
+    try:
+        size = int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return size if size >= 0 else None
+
+
 @dataclass(frozen=True)
 class LedgerSummary:
     """Bounded aggregate view of a ledger."""
@@ -196,7 +208,7 @@ def summarize_ledger(
             except json.JSONDecodeError:
                 malformed += 1
                 continue
-            if not isinstance(row, dict):
+            if not isinstance(row, dict) or _ledger_size(row) is None:
                 malformed += 1
                 continue
             record = LedgerRecord.from_dict(row)
@@ -498,7 +510,7 @@ def _read_ledger(path: Path, statuses: Tuple[str, ...], max_samples: int) -> Led
             except json.JSONDecodeError:
                 malformed += 1
                 continue
-            if not isinstance(row, dict):
+            if not isinstance(row, dict) or _ledger_size(row) is None:
                 malformed += 1
                 continue
             record = LedgerRecord.from_dict(row)
