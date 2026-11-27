@@ -89,6 +89,8 @@ def _opt_str(value: Any) -> Optional[str]:
 
 
 def _bounded(values: Any, limit: int) -> Tuple[str, ...]:
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise ValueError("limit must be a positive integer")
     if not values:
         return ()
     if isinstance(values, str):
