@@ -710,8 +710,13 @@ def ends_unterminated(ledger: Path) -> bool:
         with ledger.open("rb") as handle:
             handle.seek(-1, os.SEEK_END)
             return handle.read(1) != b"\n"
-    except OSError:  # pragma: no cover - unreadable ledger is handled elsewhere
-        return False
+    except OSError:
+        # Cannot inspect the tail => assume it may be damaged. Returning False
+        # here used to send `hash_source` straight to append: a killed producer's
+        # partial JSON line would be glued to the next record and both objects
+        # would be lost. The repairing branch only writes a newline, so the
+        # fail-closed answer is cheap and never invents digest evidence.
+        return True
 
 
 def _terminate_partial_line(handle: Any) -> bool:
