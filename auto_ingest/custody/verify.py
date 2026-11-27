@@ -32,7 +32,13 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from .hashing import DEFAULT_ALGORITHM, digest_file
-from .ledger import DESTINATION_LEDGER, HASH_LEDGER, ledger_dir, read_records
+from .ledger import (
+    DESTINATION_LEDGER,
+    HASH_LEDGER,
+    ledger_dir,
+    read_records,
+    summarize_ledger,
+)
 from .policy import MAX_SUMMARY_ENTRIES
 
 #: Destination-side statuses. Only VERIFIED counts as custody.
@@ -40,6 +46,19 @@ VERIFIED = "verified_at_destination"
 MISSING = "missing"
 MISMATCH = "mismatch"
 FAILED = "failed"
+
+
+class VerifyUnavailable(RuntimeError):
+    """A verification pass cannot be trusted and must not be reported at all.
+
+    ``read_records`` deliberately skips unparseable ledger rows, because a
+    producer killed mid-append leaves one behind. That is the right behaviour
+    for a row-level reader, but it is the wrong behaviour for a *verifier*: a
+    skipped source row silently shrinks the set of objects to prove, and the
+    pass then reports ``verification_complete: true`` over a smaller set. A
+    coherent ledger is therefore a precondition, not a detail: refuse the whole
+    pass rather than propose a partial custody.
+    """
 
 
 @dataclass(frozen=True)
@@ -219,8 +238,21 @@ def verify_destination(
     worst direction, reporting a completed copy as MISSING. Omitted, the behaviour
     is unchanged.
     """
-    expected = source_digests(bundle)
     root = ledger_dir(bundle)
+    # The source hash ledger is the list of objects this pass must prove. If a
+    # row is malformed or the final row was torn by an interrupted producer,
+    # `source_digests()` would silently drop that object and this pass would
+    # declare verification complete over the survivors. Refuse instead: a
+    # partial set is never a custody proof, and no destination rows are written.
+    source_ledger = summarize_ledger(root / HASH_LEDGER)
+    if source_ledger.present and not source_ledger.coherent:
+        raise VerifyUnavailable(
+            "source hash ledger is not coherent "
+            f"(malformed_lines={source_ledger.malformed}, "
+            f"truncated={source_ledger.truncated}); "
+            "refusing to verify a partial source set"
+        )
+    expected = source_digests(bundle)
     root.mkdir(parents=True, exist_ok=True)
     ledger = root / DESTINATION_LEDGER
 
@@ -357,6 +389,7 @@ __all__ = [
     "MISSING",
     "VERIFIED",
     "VerifyProgress",
+    "VerifyUnavailable",
     "already_verified",
     "ends_unterminated",
     "source_digests",
