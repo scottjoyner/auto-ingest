@@ -269,13 +269,26 @@ def load_variants(short_id: Optional[str] = None,
 def choose_winner(short_id: str, platform: str, variant: int) -> Optional[VariantPlan]:
     """Record ``variant`` as the winning variant for ``short_id``/``platform``.
 
+    ``variant`` must be a plain (non-``bool``) integer that indexes an existing
+    visual variant of the matched plan. Booleans, floats, strings, ``None`` and
+    out-of-range indices are refused with ``ValueError`` *before* anything is
+    written: A/B decisions are a recorded, downstream-consumed result, so an
+    invalid winner must never be persisted or reported as success.
+
     Returns the updated plan, or ``None`` if no matching plan exists.
     """
     plans = _load_all()
     found = None
     for pl in plans:
         if pl.short_id == short_id and pl.platform == platform:
-            pl.winner = int(variant)
+            if isinstance(variant, bool) or not isinstance(variant, int):
+                raise ValueError(
+                    f"winner variant must be a non-bool int, got {variant!r}")
+            if not (0 <= variant < len(pl.thumb_variants)):
+                raise ValueError(
+                    f"winner variant {variant} is out of range for "
+                    f"{short_id}/{platform} with {len(pl.thumb_variants)} variants")
+            pl.winner = variant
             pl.chosen_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             found = pl
             break
