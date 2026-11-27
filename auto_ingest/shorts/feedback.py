@@ -7,6 +7,7 @@ data-derived suggestions for the next batch of shorts.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -19,6 +20,31 @@ _GAP_WORDS = (
     "surprising", "nobody", "everyone", "actually", "real", "truth", "why",
     "mystery", "shock", "debunk",
 )
+
+# A gap topic must contain a gap WORD, not a gap word as a substring of some
+# unrelated word. The old ``w in topic.lower()`` containment classified plain
+# topics as curiosity-gap leads for accidental substrings: "client"/"believe"
+# contain "lie", "reality" contains "real", "truthful" contains "truth". That
+# inflated the gap bucket in ``suggest_next`` and produced advice to "lead with
+# curiosity-gap hooks" from ordinary prose. Word boundaries on both sides fix
+# that; the optional suffix keeps ordinary inflections working ("secrets",
+# "myths", "debunked", "surprisingly"). ``y`` is deliberately NOT an allowed
+# suffix: ``catch`` + ``y`` would reintroduce the very "catchy" false positive
+# this fixes. This mirrors the gap-word admission rule already used by
+# ``virality.py`` for pre-publish scoring, applied here to the separate
+# post-publish feedback aggregation.
+_GAP_INFLECTIONS = r"(?:s|es|ed|ing|ly|ious|n|d)?"
+_GAP_RE = re.compile(
+    r"(?<!\w)(?:"
+    + "|".join(re.escape(word) for word in _GAP_WORDS)
+    + r")" + _GAP_INFLECTIONS + r"(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def _has_gap_word(text: str) -> bool:
+    """True only when ``text`` contains a gap word as a word, not a substring."""
+    return bool(_GAP_RE.search(text))
 
 
 def _num(v: Optional[float]) -> float:
@@ -161,7 +187,7 @@ def suggest_next(recs: List[MetricsRecord]) -> List[str]:
     for r in recs:
         if r.views is None:
             continue
-        if any(w in (r.topic or "").lower() for w in _GAP_WORDS):
+        if _has_gap_word(r.topic or ""):
             gap_views.append(float(r.views))
         else:
             plain_views.append(float(r.views))
