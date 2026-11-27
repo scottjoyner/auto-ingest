@@ -111,7 +111,13 @@ def file_sha256(path: Path) -> str:
 
 
 def read_limited(path: Path, limit: int = MAX_TEXT_BYTES) -> tuple[str, bool]:
-    data = path.read_bytes()[: limit + 1]
+    # Read only the prefix we actually need. ``Path.read_bytes()`` buffers the
+    # *entire* file before slicing, so a large local source (a multi-GB log or
+    # transcript export) was loaded into memory just to extract MAX_TEXT_BYTES
+    # of preview text. A bounded stream read keeps the helper's memory use
+    # proportional to ``limit`` while producing byte-identical output.
+    with path.open("rb") as f:
+        data = f.read(limit + 1)
     truncated = len(data) > limit
     if truncated:
         data = data[:limit]
