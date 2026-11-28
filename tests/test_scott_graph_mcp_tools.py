@@ -5,13 +5,15 @@ Verifies the tool functions are importable and callable. The DB-touching body
 is wrapped by ``@_safe``; we monkeypatch ``_driver`` so no live Neo4j is
 contacted and assert the tools return a plain string result.
 
-NOTE: scott_graph_mcp imports the optional ``mcp`` SDK at module load, which is
-not installed in CI/test interpreters. We therefore import it lazily inside the
-tests (and skip if the SDK is absent) so collection never fails.
+NOTE: scott_graph_mcp imports the optional ``mcp`` SDK at module load. When the
+SDK is absent we stand in for its registration decorator only; the tool bodies
+under test are the real functions, called with a fake Neo4j driver.
 """
 from __future__ import annotations
 
+import importlib
 import sys
+import types
 from pathlib import Path
 from unittest import mock
 
@@ -50,17 +52,42 @@ class _FakeDriver:
         pass
 
 
-def _load():
+def _load(monkeypatch):
     try:
-        import scott_graph_mcp as mcp_mod  # noqa: E402
-    except ImportError:
-        pytest.skip("mcp SDK not installed")
-    return mcp_mod
+        return importlib.import_module("scott_graph_mcp")
+    except ModuleNotFoundError as exc:
+        if exc.name != "mcp":
+            raise
+
+    # Only the SDK's @tool() bookkeeping is stubbed; no tool logic is replaced.
+    # Install the real server with `pip install -e ".[mcp]"`.
+    mcp = types.ModuleType("mcp")
+    server = types.ModuleType("mcp.server")
+    fastmcp = types.ModuleType("mcp.server.fastmcp")
+
+    class FastMCP:
+        def __init__(self, name=None):
+            self.name = name
+
+        def tool(self, fn=None):
+            return fn if fn is not None else (lambda f: f)
+
+        def run(self, *args, **kwargs):
+            raise RuntimeError("mcp SDK required to serve: pip install -e '.[mcp]'")
+
+    fastmcp.FastMCP = FastMCP
+    server.fastmcp = fastmcp
+    mcp.server = server
+    for name, module in (("mcp", mcp), ("mcp.server", server),
+                         ("mcp.server.fastmcp", fastmcp)):
+        monkeypatch.setitem(sys.modules, name, module)
+    sys.modules.pop("scott_graph_mcp", None)
+    return importlib.import_module("scott_graph_mcp")
 
 
 @pytest.fixture
-def fake_driver():
-    mcp_mod = _load()
+def fake_driver(monkeypatch):
+    mcp_mod = _load(monkeypatch)
     with mock.patch.object(mcp_mod, "_driver", return_value=_FakeDriver()):
         yield mcp_mod
 

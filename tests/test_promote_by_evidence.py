@@ -22,8 +22,9 @@ if str(REPO_ROOT) not in sys.path:
 def _lgs():
     try:
         from auto_ingest.diarize import link_global_speakers as lgs  # noqa: E402
-    except Exception:
-        pytest.skip("link_global_speakers requires torch (not in this env)")
+    except ImportError as exc:
+        pytest.skip(f"link_global_speakers needs an import dependency ({exc.name}); "
+                    "pip install -e '.[audio]'")
     return lgs
 
 

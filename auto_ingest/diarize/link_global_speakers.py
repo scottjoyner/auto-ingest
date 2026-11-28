@@ -43,8 +43,6 @@ import subprocess
 
 import numpy as np
 import torch
-import torchaudio
-import soundfile as sf
 from neo4j import GraphDatabase
 from neo4j.exceptions import Neo4jError
 
@@ -368,6 +366,10 @@ def load_audio(path: Path, target_sr: int = DEFAULT_SR) -> Tuple[torch.Tensor, i
     """
     if not _is_audio_path(path):
         raise RuntimeError(f"Not an audio file: {path}")
+
+    # Audio decoders are optional at import time: the pure DB/evidence helpers
+    # in this module must stay usable without the audio extra installed.
+    import torchaudio
 
     try:
         wav, sr = torchaudio.load(str(path))
@@ -1202,6 +1204,8 @@ def _embed_one_speaker(sid: str, meta: Dict[str, Any], args, audio_cache,
         rms_for_idx[idx] = rms
 
         if out_dir:
+            import soundfile as sf
+
             safe_key = re.sub(r"[^A-Za-z0-9_-]", "", key)
             name = f"{sid}_{safe_key}_{s:.2f}-{e:.2f}_p{prop:.2f}_r{rms:.3f}_snr{snr_db:.1f}{'_hold' if hold_idx==idx else ''}"
             sf.write(str(out_dir / f"{name}.wav"), snip.cpu().numpy(), sr, subtype="PCM_16")

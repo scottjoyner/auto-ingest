@@ -41,8 +41,21 @@ dashcam = [
     "ultralytics>=8.3",
     "opencv-python>=4.10",
     "pandas>=2.2",
-    "moviepy>=1.0",
+    "moviepy>=1.0,<2",
 ]
+# Narrow extras for hosts that only need one optional test surface. The full
+# pipeline stacks above (ingest/dashcam) remain available; these give a clear
+# install target for the corresponding optional skips:
+#   pip install -e ".[vision,audio,mcp]"
+vision = ["opencv-python>=4.10", "moviepy>=1.0,<2", "Pillow>=10.0"]
+audio = [
+    "torch==2.6.0+cpu",
+    "torchaudio==2.6.0+cpu",
+    "soundfile>=0.13",
+    "numpy>=1.26",
+]
+# scott_graph_mcp server (scripts/scott_graph_mcp.py)
+mcp = ["mcp>=1.0"]
 # Content summaries (auto_ingest.content): Ollama client
 content = ["requests>=2.32"]
 # Dev / test

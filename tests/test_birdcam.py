@@ -3,9 +3,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("cv2")
 import numpy as np
-import cv2
 
 from birdcam.config import load_settings
 from birdcam.events import EventManager
@@ -53,6 +51,9 @@ def test_roi_crop_shape():
 
 
 def test_mock_file_mode_path(tmp_path):
+    # Only this test needs a real video codec; keep the module-level tests
+    # runnable on hosts without the vision extra.
+    cv2 = pytest.importorskip("cv2", reason="cv2 missing; pip install -e '.[vision]'")
     out = tmp_path / 'x.mp4'
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     w = cv2.VideoWriter(str(out), fourcc, 5, (32,32))

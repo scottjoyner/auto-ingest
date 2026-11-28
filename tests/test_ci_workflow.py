@@ -102,7 +102,11 @@ def test_each_pip_install_is_a_single_command(name, block):
     """Catch continuation damage that bash -n alone would not flag."""
     script = _install_lines_only(block)
     if not script:
-        pytest.skip("step runs no package install")
+        # No install command to parse in this step. Assert that fact instead of
+        # skipping: a step that grows an install line must be noticed here.
+        assert "pip install" not in block or "--upgrade" in block, (
+            f"{name}: a pip install line was not parsed by _install_lines_only")
+        return
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                           timeout=60)
     argv_lines = [line for line in proc.stdout.splitlines() if line.startswith("ARGV:")]

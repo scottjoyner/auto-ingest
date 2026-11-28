@@ -65,7 +65,7 @@ def test_compose_with_persona_falls_back_to_stylized(tmp_path):
     # With a base video + stylized config, compose_with_persona should produce
     # a valid output (voice clone absent -> base audio; face -> stylized avatar).
     if not HAS_MOVIEPY:
-        pytest.skip("moviepy not installed in this interpreter")
+        pytest.skip("moviepy missing; pip install -e '.[vision]'")
     base = tmp_path / "base.mp4"
     _make_smoke_clip(base)
     out = tmp_path / "persona_out.mp4"
@@ -82,7 +82,7 @@ def test_compose_with_persona_single_encode_uses_passed_clip(monkeypatch, tmp_pa
     re-open the base file (VideoFileClip on the broll path) — the whole point of
     the single-encode fix: composite in-memory, write once."""
     if not HAS_MOVIEPY:
-        pytest.skip("moviepy not installed in this interpreter")
+        pytest.skip("moviepy missing; pip install -e '.[vision]'")
 
     import auto_ingest.shorts.persona as persona_mod
 
