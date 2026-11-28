@@ -208,6 +208,7 @@ class DestinationRef:
     host_path: Optional[str] = None
     resolved_from: str = SOURCE_UNRESOLVED
     mounted: Optional[bool] = None
+    path_exists: Optional[bool] = None
     identity: Optional[StorageIdentity] = None
 
     @property
@@ -227,6 +228,7 @@ class DestinationRef:
             "identity": self.identity.to_dict() if self.identity else None,
             "logical": self.logical.to_dict(),
             "mounted": self.mounted,
+            "path_exists": self.path_exists,
             "resolved": self.resolved,
             "resolved_from": self.resolved_from,
         }
@@ -338,13 +340,17 @@ def resolve_destination(
     )
 
     mounted: Optional[bool] = None
+    path_exists: Optional[bool] = None
     if host_path is not None:
         if check_mount:
             try:
-                mounted = os.path.ismount(host_path)
+                is_mount = os.path.ismount(host_path)
             except OSError:  # pragma: no cover - ismount does not raise in practice
-                mounted = False
-            if not mounted:
+                is_mount = False
+            if is_mount:
+                mounted = True
+                path_exists = True
+            else:
                 # ismount() is false for a directory *inside* a mount, which is the
                 # normal shape of a network destination: the share is at /nas, the
                 # archive is at /nas/fileserver/headcam. Falling back to isdir()
@@ -352,15 +358,29 @@ def resolve_destination(
                 # containing mount is consulted instead.
                 from .mounts import observe_mount
 
-                mounted = observe_mount(host_path, allow_containing=True).present
+                obs = observe_mount(host_path, allow_containing=True)
+                if obs.present:
+                    # Backed by a containing mount. Keep "mounted" and
+                    # "path_exists" distinct: a missing subdirectory under a live
+                    # mount is not a mounted destination.
+                    path_exists = obs.path_exists
+                    mounted = bool(path_exists)
+                else:
+                    try:
+                        path_exists = os.path.exists(host_path)
+                    except OSError:  # pragma: no cover
+                        path_exists = None
+                    mounted = False
         else:
             mounted = None
+            path_exists = None
 
     return DestinationRef(
         logical=logical,
         host_path=host_path,
         resolved_from=resolved_from,
         mounted=mounted,
+        path_exists=path_exists,
         identity=identity,
     )
 

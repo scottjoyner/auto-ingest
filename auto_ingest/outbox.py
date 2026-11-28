@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,52 +29,59 @@ class GraphOutbox:
 
     def __init__(self, sqlite_path: str = DEFAULT_OUTBOX_PATH) -> None:
         self.path = sqlite_path
+        self._lock = threading.RLock()
         self.conn = sqlite3.connect(sqlite_path, check_same_thread=False)
-        self.conn.execute(
-            """CREATE TABLE IF NOT EXISTS graph_outbox(
-                   id INTEGER PRIMARY KEY,
-                   op_type TEXT,
-                   correlation_id TEXT,
-                   payload TEXT,
-                   created_at TEXT,
-                   retry_count INTEGER DEFAULT 0,
-                   last_error TEXT
-               )"""
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS graph_outbox(
+                       id INTEGER PRIMARY KEY,
+                       op_type TEXT,
+                       correlation_id TEXT,
+                       payload TEXT,
+                       created_at TEXT,
+                       retry_count INTEGER DEFAULT 0,
+                       last_error TEXT
+                   )"""
+            )
+            self.conn.commit()
 
     def append(self, op_type: str, payload: Dict[str, Any],
                correlation_id: str = "", last_error: str = "") -> int:
-        cur = self.conn.execute(
-            "INSERT INTO graph_outbox(op_type, correlation_id, payload, created_at, last_error) "
-            "VALUES(?,?,?,?,?)",
-            (op_type, correlation_id, json.dumps(payload),
-             datetime.now(timezone.utc).isoformat(), last_error),
-        )
-        self.conn.commit()
-        return cur.lastrowid
+        with self._lock:
+            cur = self.conn.execute(
+                "INSERT INTO graph_outbox(op_type, correlation_id, payload, created_at, last_error) "
+                "VALUES(?,?,?,?,?)",
+                (op_type, correlation_id, json.dumps(payload),
+                 datetime.now(timezone.utc).isoformat(), last_error),
+            )
+            self.conn.commit()
+            return cur.lastrowid
 
     def pending(self, limit: int = 100) -> List[Tuple[int, str, str, str, int]]:
-        rows = self.conn.execute(
-            "SELECT id, op_type, correlation_id, payload, retry_count "
-            "FROM graph_outbox ORDER BY id LIMIT ?",
-            (limit,),
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT id, op_type, correlation_id, payload, retry_count "
+                "FROM graph_outbox ORDER BY id LIMIT ?",
+                (limit,),
+            ).fetchall()
         return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
 
     def mark_done(self, id_: int) -> None:
-        self.conn.execute("DELETE FROM graph_outbox WHERE id=?", (id_,))
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute("DELETE FROM graph_outbox WHERE id=?", (id_,))
+            self.conn.commit()
 
     def mark_failed(self, id_: int, err: str) -> None:
-        self.conn.execute(
-            "UPDATE graph_outbox SET retry_count=retry_count+1, last_error=? WHERE id=?",
-            (err, id_),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "UPDATE graph_outbox SET retry_count=retry_count+1, last_error=? WHERE id=?",
+                (err, id_),
+            )
+            self.conn.commit()
 
     def count_pending(self) -> int:
-        row = self.conn.execute("SELECT count(*) FROM graph_outbox").fetchone()
+        with self._lock:
+            row = self.conn.execute("SELECT count(*) FROM graph_outbox").fetchone()
         return int(row[0]) if row else 0
 
     def replay(self, verify: Optional[callable] = None,
@@ -130,7 +138,8 @@ class GraphOutbox:
         self.conn.close()
 
 
-_OUTBOX: Optional[GraphOutbox] = None
+_OUTBOXES: Dict[str, GraphOutbox] = {}
+_OUTBOXES_LOCK = threading.Lock()
 
 
 def get_outbox(sqlite_path: Optional[str] = None) -> Optional[GraphOutbox]:
@@ -138,19 +147,20 @@ def get_outbox(sqlite_path: Optional[str] = None) -> Optional[GraphOutbox]:
 
     The outbox is opt-in via env ``AUTO_INGEST_OUTBOX=1`` (or an explicit path)
     so existing ingest runs are untouched by default. When enabled, writers
-    stage ops durably before touching Neo4j.
+    stage ops durably before touching Neo4j. Singletons are keyed by sqlite path
+    so distinct paths do not collide.
     """
-    global _OUTBOX
-    if _OUTBOX is not None:
-        return _OUTBOX
-    env = (sqlite_path or "").strip() or ""
-    import os
-
-    if os.environ.get("AUTO_INGEST_OUTBOX"):
-        path = env or os.environ.get("AUTO_INGEST_OUTBOX_PATH", DEFAULT_OUTBOX_PATH)
-        _OUTBOX = GraphOutbox(path)
-        return _OUTBOX
-    return None
+    env_path = (sqlite_path or "").strip()
+    if not os.environ.get("AUTO_INGEST_OUTBOX"):
+        return None
+    path = env_path or os.environ.get("AUTO_INGEST_OUTBOX_PATH", DEFAULT_OUTBOX_PATH)
+    key = os.path.abspath(path)
+    with _OUTBOXES_LOCK:
+        ob = _OUTBOXES.get(key)
+        if ob is None:
+            ob = GraphOutbox(path)
+            _OUTBOXES[key] = ob
+        return ob
 
 
 def _verify_transcription_exists(op_type: str, payload: Dict[str, Any]) -> bool:
