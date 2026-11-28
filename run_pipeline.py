@@ -169,7 +169,6 @@ def main():
     ap.add_argument("--label-llm", action="store_true", help="cluster: LLM cluster labels")
     ap.add_argument("--summarize", action="store_true", help="include LLM summarize stage")
     ap.add_argument("--summarize-limit", type=int, default=50)
-    ap.add_argument("--workers", type=int, default=1, help="summarize worker threads")
     ap.add_argument("--dry-run", action="store_true",
                     help="Dry-run where each stage supports it (no writes)")
     args = ap.parse_args()
