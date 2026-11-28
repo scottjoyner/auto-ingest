@@ -39,6 +39,9 @@ class OllamaClient:
             payload["options"] = options
         body = json.dumps(payload).encode("utf-8")
         path = f"{self._base_path}/api/generate" if self._base_path else "/api/generate"
+        # Keep the last failure: a bare "failed after retries" tells an operator
+        # neither which endpoint/model was tried nor why each attempt failed.
+        last_error: Optional[Exception] = None
         for attempt in range(1, retries+1):
             try:
                 conn_cls = http.client.HTTPSConnection if self._is_https else http.client.HTTPConnection
@@ -54,9 +57,18 @@ class OllamaClient:
                     raise RuntimeError("No 'response' in Ollama output")
                 return out
             except Exception as e:
+                last_error = e
                 log.warning("Ollama call failed (%d/%d): %s", attempt, retries, e)
-                time.sleep(min(2**attempt, 10))
-        raise RuntimeError("Ollama call failed after retries")
+                # Sleep only when another attempt will follow; sleeping after the
+                # last failure just delays the error (up to 10s) for no benefit.
+                if attempt < retries:
+                    time.sleep(min(2**attempt, 10))
+        detail = (f"{type(last_error).__name__}: {last_error}" if last_error is not None
+                  else "no attempts made")
+        raise RuntimeError(
+            f"Ollama call to {self._host}:{self._port}{path} failed for model "
+            f"'{model}' after {retries} attempt(s): {detail}"
+        )
 
 # ----------------------------
 # Transcript patterns
