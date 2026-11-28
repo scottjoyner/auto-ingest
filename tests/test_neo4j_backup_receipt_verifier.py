@@ -1,12 +1,11 @@
 """Offline synthetic receipt/byte tests. No live Neo4j or production NAS I/O."""
-import datetime as dt
 import hashlib
 import json
 import os
-from pathlib import Path
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"tools"))
 import neo4j_backup_receipt_verifier as r
@@ -42,9 +41,11 @@ class ReceiptContractTests(unittest.TestCase):
                        {"finishUtc":"2026-10-27T06:01:02Z"}):
             with self.subTest(forged=forged):
                 self.assertEqual(r.validate({**sample(),**forged})["state"],"unverified")
-        broken=sample();broken.pop("archiveSha256")
+        broken=sample()
+        broken.pop("archiveSha256")
         self.assertEqual(r.validate(broken)["state"],"unverified")
-        broken=sample();broken["token"]="sensitive"
+        broken=sample()
+        broken["token"]="sensitive"
         self.assertEqual(r.validate(broken)["state"],"unverified")
     def test_nonzero_exit_is_not_success(self):
         self.assertEqual(r.validate({**sample(),"exitCode":1})["state"],
@@ -78,7 +79,8 @@ class ReceiptContractTests(unittest.TestCase):
             self.assertFalse(wrong["contentDigestIndependentlyVerified"])
     def test_no_archive_read_when_oversized_or_wrong_size(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path=Path(tmp)/"fixture.backup";path.write_bytes(DATA)
+            path=Path(tmp)/"fixture.backup"
+            path.write_bytes(DATA)
             out=r.check_selected_archive(sample(),path,len(DATA)-1)
             self.assertEqual(out["state"],"unverified")
             self.assertEqual(out["archiveReads"],0)
@@ -86,14 +88,18 @@ class ReceiptContractTests(unittest.TestCase):
             self.assertEqual(out["archiveReads"],0)
     def test_symlink_and_nonbackup_extension_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
-            good=Path(tmp)/"data.backup";good.write_bytes(DATA)
-            link=Path(tmp)/"link.backup";link.symlink_to(good)
+            good=Path(tmp)/"data.backup"
+            good.write_bytes(DATA)
+            link=Path(tmp)/"link.backup"
+            link.symlink_to(good)
             self.assertEqual(r.check_selected_archive(sample(),link)["state"],"unverified")
-            other=Path(tmp)/"data.txt";other.write_bytes(DATA)
+            other=Path(tmp)/"data.txt"
+            other.write_bytes(DATA)
             self.assertEqual(r.check_selected_archive(sample(),other)["state"],"unverified")
     def test_malicious_io_limits_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            p=Path(tmp)/"small.backup";p.write_bytes(DATA)
+            p=Path(tmp)/"small.backup"
+            p.write_bytes(DATA)
             for cap in (True,0,-1,1.5,"1GiB",r.MAX_READ_MAX+1):
                 with self.subTest(cap=cap):
                     self.assertEqual(r.check_selected_archive(sample(),p,cap)["state"],"unverified")
@@ -104,15 +110,18 @@ class ReceiptContractTests(unittest.TestCase):
             self.assertIsNone(r.load(p))
     def test_manifest_loader_rejects_symlink_and_oversize(self):
         with tempfile.TemporaryDirectory() as tmp:
-            p=Path(tmp)/"receipt.json";p.write_text(json.dumps(sample()))
+            p=Path(tmp)/"receipt.json"
+            p.write_text(json.dumps(sample()))
             self.assertEqual(r.load(p),sample())
-            link=Path(tmp)/"link.json";link.symlink_to(p)
+            link=Path(tmp)/"link.json"
+            link.symlink_to(p)
             self.assertIsNone(r.load(link))
             p.write_bytes(b"0"*(r.MAX_RECEIPT+1))
             self.assertIsNone(r.load(p))
     def test_content_mutation_detects_hash_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:
-            p=Path(tmp)/"backup.backup";p.write_bytes(DATA)
+            p=Path(tmp)/"backup.backup"
+            p.write_bytes(DATA)
             altered=DATA[:-1]+b"x"
             p.write_bytes(altered)
             self.assertEqual(r.check_selected_archive(sample(),p)["state"],"local-archive-hash-mismatch")
@@ -143,21 +152,25 @@ class ReceiptContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             source=Path(tmp)/"primary.backup"
             mirror=Path(tmp)/"mirror.backup"
-            source.write_bytes(DATA);mirror.write_bytes(DATA[:-1]+b"X")
+            source.write_bytes(DATA)
+            mirror.write_bytes(DATA[:-1]+b"X")
             out=r.compare_independently_read_files(sample(),source,sample("mirror"),mirror)
             self.assertEqual(out["state"],"unverified")
             self.assertFalse(out["mirrorSourceByteIdentityVerified"])
     def test_identical_self_claims_cannot_skip_absent_primary_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
-            destination=Path(tmp)/"mirror.backup";destination.write_bytes(DATA)
+            destination=Path(tmp)/"mirror.backup"
+            destination.write_bytes(DATA)
             out=r.compare_independently_read_files(sample(),Path(tmp)/"absent.backup",
                                                    sample("mirror"),destination)
             self.assertEqual(out["state"],"unverified")
             self.assertEqual(out["archiveReads"],0)
     def test_pair_hashing_under_explicit_byte_cap_only(self):
         with tempfile.TemporaryDirectory() as tmp:
-            source=Path(tmp)/"primary.backup";source.write_bytes(DATA)
-            mirror=Path(tmp)/"mirror.backup";mirror.write_bytes(DATA)
+            source=Path(tmp)/"primary.backup"
+            source.write_bytes(DATA)
+            mirror=Path(tmp)/"mirror.backup"
+            mirror.write_bytes(DATA)
             out=r.compare_independently_read_files(sample(),source,sample("mirror"),
                                                    mirror,len(DATA)-1)
             self.assertEqual(out["state"],"unverified")
@@ -165,7 +178,8 @@ class ReceiptContractTests(unittest.TestCase):
 
     def test_alias_to_same_inode_never_counts_as_independent_mirror(self):
         with tempfile.TemporaryDirectory() as tmp:
-            first=Path(tmp)/"primary.backup";first.write_bytes(DATA)
+            first=Path(tmp)/"primary.backup"
+            first.write_bytes(DATA)
             second=Path(tmp)/"mirror.backup"
             os.link(first,second)
             out=r.compare_independently_read_files(sample(),first,sample("mirror"),second)

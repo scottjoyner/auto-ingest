@@ -60,7 +60,6 @@ from __future__ import annotations
 
 import csv
 import io
-import socket
 import unittest
 from hashlib import sha256
 from types import SimpleNamespace
