@@ -1,0 +1,60 @@
+name: Installed wheel acceptance
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installed-wheel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build and install exact wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install build
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          python -m build --wheel --outdir "$RUNNER_TEMP/wheel-evidence"
+          python -m venv "$RUNNER_TEMP/wheel-runtime"
+          "$RUNNER_TEMP/wheel-runtime/bin/python" -m pip install "$RUNNER_TEMP"/wheel-evidence/*.whl packaging
+          "$RUNNER_TEMP/wheel-runtime/bin/python" -m pip check
+          (cd "$RUNNER_TEMP/wheel-evidence" && sha256sum *.whl > SHA256SUMS)
+      - name: Installed CLI against disposable database and HTTP fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          db="wheel-acceptance-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm -f "$db" >/dev/null 2>&1 || true' EXIT
+          export MUSE_FIXTURE_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(16))')"
+          echo "::add-mask::$MUSE_FIXTURE_PASSWORD"
+          docker run --detach --rm --name "$db" \
+            --memory=2g --memory-swap=2g --cpus=1.5 --pids-limit=384 \
+            --publish 127.0.0.1::7687 \
+            --env "NEO4J_AUTH=neo4j/$MUSE_FIXTURE_PASSWORD" \
+            --env NEO4J_server_memory_heap_initial__size=256m \
+            --env NEO4J_server_memory_heap_max__size=384m \
+            --env NEO4J_server_memory_pagecache_size=128m neo4j:5.22 >/dev/null
+          export MUSE_FIXTURE_BOLT_PORT="$(docker port "$db" 7687/tcp | sed -n 's/^127\.0\.0\.1://p')"
+          source_path="$GITHUB_WORKSPACE/scripts/verify_installed_executor.py"
+          commit="$(git rev-parse HEAD)"
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/wheel-runtime/bin/python" "$source_path" \
+            --wheel "$RUNNER_TEMP"/wheel-evidence/*.whl \
+            --manifest "$RUNNER_TEMP/wheel-evidence/acceptance.json" \
+            --commit "$commit"
+          docker stop --time 5 "$db" >/dev/null
+      - name: Preserve tested wheel and manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-wheel-${{ github.sha }}
+          path: ${{ runner.temp }}/wheel-evidence/
+          if-no-files-found: error
+          retention-days: 14
