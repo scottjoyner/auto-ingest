@@ -11,6 +11,7 @@
 
 - [Documentation](#documentation)
 - [Quick Start](#quick-start)
+- [Verification](#verification)
 - [Trigger Jobs](#trigger-jobs)
 - [Architecture](#architecture)
 - [Troubleshooting](#troubleshooting)
@@ -85,6 +86,27 @@ bin/auto-ingest worker             # idle-gated background worker
 ```
 
 > `run_all_optimized.sh` is a **deprecated** shim over `bin/auto-ingest run-all`.
+
+## Verification
+
+Verification is offline: **enqueue no jobs** while it runs (no `/api/enqueue`,
+`deploy/create_job.sh`, `run-all`, or `worker`). Set `TMPDIR` to a pre-existing
+directory on the 4TB SSD so pytest fixtures and scratch files do not consume
+root-filesystem space:
+
+```bash
+cd auto-ingest
+TMPDIR=/media/scott/SSD_4TB/opencode-scratch python3 -m pytest tests/ -q
+```
+
+This matches the lightweight offline invocation in `.github/workflows/ci.yml`
+(`python -m pytest tests/ -q`); `pyproject.toml` addopts exclude the ML-heavy
+subpackages. The sibling ML-stack-free unit suite is
+`python3 -m pytest auto_ingest/tests/ -q`.
+
+Results of a live run for this branch: **NO DATA** (not executed here — the
+full suite was not run under the active launch hold). This documentation change
+was checked only by markdown review and `git diff --check`.
 
 ## Trigger Jobs
 
