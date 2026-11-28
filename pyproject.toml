@@ -51,6 +51,17 @@ dev = ["pytest>=8.0", "pytest-cov>=6.0", "ruff>=0.5"]
 [project.scripts]
 content-os = "content_os.cli:main"
 
+# Explicit discovery: the repo root is a flat layout with many unrelated
+# top-level directories (logs, runs, deploy, ...), so setuptools auto-discovery
+# would abort with "Multiple top-level packages discovered". Limit the wheel to
+# the actual importable packages plus the standalone config module.
+[tool.setuptools]
+py-modules = ["auto_ingest_config"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["auto_ingest*", "content_os*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests", "auto_ingest"]
 # Keep the suite green without the ML stack: only the lightweight, dependency-free
