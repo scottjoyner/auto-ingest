@@ -6,6 +6,47 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pytest  # noqa: E402
 
 
+def _stub_optional_ml_stack_at_import_time():
+    """Make top-level test modules importable without the optional ML stack.
+
+    CI deliberately installs no torch/transformers (see .github/workflows/ci.yml
+    "lightweight test deps (no ML stack)"). The BOM regression tests import
+    auto_ingest.ingest.transcripts, which imports torch and transformers at
+    module scope. Fixtures run too late for that: pytest imports test modules
+    during collection, before any fixture is set up. Install a MagicMock tree
+    here, at conftest import time, ONLY when the real packages are absent, so a
+    developer or CI job with the real stack still exercises the real thing.
+    """
+    try:
+        import torch  # noqa: F401
+        import transformers  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        return
+
+    from unittest import mock
+
+    torch_names = (
+        "torch", "torch.cuda", "torch.backends", "torch.backends.cuda",
+        "torch.backends.mps", "torch.nn", "torch.nn.functional", "torch.fx",
+    )
+    nodes = {name: mock.MagicMock(name=name) for name in torch_names}
+    root = nodes["torch"]
+    for attr, dotted in (("cuda", "torch.cuda"), ("backends", "torch.backends"),
+                         ("nn", "torch.nn"), ("fx", "torch.fx")):
+        setattr(root, attr, nodes[dotted])
+    for name, node in nodes.items():
+        sys.modules.setdefault(name, node)
+
+    transformers_stub = sys.modules.setdefault("transformers", mock.MagicMock(name="transformers"))
+    transformers_stub.AutoTokenizer = mock.MagicMock(name="AutoTokenizer")
+    transformers_stub.AutoModel = mock.MagicMock(name="AutoModel")
+
+
+_stub_optional_ml_stack_at_import_time()
+
+
 @pytest.fixture
 def hermetic_mounts(tmp_path, monkeypatch):
     """Point the custody CLI at a synthetic mount table.
