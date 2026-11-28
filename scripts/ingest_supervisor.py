@@ -3,7 +3,7 @@
 coverage, drives bulk_ingest_dashcam per month, verifies results, keeps a
 resumable ledger, alerts after repeated failure, and rebuilds the docker
 image when the repo advances. Designed for systemd timer every 6h."""
-import fcntl, os, sys, json, glob, time, subprocess, concurrent.futures
+import fcntl, os, sys, json, glob, time, subprocess, concurrent.futures, shlex
 from datetime import datetime, timezone
 
 HOME='/home/deathstar'
@@ -140,7 +140,7 @@ def main():
         "python /app/auto_ingest/dashcam/yolo_embeddings.py "
         "--bases /dashcam/{DAY} "
         "--neo4j-uri bolt://127.0.0.1:7687 --neo4j-user neo4j "
-        "--neo4j-pass '$NEO4J_PASS' --resume"
+        '--neo4j-pass "$NEO4J_PASS" --resume'
     ]
     par=max(1,int(os.environ.get("INGEST_MAX_PARALLEL","3")))
     log(f"ingesting {len(sum(pending.values(),[]))} pending day(s), parallelism={par}")
@@ -150,11 +150,10 @@ def main():
         if REMOTE and hash(dstr)%2==1:
             r=subprocess.run(["sshpass","-p",os.environ.get("X1_370_PASS",""),
                               "ssh","-o","StrictHostKeyChecking=no",REMOTE,
-                              "bash /opt/auto-ingest/run_day.sh "+dstr],
+                              "bash /opt/auto-ingest/run_day.sh "+shlex.quote(dstr)],
                              env=env,capture_output=True,text=True)
             return dstr,r.returncode
-        pw=os.environ.get("NEO4J_PASS","")
-        cmd=[x.replace('{DAY}',dstr).replace("'$NEO4J_PASS'",pw).replace("$NEO4J_PASS",pw) for x in PROVEN_CMD]
+        cmd=[x.replace('{DAY}',dstr) for x in PROVEN_CMD]
         r=subprocess.run(cmd,env=env,capture_output=True,text=True)
         if 'AuthenticationRateLimit' in (r.stdout+r.stderr):
             log(f"{dstr}: auth rate-limited, cooling down 16min")

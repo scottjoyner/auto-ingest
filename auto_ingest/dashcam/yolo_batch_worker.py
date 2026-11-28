@@ -18,7 +18,11 @@ import csv
 def sh(c): return subprocess.run(c, shell=True, capture_output=True, text=True)
 
 def probe_fps_w_h(path):
-    r = sh(f'ffprobe -v quiet -print_format json -show_streams -select_streams v:0 "{path}"')
+    r = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json",
+         "-show_streams", "-select_streams", "v:0", path],
+        capture_output=True, text=True,
+    )
     import json
     j = json.loads(r.stdout or "{}")
     st = (j.get("streams") or [{}])[0]
@@ -53,9 +57,14 @@ def main():
         # decode natively (no scale) so boxes land in source pixel space
         hw = os.environ.get("YOLO_HWACCEL", "").strip()
         hwin = os.environ.get("YOLO_HWACCEL_DEV", "")
-        pre = f"-hwaccel {hw} " + (f"-hwaccel_device {hwin} " if hwin else "") if hw else ""
-        r = sh(f'ffmpeg -nostdin -loglevel error {pre}-i "{clip}" '
-               f'-vf "fps={args.fps}" -frame_pts 1 -q:v 2 "{td}/%08d.jpg"')
+        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error"]
+        if hw:
+            cmd += ["-hwaccel", hw]
+            if hwin:
+                cmd += ["-hwaccel_device", hwin]
+        cmd += ["-i", clip, "-vf", f"fps={args.fps}", "-frame_pts", "1",
+                "-q:v", "2", os.path.join(td, "%08d.jpg")]
+        r = subprocess.run(cmd, capture_output=True, text=True)
         frames = sorted(os.listdir(td))
         if not frames:
             print(f"EMPTY {stem}"); return

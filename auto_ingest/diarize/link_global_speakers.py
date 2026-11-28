@@ -43,7 +43,10 @@ import subprocess
 
 import numpy as np
 import torch
-import torchaudio
+try:
+    import torchaudio
+except Exception:  # optional ML dep; module should still be importable
+    torchaudio = None
 import soundfile as sf
 from neo4j import GraphDatabase
 from neo4j.exceptions import Neo4jError

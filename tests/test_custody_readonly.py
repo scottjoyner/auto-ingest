@@ -180,13 +180,9 @@ def test_resolving_a_destination_never_creates_the_path(tmp_path):
     assert ref.host_path == str(target)
     assert not target.exists()
 
-    # Whether a brand-new tmp path counts as "mounted" is a fact about the
-    # host, not about the resolver: /tmp is its own tmpfs on some machines and
-    # a plain directory under / on others. Ask the kernel's mount table what
-    # to expect, then assert the resolver reported exactly that - the original
-    # unconditional `is False` asserted a developer-specific mount layout, not
-    # read-only behaviour.
-    if observe_mount(str(target), allow_containing=True).present:
-        assert ref.mounted is True
-    else:
-        assert ref.mounted is False
+    # A destination path that does not exist must not be reported as mounted,
+    # even when it lives under an existing mount. The mount and the path are
+    # different facts; reporting "mounted" for a missing subdirectory hides the
+    # real problem from the caller.
+    assert ref.mounted is False
+    assert ref.path_exists is False

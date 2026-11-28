@@ -48,12 +48,27 @@ def _validate_fmt(fmt: str) -> None:
         )
 
 
+_KEY_ENC_PREFIX = "k2~"
+
+
+def _encode_key(key: str) -> str:
+    # Reversible, unambiguous filename segment. A versioned prefix distinguishes
+    # new artifacts from legacy "__" -> "/" names so literal "__" in keys survives.
+    body = key.replace("%", "%25").replace("/", "%2F").replace(".", "%2E")
+    return _KEY_ENC_PREFIX + body
+
+
+def _decode_key(encoded: str) -> str:
+    if encoded.startswith(_KEY_ENC_PREFIX):
+        body = encoded[len(_KEY_ENC_PREFIX):]
+        return body.replace("%2E", ".").replace("%2F", "/").replace("%25", "%")
+    # Legacy artifacts used a naive "__" -> "/" substitution.
+    return encoded.replace("__", "/")
+
+
 def _path(out_dir: str, key: str, stage: str, fmt: str) -> str:
     _validate_fmt(fmt)
-    # Keys may contain path separators (e.g. "dashcam/2026-07-14/CLT_1423_F").
-    # Replace "/" so the artifact lands in out_dir as a single file and does
-    # not try to create nested directories we didn't ask for.
-    safe_key = key.replace("/", "__")
+    safe_key = _encode_key(key)
     return os.path.join(out_dir, f"{safe_key}.{stage}.{fmt}")
 
 
@@ -130,8 +145,7 @@ def list_intermediates(out_dir: str, key: Optional[str] = None,
             if "." not in body:
                 continue
             key_part, stage_part = body.rsplit(".", 1)
-            # Reverse the "/" -> "__" sanitization done at write time.
-            real_key = key_part.replace("__", "/")
+            real_key = _decode_key(key_part)
             if key is not None and real_key != key:
                 continue
             if stage is not None and stage_part != stage:
