@@ -117,14 +117,29 @@ def haversine_m(lat1, lon1, lat2, lon2):
     a = np.sin(dphi/2.0)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dl/2.0)**2
     return float(2*R*np.arcsin(np.sqrt(a)))
 
+def _finite_number(v) -> bool:
+    """True only for a real, finite number (NaN/inf/None/text are not fixes)."""
+    if not isinstance(v, (int, float, np.integer, np.floating)):
+        return False
+    try:
+        return math.isfinite(float(v))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def plausible_fix(prev_fix, lat, lon, mph, max_jump_m=250.0, max_speed=110.0):
-    # reject obviously bad points
-    if lat is None or lon is None:
+    # reject obviously bad points; a non-finite coordinate is NOT "unknown" —
+    # it must fail closed (NaN would survive the jump test and poison the
+    # location vector / Neo4j scalars downstream).
+    if not _finite_number(lat) or not _finite_number(lon):
         return False
-    if mph is not None and (mph < 0 or mph > max_speed):
+    lat, lon = float(lat), float(lon)
+    if mph is not None and (not _finite_number(mph) or mph < 0 or mph > max_speed):
         return False
-    if prev_fix and all(v is not None for v in prev_fix[:2]):
-        d = haversine_m(prev_fix[0], prev_fix[1], lat, lon)
+    if prev_fix:
+        if not (_finite_number(prev_fix[0]) and _finite_number(prev_fix[1])):
+            return False  # cannot validate a jump against a non-finite baseline
+        d = haversine_m(float(prev_fix[0]), float(prev_fix[1]), lat, lon)
         if d > max_jump_m:  # >250 m/sec jump = sketchy
             return False
     return True
