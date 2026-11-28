@@ -1,17 +1,9 @@
-import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest  # noqa: E402
-
-# Top-level tests import auto_ingest.personal.recall at module scope, which
-# resolves Neo4j credentials during import even when the test uses a fake
-# driver. CI deliberately provides no real credentials. Supply a test-only
-# placeholder through the sanctioned resolution variable so hermetic tests can
-# collect; tests that pin credential precedence override it with monkeypatch.
-os.environ.setdefault("NEO4J_PASSWORD_DEFAULT", "test-only-not-a-real-password")
 
 
 @pytest.fixture
