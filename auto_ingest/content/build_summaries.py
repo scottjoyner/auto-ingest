@@ -13,10 +13,16 @@ Enhancements:
 - Creates tasks JSON sidecars: extracts or generates task descriptions from summaries
 """
 
-import os, re, json, time, logging, argparse, csv
-from pathlib import Path
-from typing import Optional, Dict, Any, List
+import argparse
+import csv
 import http.client
+import json
+import logging
+import os
+import re
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -303,27 +309,6 @@ def _normalize_tasks(tasks_any: Any) -> List[Dict[str, Any]]:
             "agent": {"name": agent_name[:60], "confidence": agent_conf, "rationale": agent_rat[:200]},
             "plan": norm_plan
         })
-        return out
-    for t in tasks_any:
-        if not isinstance(t, dict):
-            continue
-        title = str(t.get("title") or "").strip()
-        desc = str(t.get("description") or "").strip()
-        labels = t.get("labels") if isinstance(t.get("labels"), list) else []
-        labels = [str(x).strip() for x in labels if str(x).strip()]
-        priority = str(t.get("priority") or "medium").strip().lower()
-        if priority not in ("low","medium","high","urgent"):
-            priority = "medium"
-        owner_hint = str(t.get("owner_hint") or "").strip()
-        if not title and not desc:
-            continue
-        out.append({
-            "title": title[:140],
-            "description": desc[:1000],
-            "labels": list(dict.fromkeys(labels))[:10],
-            "priority": priority,
-            "owner_hint": owner_hint[:100]
-        })
     return out
 
 def _choose_best_path(dirpath: Path, stem: str, candidates: List[Path]) -> Optional[Path]:
@@ -466,7 +451,7 @@ _GENERIC_PLAN = [
 
 def _enrich_tasks_with_agent_plan(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for t in tasks:
-        labels = [l.lower() for l in t.get("labels", [])]
+        labels = [label.lower() for label in t.get("labels", [])]
         owner = (t.get("owner_hint") or "").strip()
         agent = t.get("agent") or {}
         if not agent.get("name"):
@@ -480,7 +465,8 @@ def _enrich_tasks_with_agent_plan(tasks: List[Dict[str, Any]]) -> List[Dict[str,
                 if owner and key.lower() in owner.lower():
                     score += 1
                 if best is None or score > best:
-                    best = score; best_key = key
+                    best = score
+                    best_key = key
             if best_key:
                 meta = _AGENT_MAP[best_key]
                 t["agent"] = {
@@ -494,7 +480,8 @@ def _enrich_tasks_with_agent_plan(tasks: List[Dict[str, Any]]) -> List[Dict[str,
             key = None
             for k, meta in _AGENT_MAP.items():
                 if t.get("agent",{}).get("name","") == meta["name"]:
-                    key = k; break
+                    key = k
+                    break
             steps = _AGENT_MAP.get(key, {}).get("plan", _GENERIC_PLAN)
             norm = []
             for i, s in enumerate(steps, 1):
@@ -585,7 +572,8 @@ def process_transcript(path: Path, client: OllamaClient, model: str, opts: Dict[
         # 3) Otherwise, build a compact tasks-only prompt from the existing summary fields (NOT the full transcript)
         parts = []
         if isinstance(sdoc, dict):
-            if sdoc.get("summary"): parts.append(str(sdoc["summary"]))
+            if sdoc.get("summary"):
+                parts.append(str(sdoc["summary"]))
             for k in ("key_points","topics","people","organizations","places"):
                 v = sdoc.get(k)
                 if isinstance(v, list) and v:
