@@ -45,6 +45,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -227,14 +228,16 @@ def _safe_join(root: Path, key: str) -> Optional[Path]:
 
     Keys come from a ledger, which is a file on disk. A key containing ``..`` or
     an absolute path must never be able to write outside the destination, so this
-    is checked rather than trusted.
+    is checked rather than trusted. Returns the resolved candidate so callers
+    cannot accidentally operate on an unresolved alias.
     """
-    candidate = (root / key).resolve()
+    root_resolved = root.resolve()
+    candidate = (root_resolved / key).resolve()
     try:
-        candidate.relative_to(root.resolve())
+        candidate.relative_to(root_resolved)
     except ValueError:
         return None
-    return root / key
+    return candidate
 
 
 #: Errors worth trying again. Everything else is a permanent condition and a
@@ -300,7 +303,7 @@ def stream_copy(
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp_dir = target.parent / TEMP_DIRNAME
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    tmp = tmp_dir / (target.name + ".partial")
+    tmp = tmp_dir / f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.partial"
 
     hasher = hashlib.new(algorithm)
     written = 0
@@ -600,7 +603,7 @@ def write_staged_ledger(bundle: str | Path, plan: Any, *,
     ledgers = ledger_dir(bundle)
     ledgers.mkdir(parents=True, exist_ok=True)
     path = ledgers / STAGED_LEDGER
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     lines = []
     for obj in sorted(plan.staged, key=lambda o: o.source_key):
         lines.append(json.dumps({
@@ -623,7 +626,7 @@ def write_staged_ledger(bundle: str | Path, plan: Any, *,
 
     # The roots, recorded next to the layout they produced.
     meta_path = ledgers / STAGED_META
-    meta_tmp = meta_path.with_suffix(meta_path.suffix + ".tmp")
+    meta_tmp = meta_path.with_suffix(f"{meta_path.suffix}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     with open(meta_tmp, "w", encoding="utf-8") as handle:
         handle.write(json.dumps({
             "source_roots": sorted({str(r) for r in (source_roots or ())}),
