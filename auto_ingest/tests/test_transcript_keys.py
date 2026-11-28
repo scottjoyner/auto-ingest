@@ -257,48 +257,54 @@ def test_media_identity_stem_folds_camera_variants_only(T):
     assert T.media_identity_stem("/a/kickoff_notes.m4a") != T.media_identity_stem("/a/kickoff_brief.m4a")
 
 
-def test_key_collision_is_reported_bounded_and_non_fatal(T, tmp_path, monkeypatch, caplog):
-    """Two distinct recordings CAN still land on one key (same start second), so the
-    ingest reports it instead of merging silently. Bounded: one warning, N keys."""
+def test_key_collision_is_hard_error_by_default(T, tmp_path, monkeypatch, caplog):
+    """Two distinct recordings sharing one key is a data-loss hazard: fail loudly."""
     root = _scan_roots(T, tmp_path, monkeypatch)
     # same YYYY_MMDD_HHMMSS second -> canonicalize_key rebuilds the same key for both
     for name in ("standup_recording_2025_0202_171732.m4a", "interview_recording_2025_0202_171732.m4a",
                  "2025_0202_171732_F.mp4", "2025_0202_171732_R.mp4"):
         (root / name).write_text("{}")
 
-    with caplog.at_level(logging.WARNING, logger="ingest_transcripts"):
-        mapping = T.discover_keys()
+    with pytest.raises(ValueError) as ei:
+        T.discover_keys()
 
-    assert set(mapping) == {"2025_0202_221732"}                 # one key, unchanged shape
-    assert len(mapping["2025_0202_221732"]["media_all"]) == 4   # nothing dropped
-    warnings = [r for r in caplog.records if "key-collision" in r.getMessage()]
-    assert len(warnings) == 1                            # one line, not one per file
-    msg = warnings[0].getMessage()
+    msg = str(ei.value)
     assert "1 key(s) hold media from more than one recording (3 recording(s) on them)" in msg
-    # stems sorted for a stable line; the dashcam clip's F/R camera variants folded into
-    # ONE identity (they are two views of one recording, deliberately one key)
+    # F/R camera variants fold into ONE identity (two views of one recording)
     assert ("2025_0202_221732: 2025_0202_171732 | interview_recording_2025_0202_171732"
             " | standup_recording_2025_0202_171732") in msg
     assert "_F" not in msg and "_R" not in msg
 
 
-def test_collision_report_is_bounded(T, tmp_path, monkeypatch, caplog):
+def test_key_collision_requires_explicit_resolution(T, tmp_path, monkeypatch, caplog):
+    """Explicit resolution allows discovery to proceed, but the collision is still reported."""
+    root = _scan_roots(T, tmp_path, monkeypatch)
+    for name in ("standup_recording_2025_0202_171732.m4a", "interview_recording_2025_0202_171732.m4a"):
+        (root / name).write_text("{}")
+
+    with caplog.at_level(logging.WARNING, logger="ingest_transcripts"):
+        mapping = T.discover_keys(allow_key_collisions=True)
+
+    assert set(mapping) == {"2025_0202_221732"}
+    assert len(mapping["2025_0202_221732"]["media_all"]) == 2
+    warnings = [r for r in caplog.records if "key-collision" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+def test_collision_report_is_bounded(T, tmp_path, monkeypatch):
     root = _scan_roots(T, tmp_path, monkeypatch)
     n = T.MAX_KEY_COLLISION_SAMPLES + 5
     for i in range(n):                       # one colliding key per distinct second
         for stem in ("standup_recording", "interview_recording"):
             (root / f"{stem}_2025_0202_1717{i:02d}.m4a").write_text("{}")
 
-    with caplog.at_level(logging.WARNING, logger="ingest_transcripts"):
-        mapping = T.discover_keys()
+    with pytest.raises(ValueError) as ei:
+        T.discover_keys()
 
-    assert len(mapping) == n                              # every path kept, keyed by second
-    warnings = [r for r in caplog.records if "key-collision" in r.getMessage()]
-    assert len(warnings) == 1
-    msg = warnings[0].getMessage()
-    assert f"{n} key(s) hold media from more than one recording (2 recording(s) on each)" not in msg
+    msg = str(ei.value)
     assert f"{n} key(s) hold media from more than one recording ({2 * n} recording(s) on them)" in msg
-    assert msg.count("; ") == T.MAX_KEY_COLLISION_SAMPLES - 1   # samples capped
+    # One "; " comes from the message prefix, the rest separate capped samples.
+    assert msg.count("; ") == T.MAX_KEY_COLLISION_SAMPLES       # samples capped (+ prefix)
     assert msg.endswith(" ...")                                  # and the rest only counted
 
 

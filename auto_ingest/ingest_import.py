@@ -36,6 +36,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 from typing import Any, Dict, Iterable, List, Optional
 
 # ---------------------------------------------------------------------------
@@ -74,6 +75,18 @@ def _split_row(row: Dict[str, Any], key_field: str) -> tuple[Any, Dict[str, Any]
 # ---------------------------------------------------------------------------
 # Dynamic-tx import
 # ---------------------------------------------------------------------------
+
+_CYPHER_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_cypher_identifier(value: str, *, name: str) -> str:
+    if not isinstance(value, str) or not _CYPHER_IDENT_RE.match(value):
+        raise ValueError(
+            f"Invalid Cypher identifier for {name}: {value!r} "
+            "(expected ^[A-Za-z_][A-Za-z0-9_]*$)"
+        )
+    return value
+
 
 # UNWIND + MERGE, keyed on the row's key field. MERGE guarantees idempotency:
 # a replay over already-present rows updates in place, never duplicates. The
@@ -117,6 +130,14 @@ def import_intermediate(driver, path: str, *, batch: int = 1000,
     """
     if batch < 1:
         raise ValueError("batch must be >= 1")
+    label = _validate_cypher_identifier(label, name="label")
+    key_field = _validate_cypher_identifier(key_field, name="key_field")
+    if parent_label is not None:
+        parent_label = _validate_cypher_identifier(parent_label, name="parent_label")
+    if parent_field is not None:
+        parent_field = _validate_cypher_identifier(parent_field, name="parent_field")
+    if edge_label is not None:
+        edge_label = _validate_cypher_identifier(edge_label, name="edge_label")
     rows = _load_rows(path)
     if not rows:
         return 0

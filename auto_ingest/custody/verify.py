@@ -192,6 +192,22 @@ def ends_unterminated(ledger: Path) -> bool:
         return False
 
 
+def _safe_join(root: Path, key: str) -> Optional[Path]:
+    """Join ``key`` under ``root``, refusing anything that escapes the root.
+
+    Ledger keys are untrusted input; a ``..`` or absolute component must never
+    cause verification to read outside the destination root. Returns the resolved
+    candidate so callers cannot accidentally operate on an unresolved alias.
+    """
+    root_resolved = root.resolve()
+    candidate = (root_resolved / key).resolve()
+    try:
+        candidate.relative_to(root_resolved)
+    except ValueError:
+        return None
+    return candidate
+
+
 def verify_destination(
     bundle: str | Path,
     destination_root: str | Path,
@@ -242,7 +258,18 @@ def verify_destination(
             if limit is not None and (verified + missing + mismatched + failed) >= limit:
                 break
             want_digest, size = expected[key]
-            target = base / staged.get(key, key)
+            landed = staged.get(key, key)
+            target = _safe_join(base, landed)
+            if target is None:
+                failed += 1
+                if len(errors) < max_errors:
+                    errors.append(f"{key}:key_escapes_destination")
+                handle.write(_record(key, FAILED, size=size,
+                                     path=(base / landed).as_posix(),
+                                     detail="key_escapes_destination"))
+                handle.flush()
+                os.fsync(handle.fileno())
+                continue
             if not target.exists():
                 missing += 1
                 handle.write(_record(key, MISSING, size=size,

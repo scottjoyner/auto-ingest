@@ -76,7 +76,28 @@ EMBED_EXTRA_ENABLED = os.getenv("AUTO_INGEST_EMBED_EXTRA", "0") == "1"
 EMBED_EXTRA_MODEL = os.getenv("EMBED_EXTRA_MODEL", "thenlper/gte-small")
 EMBED_EXTRA_PROP = os.getenv("EMBED_EXTRA_PROP", "emb_gte_small")
 
-NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, NEO4J_DB = get_neo4j_env()
+_CYPHER_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_cypher_identifier(value: str, *, name: str) -> str:
+    if not isinstance(value, str) or not _CYPHER_IDENT_RE.match(value):
+        raise ValueError(
+            f"Invalid Cypher identifier for {name}: {value!r} "
+            "(expected ^[A-Za-z_][A-Za-z0-9_]*$)"
+        )
+    return value
+
+
+_validate_cypher_identifier(EMBED_EXTRA_PROP, name="EMBED_EXTRA_PROP")
+
+try:
+    NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, NEO4J_DB = get_neo4j_env()
+except RuntimeError as _neo4j_err:
+    log.warning("Neo4j config unavailable at import: %s", _neo4j_err)
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687")
+    NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD = ""
+    NEO4J_DB = os.getenv("NEO4J_DB", "neo4j")
 NEO4J_ENABLED = bool(NEO4J_URI and NEO4J_USER and NEO4J_PASSWORD)
 
 DEFAULT_BATCH_SIZE = int(os.getenv("EMBED_BATCH", "32"))
@@ -808,7 +829,17 @@ def pick_rttm_for_key(key: str, idx: Dict[str, List[str]]) -> Optional[str]:
     candidates.sort(key=lambda kv: (abs(len(kv[0]) - len(key)), len(kv[0])))
     return sorted(candidates[0][1], key=lambda p: (p.count(os.sep), len(p)))[0]
 
-def discover_keys() -> Dict[str, Dict[str, Any]]:
+def discover_keys(allow_key_collisions: Optional[bool] = None) -> Dict[str, Dict[str, Any]]:
+    """Discover ingestable keys from SCAN_ROOTS.
+
+    Key collisions (more than one distinct recording identity stem mapped to the
+    same key) are a hard error by default because they silently merge distinct
+    recordings. Set allow_key_collisions=True, or env
+    AUTO_INGEST_ALLOW_KEY_COLLISIONS=1, only when an operator has explicitly
+    resolved the collision.
+    """
+    if allow_key_collisions is None:
+        allow_key_collisions = os.getenv("AUTO_INGEST_ALLOW_KEY_COLLISIONS", "0") == "1"
     with TimedStage(st_discover, detail=f"roots={len(SCAN_ROOTS)}"):
         mapping: Dict[str, Dict[str, Any]] = {}
         # key -> the distinct recording identity stems filed under it (see
@@ -864,16 +895,21 @@ def discover_keys() -> Dict[str, Dict[str, Any]]:
             cand = pick_rttm_for_key(key, rttm_idx)
             if cand: rec["rttm"] = cand; attached += 1
         log.info(f"[rttm-attach] attached RTTM to {attached} of {len(mapping)} keys")
-        # Report, never merge: every path stays in the mapping, but an operator has to
-        # know that two recordings are sharing a key. Bounded (one warning, at most
-        # MAX_KEY_COLLISION_SAMPLES keys) and non-fatal -- this is an ingest path.
+        # Key collisions are data-loss hazards: distinct recordings sharing one key
+        # causes silent overwrite/merge. Fail loudly by default; require explicit
+        # resolution (allow_key_collisions=True / AUTO_INGEST_ALLOW_KEY_COLLISIONS=1).
         collided = sorted((k, sorted(v)) for k, v in id_stems.items() if len(v) > 1)
         if collided:
-            log.warning("[key-collision] %d key(s) hold media from more than one recording (%d recording(s) "
-                        "on them), so distinct recordings share one key. All paths are kept and media_best "
-                        "picks one: %s%s", len(collided), sum(len(v) for _, v in collided),
-                        "; ".join(f"{k}: {' | '.join(v)}" for k, v in collided[:MAX_KEY_COLLISION_SAMPLES]),
-                        " ..." if len(collided) > MAX_KEY_COLLISION_SAMPLES else "")
+            msg = ("[key-collision] %d key(s) hold media from more than one recording (%d recording(s) "
+                   "on them); distinct recordings share one key. Resolve collisions or set "
+                   "allow_key_collisions=True / AUTO_INGEST_ALLOW_KEY_COLLISIONS=1: %s%s" % (
+                       len(collided), sum(len(v) for _, v in collided),
+                       "; ".join(f"{k}: {' | '.join(v)}" for k, v in collided[:MAX_KEY_COLLISION_SAMPLES]),
+                       " ..." if len(collided) > MAX_KEY_COLLISION_SAMPLES else ""))
+            if allow_key_collisions:
+                log.warning(msg)
+            else:
+                raise ValueError(msg)
         return mapping
 
 # =========================
@@ -1008,9 +1044,29 @@ def parse_dashcam_metadata_csv(path: str, fps: float, downsample_sec: int,
 # =========================
 # Chunked ingestion
 # =========================
+def _require_parent_transcription(driver, t_id: str, *, op: str) -> None:
+    """Fail loudly when a child write targets a missing Transcription.
+
+    A MATCH+UNWIND write silently no-ops when the parent is absent; the caller
+    would otherwise report rows as written and advance, losing data. This check
+    makes the failure explicit before any child batch is attempted.
+    """
+    with driver.session(database=NEO4J_DB) as sess:
+        rec = sess.run(
+            "MATCH (t:Transcription {id:$t_id}) RETURN count(t) AS n",
+            t_id=t_id,
+        ).single()
+    n = int(rec.get("n") or 0) if rec else 0
+    if n != 1:
+        raise RuntimeError(
+            f"[{op}] parent Transcription missing for t_id={t_id!r} (found {n}); "
+            "refusing to report child rows as written"
+        )
+
+
 def ingest_transcription_header(driver, t_id, key, started_at_iso, ended_at_iso, source_paths, text, transcript_emb, transcript_emb_v2,
                                 transcript_extra=None, extra_prop=None):
-    extra_prop = extra_prop or EMBED_EXTRA_PROP
+    extra_prop = _validate_cypher_identifier(extra_prop or EMBED_EXTRA_PROP, name="extra_prop")
     cy = f"""
     MERGE (t:Transcription {{id: $t_id}})
     ON CREATE SET t.key=$key, t.created_at=datetime()
@@ -1055,6 +1111,7 @@ def ingest_transcription_header(driver, t_id, key, started_at_iso, ended_at_iso,
 
 def ingest_segments_chunked(driver, t_id, segments, batch=200, timeout=120):
     if not segments: return 0
+    _require_parent_transcription(driver, t_id, op="ingest_segments_chunked")
     extra_prop = EMBED_EXTRA_PROP
     cy = f"""
     MATCH (t:Transcription {{id:$t_id}})
@@ -1072,12 +1129,19 @@ def ingest_segments_chunked(driver, t_id, segments, batch=200, timeout=120):
         s.speaker_label=seg.speaker_label,
         s.speaker_id=seg.speaker_id
     MERGE (t)-[:HAS_SEGMENT]->(s)
+    RETURN count(*) AS written
     """
     written = 0
     with driver.session(database=NEO4J_DB) as sess:
         for batch_list in _chunks(segments, batch):
-            sess.run(cy, t_id=t_id, segments=batch_list, timeout=timeout)
-            written += len(batch_list)
+            rec = sess.run(cy, t_id=t_id, segments=batch_list, timeout=timeout).single()
+            batch_written = int(rec.get("written") or 0) if rec else 0
+            if batch_written != len(batch_list):
+                raise RuntimeError(
+                    f"[ingest_segments_chunked] parent Transcription {t_id!r} missing during write "
+                    f"(expected {len(batch_list)} rows written, got {batch_written})"
+                )
+            written += batch_written
     return written
 
 def ingest_speakers_chunked(driver, speakers, batch=200, timeout=120):
@@ -1097,6 +1161,7 @@ def ingest_speakers_chunked(driver, speakers, batch=200, timeout=120):
 
 def ingest_utterances_chunked(driver, t_id, utterances, batch=200, timeout=120):
     if not utterances: return 0
+    _require_parent_transcription(driver, t_id, op="ingest_utterances_chunked")
     extra_prop = EMBED_EXTRA_PROP
     cy = f"""
     MATCH (t:Transcription {{id:$t_id}})
@@ -1110,12 +1175,19 @@ def ingest_utterances_chunked(driver, t_id, utterances, batch=200, timeout=120):
         uNode.absolute_start=CASE WHEN u.abs_start IS NULL THEN uNode.absolute_start ELSE datetime(u.abs_start) END,
         uNode.absolute_end  =CASE WHEN u.abs_end   IS NULL THEN uNode.absolute_end   ELSE datetime(u.abs_end) END
     MERGE (t)-[:HAS_UTTERANCE]->(uNode)
+    RETURN count(*) AS written
     """
     written = 0
     with driver.session(database=NEO4J_DB) as sess:
         for batch_list in _chunks(utterances, batch):
-            sess.run(cy, t_id=t_id, utterances=batch_list, timeout=timeout)
-            written += len(batch_list)
+            rec = sess.run(cy, t_id=t_id, utterances=batch_list, timeout=timeout).single()
+            batch_written = int(rec.get("written") or 0) if rec else 0
+            if batch_written != len(batch_list):
+                raise RuntimeError(
+                    f"[ingest_utterances_chunked] parent Transcription {t_id!r} missing during write "
+                    f"(expected {len(batch_list)} rows written, got {batch_written})"
+                )
+            written += batch_written
     return written
 
 def link_utterances_to_segments(driver, utterances, batch=300, timeout=120):
@@ -1170,6 +1242,7 @@ def ingest_segment_speaker_edges(driver, seg_edges, batch=500, timeout=120):
 
 def ingest_entities_chunked(driver, t_id, entities, batch=300, timeout=120):
     if not entities: return 0
+    _require_parent_transcription(driver, t_id, op="ingest_entities_chunked")
     cy = """
     MATCH (t:Transcription {id:$t_id})
     WITH t
@@ -1179,17 +1252,25 @@ def ingest_entities_chunked(driver, t_id, entities, batch=300, timeout=120):
         ON MATCH  SET e.text=ent.text, e.label=ent.label, e.updated_at=datetime()
       MERGE (t)-[m:MENTIONS]->(e)
       SET m.count=ent.count, m.starts=ent.starts, m.ends=ent.ends, m.avg_score=ent.avg_score
+    RETURN count(*) AS written
     """
     written = 0
     with driver.session(database=NEO4J_DB) as sess:
         for batch_list in _chunks(entities, batch):
-            sess.run(cy, t_id=t_id, entities=batch_list, timeout=timeout)
-            written += len(batch_list)
+            rec = sess.run(cy, t_id=t_id, entities=batch_list, timeout=timeout).single()
+            batch_written = int(rec.get("written") or 0) if rec else 0
+            if batch_written != len(batch_list):
+                raise RuntimeError(
+                    f"[ingest_entities_chunked] parent Transcription {t_id!r} missing during write "
+                    f"(expected {len(batch_list)} rows written, got {batch_written})"
+                )
+            written += batch_written
     return written
 
 def ingest_location_samples_chunked(driver, t_id: str, key: str, started_at_iso: Optional[str],
                                     rows: List[Dict[str, Any]], batch: int = 500, timeout: int = 120):
     if not rows: return 0
+    _require_parent_transcription(driver, t_id, op="ingest_location_samples_chunked")
     t0 = None
     if started_at_iso:
         try: t0 = datetime.fromisoformat(started_at_iso.replace("Z","+00:00")).astimezone(timezone.utc)
@@ -1225,12 +1306,19 @@ def ingest_location_samples_chunked(driver, t_id: str, key: str, started_at_iso:
         loc.quality = r.quality,
         loc.timestamp = CASE WHEN r.abs_time IS NULL THEN loc.timestamp ELSE datetime(r.abs_time) END
     MERGE (t)-[:HAS_LOCATION]->(loc)
+    RETURN count(*) AS written
     """
     written = 0
     with driver.session(database=NEO4J_DB) as sess:
         for batch_list in _chunks(prepared, batch):
-            sess.run(cy, t_id=t_id, rows=batch_list, timeout=timeout)
-            written += len(batch_list)
+            rec = sess.run(cy, t_id=t_id, rows=batch_list, timeout=timeout).single()
+            batch_written = int(rec.get("written") or 0) if rec else 0
+            if batch_written != len(batch_list):
+                raise RuntimeError(
+                    f"[ingest_location_samples_chunked] parent Transcription {t_id!r} missing during write "
+                    f"(expected {len(batch_list)} rows written, got {batch_written})"
+                )
+            written += batch_written
     return written
 
 # =========================

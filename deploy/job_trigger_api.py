@@ -22,6 +22,7 @@ Usage:
          -d '{"type": "ingest"}'
 """
 
+import hmac
 import http.server
 import json
 import os
@@ -41,12 +42,67 @@ DROP_ROOT = os.environ.get("DROP_ROOT", "/nas/drop")
 NAS_ROOT = os.environ.get("NAS_ROOT", "/media/scott/NAS4")
 APP_DIR = "/app"  # mounted as /app in container
 
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _api_token() -> str:
+    return os.environ.get("JOB_TRIGGER_API_TOKEN", "").strip()
+
+
+def _insecure_opt_in() -> bool:
+    # Explicit opt-in only; default is fail-closed.
+    return _truthy_env("JOB_TRIGGER_API_ALLOW_INSECURE")
+
+
+def _auth_mode_ok() -> bool:
+    return bool(_api_token()) or _insecure_opt_in()
+
+
+def _allowed_scan_roots() -> list[Path]:
+    raw = os.environ.get("JOB_TRIGGER_ALLOWED_ROOTS", "")
+    roots: list[Path] = []
+    for part in raw.replace(":", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        p = Path(part).expanduser()
+        try:
+            roots.append(p.resolve())
+        except Exception:
+            continue
+    return roots
+
+
+def _is_under(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except Exception:
+        return False
+
 class JobTriggerHandler(http.server.BaseHTTPRequestHandler):
     """HTTP handler for job trigger endpoints."""
 
     def log_message(self, format, *args):
         """Suppress default logging to stderr."""
         pass
+
+    def _require_auth(self) -> bool:
+        """Fail closed: require explicit auth token or explicit insecure opt-in."""
+        token = _api_token()
+        if token:
+            auth = self.headers.get("Authorization", "")
+            expected = f"Bearer {token}"
+            if not hmac.compare_digest(auth, expected):
+                self._send_json(401, {"error": "unauthorized"})
+                return False
+            return True
+        if _insecure_opt_in():
+            return True
+        self._send_json(503, {"error": "job trigger API is not configured; set JOB_TRIGGER_API_TOKEN or explicit insecure opt-in"})
+        return False
 
     def _send_json(self, status, data):
         self.send_response(status)
@@ -55,6 +111,8 @@ class JobTriggerHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data, indent=2).encode())
 
     def do_GET(self):
+        if not self._require_auth():
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/api/status":
             self._handle_status()
@@ -69,6 +127,8 @@ class JobTriggerHandler(http.server.BaseHTTPRequestHandler):
             ]})
 
     def do_POST(self):
+        if not self._require_auth():
+            return
         parsed = urlparse(self.path)
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length).decode() if content_length > 0 else "{}"
@@ -109,24 +169,54 @@ class JobTriggerHandler(http.server.BaseHTTPRequestHandler):
         })
 
     def _safe_scan_roots(self, raw):
-        """Validate and shell-escape scan_roots (W-47).
+        """Validate scan_roots against shell metacharacters and allowlist/root containment.
 
-        scan_roots is forwarded to the worker shell script as an environment
-        variable, never interpolated into a bash string. We still reject
-        obviously dangerous characters so a malicious client cannot smuggle
-        shell metacharacters. Returns a sanitized string (may be empty).
+        scan_roots is forwarded to worker scripts via environment variables. Reject
+        shell metacharacters, require absolute paths, and require each root to be
+        contained within JOB_TRIGGER_ALLOWED_ROOTS. Fail closed when no allowlist
+        is configured.
         """
-        if not raw:
+        if raw is None:
             return ""
-        if any(ch in raw for ch in ";|&$()`<>{}*?[]!#\\'\"\n"):
-            # Reject anything that could be interpreted by the shell.
+        if isinstance(raw, (list, tuple)):
+            parts = [str(p).strip() for p in raw if str(p).strip()]
+        else:
+            s = str(raw).strip()
+            if not s:
+                return ""
+            parts = [p.strip() for p in s.split(",") if p.strip()]
+        if not parts:
             return ""
-        return raw
+
+        if any(ch in s for p in parts for s in [p] for ch in ";|&$()`<>{}*?[]!#\\'\"\n"):
+            raise ValueError("scan_roots contains disallowed characters")
+
+        allowed = _allowed_scan_roots()
+        if not allowed:
+            raise ValueError("scan_roots rejected: JOB_TRIGGER_ALLOWED_ROOTS is not configured")
+
+        validated = []
+        for part in parts:
+            cand = Path(part).expanduser()
+            if not cand.is_absolute():
+                raise ValueError(f"scan_roots must be absolute paths: {part!r}")
+            try:
+                resolved = cand.resolve()
+            except Exception as exc:
+                raise ValueError(f"invalid scan_roots path {part!r}: {exc}") from exc
+            if not any(_is_under(resolved, root) for root in allowed):
+                raise ValueError(f"scan_roots path is outside allowed roots: {part!r}")
+            validated.append(str(resolved))
+        return ",".join(validated)
 
     def _handle_enqueue(self, data):
         """Create a .job file in the drop queue."""
         kind = data.get("kind", "all")
-        scan_roots = self._safe_scan_roots(data.get("scan_roots"))
+        try:
+            scan_roots = self._safe_scan_roots(data.get("scan_roots"))
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
 
         # Validate kind
         if kind not in ("audio", "dashcam", "bodycam", "all"):
@@ -173,7 +263,11 @@ class JobTriggerHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(400, {"error": f"unknown run type: {run_type}"})
             return
 
-        scan_roots = self._safe_scan_roots(os.environ.get("SCAN_ROOTS", ""))
+        try:
+            scan_roots = self._safe_scan_roots(os.environ.get("SCAN_ROOTS", ""))
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
         if run_type == "ingest":
             # Run ingest directly (not via job queue). SCAN_ROOTS is passed via
             # env, not interpolated into the bash command (W-47).
@@ -207,12 +301,11 @@ class JobTriggerHandler(http.server.BaseHTTPRequestHandler):
 def main():
     host = os.environ.get("JOB_API_HOST", "0.0.0.0")
     port = int(os.environ.get("JOB_API_PORT", "8765"))
-    # SECURITY TODO (W-47): the job API on :8766 (mapped from :8765) currently
-    # has NO authentication and serves plain HTTP. Before any unified/external
-    # deployment it MUST be placed behind an authenticating reverse proxy
-    # (e.g. Caddy + bearer token / mTLS) and TLS-terminated. The handler also
-    # executes local ingest/sync jobs, so unauthenticated access = RCE risk.
-    # Do NOT rely on network isolation alone.
+    if not _auth_mode_ok():
+        raise SystemExit(
+            "Refusing to start job trigger API without auth. Set JOB_TRIGGER_API_TOKEN "
+            "or explicitly opt in with JOB_TRIGGER_API_ALLOW_INSECURE=1."
+        )
     server = http.server.HTTPServer((host, port), JobTriggerHandler)
     print(f"Job Trigger API listening on {host}:{port}")
     print(f"Drop root: {DROP_ROOT}")

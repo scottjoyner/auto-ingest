@@ -39,16 +39,12 @@ def _load_env():
 
 
 # ---------------------------------------------------------------------------
-# Canonical Neo4j password default (single source of truth).
+# Canonical Neo4j password resolution (single source of truth).
 #
-# Every script that used to inline the literal ``knowledge_graph_2026`` now
-# resolves the password through get_neo4j_password() with this order:
-#     NEO4J_PASSWORD  ->  NEO4J_PASSWORD_DEFAULT  ->  _BAKED_IN_NEO4J_PASSWORD
-# The baked-in literal lives here (and ONLY here) so the historical default
-# keeps working out of the box, while any machine can override it with a single
-# `export NEO4J_PASSWORD_DEFAULT=...` (or the stronger per-run NEO4J_PASSWORD).
+# Scripts resolve the password through get_neo4j_password() with this order:
+#     NEO4J_PASSWORD  ->  config.yaml value  ->  NEO4J_PASSWORD_DEFAULT
+# No baked-in default: fail closed when no password is configured.
 # ---------------------------------------------------------------------------
-_BAKED_IN_NEO4J_PASSWORD = "knowledge_graph_2026"
 
 
 def get_neo4j_password(config_value: str | None = None) -> str:
@@ -59,14 +55,21 @@ def get_neo4j_password(config_value: str | None = None) -> str:
       2. config.yaml value        (passed in as ``config_value``; already
                                     ${ENV}-resolved by the caller)
       3. NEO4J_PASSWORD_DEFAULT   (machine-wide default, e.g. from .env)
-      4. baked-in historical default (``knowledge_graph_2026``)
+
+    Raises:
+        RuntimeError: if no password is available from any source.
     """
-    return (
+    password = (
         os.environ.get("NEO4J_PASSWORD")
         or (config_value or None)
         or os.environ.get("NEO4J_PASSWORD_DEFAULT")
-        or _BAKED_IN_NEO4J_PASSWORD
     )
+    if not password:
+        raise RuntimeError(
+            "Neo4j password is required; set NEO4J_PASSWORD, configure "
+            "neo4j_password in config.yaml, or set NEO4J_PASSWORD_DEFAULT"
+        )
+    return password
 
 
 def _resolve_env(value, default=None):
@@ -305,16 +308,21 @@ def get_neo4j_db():
 def get_neo4j_env():
     """Return the full (uri, user, password, db) Neo4j tuple.
 
-    Single source of truth for every ingest script (W-45). Replaces the ~30
-    inline ``NEO4J_URI/USER/PASSWORD/DB`` constant blocks that hardcoded the
-    ``knowledge_graph_2026`` password fallback. Prefer this over re-declaring
-    the four module-level globals.
+    Single source of truth for every ingest script (W-45). Prefer this over
+    re-declaring the four module-level globals. Fails closed when no Neo4j
+    password is configured.
     """
     cfg = get_neo4j_config()
+    password = cfg.get("password")
+    if not password:
+        raise RuntimeError(
+            "Neo4j password is required; set NEO4J_PASSWORD, configure "
+            "neo4j_password in config.yaml, or set NEO4J_PASSWORD_DEFAULT"
+        )
     return (
         cfg.get("uri", os.environ.get("NEO4J_URI", "bolt://100.64.43.123:7687")),
         cfg.get("user", os.environ.get("NEO4J_USER", "neo4j")),
-        cfg.get("password", os.environ.get("NEO4J_PASSWORD", "")),
+        password,
         get_neo4j_db(),
     )
 
