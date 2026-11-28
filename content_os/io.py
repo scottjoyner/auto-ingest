@@ -43,7 +43,20 @@ def load_yaml(path: Path) -> dict[str, Any]:
         return data or {}
     try:
         return json.loads(txt or "{}")
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        # A JSON container that fails to parse is corrupt metadata, not a
+        # line-oriented YAML document.  The naive line parser below would turn
+        # a half-object into plausible-looking keys (and ``doctor`` would call
+        # the result healthy), so fail closed instead.  Plain ``key: value``
+        # YAML never starts with a container character, so that fallback is
+        # left intact.
+        significant = [
+            line.lstrip()
+            for line in txt.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        if significant and significant[0].startswith(("{", "[")):
+            raise ValueError(f"Malformed JSON metadata in {path}: {exc}") from None
         data: dict[str, Any] = {}
         for line in txt.splitlines():
             if not line.strip() or line.lstrip().startswith("#") or ":" not in line:
