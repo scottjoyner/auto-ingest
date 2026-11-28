@@ -147,7 +147,18 @@ def _top_paper_excerpt_impl(driver, topic: str, *, max_len: int = 170) -> Option
         ).data()
     if not row:
         return None
-    txt = (row[0].get("text") or "").strip().replace("\n", " ")
-    if len(txt) > max_len:
-        txt = txt[:max_len - 3].rsplit(" ", 1)[0] + "..."
-    return txt or None
+    # The OPTIONAL MATCH above keeps papers whose Chunk did not satisfy the
+    # size/text filter, returning them with ``text`` null. Ordering is by paper
+    # metadata (published DESC, keyword_count DESC), not by excerpt presence,
+    # so row[0] is often such a paper. Taking it blindly loses every real
+    # excerpt further down the result and makes the planner fall back to
+    # templated text. Use the first row that actually carries citable text;
+    # this matches _myth_fact_impl's "prefer a row with an excerpt" rule.
+    for candidate in row:
+        txt = (candidate.get("text") or "").strip().replace("\n", " ")
+        if not txt:
+            continue
+        if len(txt) > max_len:
+            txt = txt[:max_len - 3].rsplit(" ", 1)[0] + "..."
+        return txt
+    return None
