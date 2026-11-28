@@ -13,6 +13,7 @@ are unit-testable without the graph.
 """
 from __future__ import annotations
 
+import re
 from typing import List, Optional
 
 from auto_ingest.shorts.models import Brief, Cue
@@ -60,18 +61,34 @@ _DEFAULT_TEMPLATES = [
 ]
 
 
+def _has_token(blob: str, token: str) -> bool:
+    """Whether ``token`` appears as a whole word (optionally plural).
+
+    The classifier used plain substring containment, so a word that merely
+    *contains* a keyword hijacked the verdict: "mistakes" contains "take" and
+    was filed as an opinion; "vscode" contains "vs" and was filed as a debate.
+    Both boundaries are alphanumeric-aware, and an optional plural keeps
+    "papers"/"takes"/"debates" classified as before.
+    """
+    return re.search(
+        rf"(?<![a-z0-9]){re.escape(token)}(?:s|es)?(?![a-z0-9])", blob
+    ) is not None
+
+
 def topic_type_of(brief: Brief) -> str:
     """Infer a topic type from brief metadata (tags / topic / title)."""
     t = (brief.topic or "").lower()
     tags = {str(x).lower() for x in (brief.tags or [])}
     blob = f"{t} {' '.join(tags)}"
-    if "debate" in blob or "vs" in blob:
+    if _has_token(blob, "debate") or _has_token(blob, "vs"):
         return "debate"
-    if "opinion" in blob or "hot take" in blob or "take" in blob:
+    if (_has_token(blob, "opinion") or _has_token(blob, "hot take")
+            or _has_token(blob, "take")):
         return "opinion"
-    if "paper" in blob or "arxiv" in blob or "2024" in blob or "study" in blob:
+    if (_has_token(blob, "paper") or _has_token(blob, "arxiv")
+            or _has_token(blob, "2024") or _has_token(blob, "study")):
         return "paper"
-    if "utterance" in tags or t == "":
+    if _has_token(blob, "utterance") or not t:
         return "utterance"
     return "concept"
 
