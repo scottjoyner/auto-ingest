@@ -16,9 +16,7 @@ import json
 import os
 import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
 
 DEFAULT_OUTBOX_PATH = ".auto_ingest_outbox.sqlite"
 
@@ -159,8 +157,9 @@ def _verify_transcription_exists(op_type: str, payload: Dict[str, Any]) -> bool:
     Replay only drains ops whose write actually landed; ops whose Transcription
     is still absent stay pending so the source can be re-ingested.
     """
-    from auto_ingest_config import get_neo4j_config
     from neo4j import GraphDatabase
+
+    from auto_ingest_config import get_neo4j_config
 
     t_id = payload.get("t_id") or payload.get("id")
     if not t_id:
@@ -211,7 +210,11 @@ def main(argv=None) -> int:
                    help="Report pending ops without draining (no graph writes)")
     args = p.parse_args(argv)
     summary = _drain(limit=args.limit, max_retries=args.max_retries, dry_run=args.dry_run)
-    return 0
+    # A drain is only a success when every op was drained or deliberately kept
+    # for re-ingest. Corrupt payloads, verify errors and exhausted retries are
+    # counted in summary["failed"] and still need operator attention: exiting 0
+    # would report a clean drain to any cron/CI caller keying off the status.
+    return 1 if summary["failed"] else 0
 
 
 if __name__ == "__main__":
