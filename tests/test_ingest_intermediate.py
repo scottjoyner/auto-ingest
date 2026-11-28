@@ -200,3 +200,31 @@ def test_import_csv_file():
         n = ingest_import.import_intermediate(drv, p, label="Segment", key_field="id")
         assert n == 1
         assert drv.calls[0].params["rows"][0]["key"] == "a"
+
+
+def test_read_intermediate_accepts_bom_prefixed_csv(tmp_path):
+    """A NAS/Excel-authored intermediate may carry a UTF-8 BOM."""
+    path = tmp_path / "k.metadata.csv"
+    path.write_bytes(b"\xef\xbb\xbfid,mph\r\na1,55\r\n")
+
+    got = ingest_write.read_intermediate(str(tmp_path), "k", "metadata", fmt="csv")
+
+    assert got == [{"id": "a1", "mph": "55"}]
+    # Plain utf-8 decoding left \ufeff on the first header, yielding a row
+    # keyed '\ufeffid' instead of 'id'.
+    assert "\ufeffid" not in got[0]
+
+
+def test_import_bom_prefixed_csv_resolves_key_field(tmp_path):
+    """The importer must find key_field even when the CSV header has a BOM."""
+    path = tmp_path / "k.segments.csv"
+    path.write_bytes(b"\xef\xbb\xbfid,v\r\na1,7\r\n")
+
+    drv = _FakeDriver()
+    n = ingest_import.import_intermediate(
+        drv, str(path), label="Segment", key_field="id")
+
+    assert n == 1
+    row = drv.calls[0].params["rows"][0]
+    assert row["key"] == "a1"
+    assert row["props"] == {"v": "7"}
