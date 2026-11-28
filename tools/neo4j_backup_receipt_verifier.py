@@ -20,6 +20,9 @@ DEFAULT_READ_MAX=16*1024*1024
 MAX_READ_MAX=32*1024**3
 RUN_RE=re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 HASH_RE=re.compile(r"^[a-f0-9]{64}$")
+# fromisoformat() also accepts space separators, compact basic forms and
+# arbitrary offsets; the contract is strict UTC ISO-8601 with a trailing Z.
+TS_RE=re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 FIELDS={"schema","role","runId","startUtc","finishUtc",
         "exitCode","archiveBytes","archiveSha256"}
 
@@ -60,7 +63,8 @@ def load(path):
         return None
 
 def utc(value):
-    if not isinstance(value,str) or len(value)>40 or not value.endswith("Z"):return None
+    if (not isinstance(value,str) or len(value)>40
+            or TS_RE.fullmatch(value) is None):return None
     try:
         val=dt.datetime.fromisoformat(value[:-1]+"+00:00")
         return val if val.utcoffset()==dt.timedelta(0) else None
@@ -96,7 +100,8 @@ def compare_claims(primary,mirror):
         primary["runId"]!=mirror["runId"] or
         primary["archiveBytes"]!=mirror["archiveBytes"] or
         not hmac.compare_digest(primary["archiveSha256"],mirror["archiveSha256"]) or
-        utc(primary["finishUtc"])>utc(mirror["finishUtc"])):
+        utc(primary["finishUtc"])>utc(mirror["finishUtc"]) or
+        utc(primary["startUtc"])>utc(mirror["startUtc"])):
         return out
     out.update(state="matching-unsigned-claims-not-certified",
                reason="both-writers-make-agreeing-claims-without-independent-byte-proof",

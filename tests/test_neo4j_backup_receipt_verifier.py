@@ -174,5 +174,23 @@ class ReceiptContractTests(unittest.TestCase):
             self.assertFalse(out["mirrorSourceByteIdentityVerified"])
             out=r.compare_independently_read_files(sample(),first,sample("mirror"),first)
             self.assertEqual(out["state"],"unverified")
+
+    def test_utc_requires_strict_iso_z(self):
+        for bad in ("2026-10-27 06:27:01+00:00", "20261027T062701Z",
+                    "2026-10-27T06:27:01+00:00", "2026-10-27T06:27:01.123+00:00",
+                    "2026-10-27T06:27:01z"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(r.utc(bad))
+                self.assertEqual(r.validate({**sample(), "startUtc": bad})["state"],
+                                 "unverified")
+
+    def test_pair_rejects_mirror_starting_before_primary(self):
+        p, m = sample(), sample("mirror")
+        m["startUtc"] = "2026-10-27T05:27:01Z"  # earlier than the primary
+        self.assertEqual(r.compare_claims(p, m)["state"], "unverified")
+        m["startUtc"] = sample()["startUtc"]     # equal is valid
+        self.assertEqual(r.compare_claims(p, m)["state"],
+                         "matching-unsigned-claims-not-certified")
+
 if __name__=="__main__":
     unittest.main()
