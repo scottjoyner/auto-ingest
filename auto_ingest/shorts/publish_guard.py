@@ -33,7 +33,12 @@ def configured_platforms() -> List[str]:
     """Return the platforms that have credentials present in the env."""
     out: List[str] = []
     for plat, vars_ in PLATFORM_CREDS.items():
-        if any(os.getenv(v) for v in vars_):
+        # A blank/whitespace-only value is not a credential. Counting one would
+        # let AUTO_INGEST_LIVE=1 + an empty token placeholder satisfy the guard
+        # and permit a real upload that has no usable credential behind it.
+        # Stripping here is fail-closed: it only ever *removes* platforms from
+        # the configured set, so nothing that was genuinely wired can regress.
+        if any((os.getenv(v) or "").strip() for v in vars_):
             out.append(plat)
     return out
 

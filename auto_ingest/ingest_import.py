@@ -53,7 +53,11 @@ def _load_rows(path: str) -> List[Dict[str, Any]]:
             raise ValueError(f"intermediate JSON must be a list of row dicts: {path}")
         return [dict(r) for r in rows]
     if path.endswith(".csv"):
-        with open(path, "r", encoding="utf-8", newline="") as f:
+        # NAS/Excel exports may prefix the CSV with a UTF-8 BOM. utf-8-sig
+        # consumes it as an encoding marker; plain utf-8 leaves \\ufeff on the
+        # first header name and breaks key_field lookup. BOM-less files read
+        # identically, so this is backward compatible for our own intermediates.
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
             return [dict(r) for r in csv.DictReader(f)]
     raise ValueError(f"unsupported intermediate extension (need .json/.csv): {path}")
 
