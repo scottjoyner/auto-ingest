@@ -126,6 +126,15 @@ def render_short(item: PlannedShort, out_dir: Path, *,
         except Exception as e:  # persona stack is environment-dependent
             log.info("Persona overlay skipped for %s (using base render): %s",
                      item.id, e)
+            # The base render is the promised fallback: promote it to the final
+            # path before the finally block below removes the temp file. Without
+            # this, a failed overlay marks the short 'rendered' and leaves no MP4.
+            if base_path != out_path and base_path.exists() and not out_path.exists():
+                try:
+                    os.replace(base_path, out_path)
+                except OSError as move_err:  # pragma: no cover - filesystem edge
+                    log.warning("Could not promote base render for %s: %s",
+                                item.id, move_err)
         finally:
             try:
                 if base_path.exists() and base_path != out_path:
