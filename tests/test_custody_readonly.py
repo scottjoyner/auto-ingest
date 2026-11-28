@@ -172,10 +172,21 @@ def test_ledger_reading_is_read_only_and_does_not_create_ledgers(tmp_path):
 
 def test_resolving_a_destination_never_creates_the_path(tmp_path):
     from auto_ingest.custody.destination import resolve_destination
+    from auto_ingest.custody.mounts import observe_mount
 
     target = tmp_path / "not-created"
     ref = resolve_destination({}, env={"CUSTODY_DESTINATION_ROOT": str(target)},
                              check_mount=True)
     assert ref.host_path == str(target)
-    assert ref.mounted is False
     assert not target.exists()
+
+    # Whether a brand-new tmp path counts as "mounted" is a fact about the
+    # host, not about the resolver: /tmp is its own tmpfs on some machines and
+    # a plain directory under / on others. Ask the kernel's mount table what
+    # to expect, then assert the resolver reported exactly that - the original
+    # unconditional `is False` asserted a developer-specific mount layout, not
+    # read-only behaviour.
+    if observe_mount(str(target), allow_containing=True).present:
+        assert ref.mounted is True
+    else:
+        assert ref.mounted is False
