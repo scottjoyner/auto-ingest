@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, integration/round7-auto-ingest-20261126]
   pull_request:
 
 jobs:
