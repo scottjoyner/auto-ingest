@@ -15,7 +15,7 @@ Enhancements:
 
 import os, re, json, time, logging, argparse, csv
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import http.client
 from urllib.parse import urlparse
 
