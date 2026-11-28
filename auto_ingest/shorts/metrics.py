@@ -178,7 +178,9 @@ def _pick(d: Dict[str, Any], names: tuple) -> Any:
 def _coerce_num(v: Any, as_int: bool = True) -> Optional[float]:
     if v is None:
         return None
-    if isinstance(v, (int, float)):
+    # bool subclasses int in Python; a JSON true/false in a numeric export
+    # column is a missing value, not a fabricated 1/0.  Match exact types.
+    if type(v) is int or type(v) is float:
         return int(v) if as_int else float(v)
     s = str(v).strip().replace(",", "").replace("%", "")
     if s == "":
