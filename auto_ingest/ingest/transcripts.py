@@ -634,7 +634,9 @@ def load_transcription_csv(path: str) -> Optional[Dict[str, Any]]:
             segments, full_text = [], []
             file_start_abs: Optional[datetime] = None
             file_end_abs: Optional[datetime] = None
-            with open(path, newline="", encoding="utf-8") as f:
+            # NAS/Excel exports may prefix the CSV with a UTF-8 BOM. utf-8-sig
+            # consumes it so the first header parses as "Text"/"StartTime".
+            with open(path, newline="", encoding="utf-8-sig") as f:
                 reader = csv.DictReader(f)
                 for row_idx, row in enumerate(reader):
                     def ffloat(k: str, default: float = 0.0) -> float:
@@ -666,7 +668,8 @@ def load_transcription_csv(path: str) -> Optional[Dict[str, Any]]:
 def load_entities_csv(path: str) -> List[Dict[str, Any]]:
     ents = []
     try:
-        with open(path, newline="", encoding="utf-8") as f:
+        # utf-8-sig strips a NAS/Excel BOM without changing BOM-less files.
+        with open(path, newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 def ffloat(k: str, default: float = 0.0) -> float:
@@ -954,7 +957,8 @@ def parse_dashcam_metadata_csv(path: str, fps: float, downsample_sec: int,
                                max_speed_mph: float, max_rows: int = 0):
     bbox = _parse_bbox(bbox_str)
     seen = 0; per_sec_points: Dict[int, List[Tuple[float,float,Optional[float],List[str]]]] = {}
-    with open(path, "r", encoding="utf-8") as f:
+    # utf-8-sig consumes a UTF-8 BOM so "Frame"/"MPH" headers still match.
+    with open(path, "r", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
             if max_rows and seen >= max_rows: break
