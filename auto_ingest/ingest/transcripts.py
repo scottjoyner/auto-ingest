@@ -1085,6 +1085,11 @@ def ingest_transcription_header(driver, t_id, key, started_at_iso, ended_at_iso,
     # W-48: stage the op in the durable outbox BEFORE touching Neo4j so a
     # mid-ingest outage cannot lose the write. Only active when the outbox is
     # enabled (AUTO_INGEST_OUTBOX=1); otherwise this is a no-op.
+    #
+    # The caller is responsible for marking the op done only after the full
+    # transcription key succeeds (segments/utterances/entities/links). Marking
+    # done here, immediately after the header write, would hide partial failures
+    # from replay/verify.
     ob = get_outbox()
     op_id = None
     if ob is not None:
@@ -1106,8 +1111,7 @@ def ingest_transcription_header(driver, t_id, key, started_at_iso, ended_at_iso,
         if ob is not None and op_id is not None:
             ob.mark_failed(op_id, str(e)[:500])
         raise
-    if ob is not None and op_id is not None:
-        ob.mark_done(op_id)
+    return op_id
 
 def ingest_segments_chunked(driver, t_id, segments, batch=200, timeout=120):
     if not segments: return 0
@@ -1491,73 +1495,83 @@ def process_key(key: str, paths: Dict[str, Any], driver,
                 "speakers": len(speakers), "entities": len(entities)}
 
     # --- CHUNKED INGEST ---
-    with TimedStage(st_ingest, detail=f"key={key}"):
-        ingest_transcription_header(driver, t_id, key, started_at_iso, ended_at_iso, source_paths, text, transcript_vec, transcript_vec_v2,
-                                    transcript_extra=transcript_extra)
-        ingest_speakers_chunked(driver, speakers, batch=tx_sizes.get("spk", 200), timeout=tx_timeout_seconds)
-        ingest_segments_chunked(driver, t_id, enriched_segments, batch=tx_sizes.get("seg", 200), timeout=tx_timeout_seconds)
-        ingest_utterances_chunked(driver, t_id, utterances, batch=tx_sizes.get("utt", 200), timeout=tx_timeout_seconds)
-        link_utterances_to_segments(driver, utterances, batch=tx_sizes.get("utt_seg", 300), timeout=tx_timeout_seconds)
-        link_utterances_to_speakers(driver, utterances, batch=tx_sizes.get("utt_spk", 300), timeout=tx_timeout_seconds)
-        ingest_segment_speaker_edges(driver, seg_edges, batch=tx_sizes.get("seg_spk", 500), timeout=tx_timeout_seconds)
-        ingest_entities_chunked(driver, t_id, entities, batch=tx_sizes.get("ent", 300), timeout=tx_timeout_seconds)
+    ob = get_outbox()
+    header_op_id = None
+    try:
+        with TimedStage(st_ingest, detail=f"key={key}"):
+            header_op_id = ingest_transcription_header(
+                driver, t_id, key, started_at_iso, ended_at_iso, source_paths, text,
+                transcript_vec, transcript_vec_v2, transcript_extra=transcript_extra)
+            ingest_speakers_chunked(driver, speakers, batch=tx_sizes.get("spk", 200), timeout=tx_timeout_seconds)
+            ingest_segments_chunked(driver, t_id, enriched_segments, batch=tx_sizes.get("seg", 200), timeout=tx_timeout_seconds)
+            ingest_utterances_chunked(driver, t_id, utterances, batch=tx_sizes.get("utt", 200), timeout=tx_timeout_seconds)
+            link_utterances_to_segments(driver, utterances, batch=tx_sizes.get("utt_seg", 300), timeout=tx_timeout_seconds)
+            link_utterances_to_speakers(driver, utterances, batch=tx_sizes.get("utt_spk", 300), timeout=tx_timeout_seconds)
+            ingest_segment_speaker_edges(driver, seg_edges, batch=tx_sizes.get("seg_spk", 500), timeout=tx_timeout_seconds)
+            ingest_entities_chunked(driver, t_id, entities, batch=tx_sizes.get("ent", 300), timeout=tx_timeout_seconds)
 
-    # --- OPTIONAL: robust dashcam metadata ingestion ---
-    meta_written = 0
-    if (meta_opts or {}).get("enabled") and (paths.get("meta_all")):
-        fps = float(meta_opts.get("fps", 30.0))
-        dsec = int(meta_opts.get("downsample_sec", 1))
-        max_rows = int(meta_opts.get("max_rows", 0))
-        lon_auto_west = bool(meta_opts.get("lon_auto_west", False))
-        allow_swap = bool(meta_opts.get("allow_swap", False))
-        bbox_str = str(meta_opts.get("bbox") or "")
-        max_speed_mph = float(meta_opts.get("max_speed_mph", 120.0))
-        min_keep_ratio = float(meta_opts.get("min_keep_ratio", 0.5))
-        skip_when_bad = bool(meta_opts.get("skip_when_bad", False))
-        meta_files = [p for p in paths.get("meta_all") or [] if p.lower().endswith("_metadata.csv")]
-        for mp in meta_files:
-            try:
-                rows, stats = parse_dashcam_metadata_csv(
-                    mp, fps=fps, downsample_sec=dsec,
-                    lon_auto_west=lon_auto_west, allow_swap=allow_swap,
-                    bbox_str=bbox_str, max_speed_mph=max_speed_mph, max_rows=max_rows
-                )
-                if stats["seen"] == 0:
-                    log.warning(f"[{key}] metadata had 0 readable rows: {mp}")
-                    continue
-                if stats["good_ratio"] < min_keep_ratio:
-                    msg = (f"[{key}] metadata quality low: kept={stats['kept']}/{stats['seen']} "
-                           f"({stats['good_ratio']:.2%}) min={min_keep_ratio:.2%} file={mp}")
-                    if skip_when_bad:
-                        log.warning(msg + " -> SKIP ingest")
+        # --- OPTIONAL: robust dashcam metadata ingestion ---
+        meta_written = 0
+        if (meta_opts or {}).get("enabled") and (paths.get("meta_all")):
+            fps = float(meta_opts.get("fps", 30.0))
+            dsec = int(meta_opts.get("downsample_sec", 1))
+            max_rows = int(meta_opts.get("max_rows", 0))
+            lon_auto_west = bool(meta_opts.get("lon_auto_west", False))
+            allow_swap = bool(meta_opts.get("allow_swap", False))
+            bbox_str = str(meta_opts.get("bbox") or "")
+            max_speed_mph = float(meta_opts.get("max_speed_mph", 120.0))
+            min_keep_ratio = float(meta_opts.get("min_keep_ratio", 0.5))
+            skip_when_bad = bool(meta_opts.get("skip_when_bad", False))
+            meta_files = [p for p in paths.get("meta_all") or [] if p.lower().endswith("_metadata.csv")]
+            for mp in meta_files:
+                try:
+                    rows, stats = parse_dashcam_metadata_csv(
+                        mp, fps=fps, downsample_sec=dsec,
+                        lon_auto_west=lon_auto_west, allow_swap=allow_swap,
+                        bbox_str=bbox_str, max_speed_mph=max_speed_mph, max_rows=max_rows
+                    )
+                    if stats["seen"] == 0:
+                        log.warning(f"[{key}] metadata had 0 readable rows: {mp}")
                         continue
+                    if stats["good_ratio"] < min_keep_ratio:
+                        msg = (f"[{key}] metadata quality low: kept={stats['kept']}/{stats['seen']} "
+                               f"({stats['good_ratio']:.2%}) min={min_keep_ratio:.2%} file={mp}")
+                        if skip_when_bad:
+                            log.warning(msg + " -> SKIP ingest")
+                            continue
+                        else:
+                            log.warning(msg + " -> INGEST with flags/quality")
+                    if rows:
+                        w = ingest_location_samples_chunked(driver, t_id, key, started_at_iso, rows, batch=tx_sizes.get("loc", 500), timeout=tx_timeout_seconds)
+                        meta_written += w
+                        log.info(f"[{key}] metadata ingested: file={mp} kept={len(rows)} written={w} (good_ratio={stats['good_ratio']:.2%})")
+                        # G5 PoC: also emit a replayable, resumable cleaned intermediate.
+                        # The default Neo4j write above is unchanged; this artifact can be
+                        # later replayed by auto_ingest.ingest_import.import_intermediate.
+                        if emit_intermediate_dir:
+                            try:
+                                from auto_ingest.ingest_write import write_intermediate
+                                recs = [{"id": stable_id("loc", key, str(r["sec"]), f"{r.get('lat')}", f"{r.get('lon')}"),
+                                         "key": key, "sec": r["sec"], "frame": r["frame"],
+                                         "mph": r["mph"], "lat": r["lat"], "lon": r["lon"],
+                                         "flags": r.get("flags", []), "quality": r.get("quality", 100),
+                                         "parent": t_id} for r in rows]
+                                write_intermediate(emit_intermediate_dir, key, "metadata", recs, fmt="json")
+                                log.info(f"[{key}] wrote metadata intermediate ({len(recs)} rows) to {emit_intermediate_dir}")
+                            except Exception as ex:
+                                log.warning(f"[{key}] emit-intermediate failed: {ex}")
                     else:
-                        log.warning(msg + " -> INGEST with flags/quality")
-                if rows:
-                    w = ingest_location_samples_chunked(driver, t_id, key, started_at_iso, rows, batch=tx_sizes.get("loc", 500), timeout=tx_timeout_seconds)
-                    meta_written += w
-                    log.info(f"[{key}] metadata ingested: file={mp} kept={len(rows)} written={w} (good_ratio={stats['good_ratio']:.2%})")
-                    # G5 PoC: also emit a replayable, resumable cleaned intermediate.
-                    # The default Neo4j write above is unchanged; this artifact can be
-                    # later replayed by auto_ingest.ingest_import.import_intermediate.
-                    if emit_intermediate_dir:
-                        try:
-                            from auto_ingest.ingest_write import write_intermediate
-                            recs = [{"id": stable_id("loc", key, str(r["sec"]), f"{r.get('lat')}", f"{r.get('lon')}"),
-                                     "key": key, "sec": r["sec"], "frame": r["frame"],
-                                     "mph": r["mph"], "lat": r["lat"], "lon": r["lon"],
-                                     "flags": r.get("flags", []), "quality": r.get("quality", 100),
-                                     "parent": t_id} for r in rows]
-                            write_intermediate(emit_intermediate_dir, key, "metadata", recs, fmt="json")
-                            log.info(f"[{key}] wrote metadata intermediate ({len(recs)} rows) to {emit_intermediate_dir}")
-                        except Exception as ex:
-                            log.warning(f"[{key}] emit-intermediate failed: {ex}")
-                else:
-                    log.warning(f"[{key}] metadata parse yielded 0 kept rows: {mp}")
-            except Exception as ex:
-                log.warning(f"[{key}] metadata parse failed: {mp} :: {ex}")
-        if meta_written:
-            log.info(f"[{key}] total LocationSample written: {meta_written}")
+                        log.warning(f"[{key}] metadata parse yielded 0 kept rows: {mp}")
+                except Exception as ex:
+                    log.warning(f"[{key}] metadata parse failed: {mp} :: {ex}")
+            if meta_written:
+                log.info(f"[{key}] total LocationSample written: {meta_written}")
+    except Exception as e:
+        if ob is not None and header_op_id is not None:
+            ob.mark_failed(header_op_id, str(e)[:500])
+        raise
+    if ob is not None and header_op_id is not None:
+        ob.mark_done(header_op_id)
 
     return {
         "key": key, "segments": len(enriched_segments), "utterances": len(utterances),
