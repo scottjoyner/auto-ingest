@@ -126,8 +126,9 @@ def test_link_global_speakers_pure():
 
 # ---------------------------------------------------------------------------
 # 2. auto_ingest.ingest.transcripts
-#    Imports torch/transformers/neo4j at TOP -> mock-import. Note: module-level
-#    `AutoTokenizer.from_pretrained(...)` runs at import -> stubbed by MagicMock.
+#    Imports torch/transformers/neo4j at TOP -> mock-import. Model loading is
+#    now lazy (get_embed_models), so import pulls no model; see
+#    tests/test_transcript_lazy_embedding.py for that contract.
 # ---------------------------------------------------------------------------
 def test_transcripts_pure():
     T = _mock_import_module("auto_ingest.ingest.transcripts")

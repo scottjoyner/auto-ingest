@@ -183,9 +183,25 @@ DEVICE = torch_device()
 if DEVICE == "cuda":
     try: torch.backends.cuda.matmul.allow_tf32 = True
     except Exception: pass
-log.info(f"Loading embedding model on {DEVICE}…")
-emb_tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL_NAME)
-emb_model = AutoModel.from_pretrained(EMBED_MODEL_NAME).to(DEVICE).eval()
+# The embedding model is LAZY on purpose. Importing this module happens in the
+# CLI shim, in --help paths and in discovery-contract checks that do no
+# inference; calling from_pretrained() at module scope made a plain import reach
+# out to HuggingFace (and require auth / a cached model). Load on first use only.
+emb_tokenizer = None
+emb_model = None
+
+def get_embed_models():
+    """Return the shared ``(tokenizer, model)``, loading them on first use.
+
+    Pre-populating ``emb_tokenizer`` / ``emb_model`` (e.g. monkeypatching them in
+    tests) is honoured: an already-complete pair is never overwritten.
+    """
+    global emb_tokenizer, emb_model
+    if emb_tokenizer is None or emb_model is None:
+        log.info(f"Loading embedding model on {DEVICE}…")
+        emb_tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL_NAME)
+        emb_model = AutoModel.from_pretrained(EMBED_MODEL_NAME).to(DEVICE).eval()
+    return emb_tokenizer, emb_model
 
 entity_recognition_classifier = None  # lazy
 
@@ -302,13 +318,14 @@ def mean_pooling(last_hidden_state: torch.Tensor, attention_mask: torch.Tensor) 
 
 def embed_texts(texts: List[str], batch_size: int, max_length: int = 512) -> List[List[float]]:
     if not texts: return []
+    tokenizer, model = get_embed_models()
     vectors = []
     with torch.no_grad():
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i+batch_size]
-            enc = emb_tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=max_length)
+            enc = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=max_length)
             enc = {k: v.to(DEVICE) for k,v in enc.items()}
-            out = emb_model(**enc)
+            out = model(**enc)
             pooled = mean_pooling(out.last_hidden_state, enc["attention_mask"])
             pooled = normalize(pooled)
             vectors.extend(pooled.cpu().numpy().tolist())
@@ -365,13 +382,15 @@ def embed_long_text_via_segments(segments: List[str], batch_size: int) -> List[f
     return vec.tolist()
 
 def transcript_embedding_v2_from_chunks(text: str, batch_size: int, max_tokens: int = 256, overlap: int = 64) -> List[float]:
-    parts = chunk_by_tokens(text, emb_tokenizer, max_tokens=max_tokens, overlap=overlap)
+    if not text.strip(): return [0.0] * EMBED_DIM
+    tokenizer, _ = get_embed_models()
+    parts = chunk_by_tokens(text, tokenizer, max_tokens=max_tokens, overlap=overlap)
     if not parts: return [0.0] * EMBED_DIM
     vecs = embed_texts(parts, batch_size=batch_size, max_length=max_tokens)
     V = np.asarray(vecs, dtype=np.float32)
     weights = []
     for p in parts:
-        weights.append(len(emb_tokenizer(p, add_special_tokens=False).input_ids))
+        weights.append(len(tokenizer(p, add_special_tokens=False).input_ids))
     w = np.asarray(weights, dtype=np.float32); w = w / (w.sum() + 1e-6)
     out = (V * w[:, None]).sum(axis=0)
     n = np.linalg.norm(out)
@@ -403,7 +422,7 @@ def gliner_extract_chunked(text: str, max_tokens: int = 256, overlap: int = 32) 
             from gliner import GLiNER
             log.info("Loading GLiNER (chunked)…")
             entity_recognition_classifier = GLiNER.from_pretrained("urchade/gliner_large-v2", device=DEVICE)
-        tok = getattr(entity_recognition_classifier, "tokenizer", None) or emb_tokenizer
+        tok = getattr(entity_recognition_classifier, "tokenizer", None) or get_embed_models()[0]
         parts = chunk_by_tokens(text, tok, max_tokens=max_tokens, overlap=overlap)
         ents_all = []
         for chunk in parts:
