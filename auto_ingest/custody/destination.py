@@ -352,7 +352,12 @@ def resolve_destination(
                 # containing mount is consulted instead.
                 from .mounts import observe_mount
 
-                mounted = observe_mount(host_path, allow_containing=True).present
+                # A containing mount only proves the *storage* behind the path is
+                # mounted. The path itself may still be absent (e.g. an archive
+                # subdirectory that has not been created yet), so report mounted
+                # only when both facts hold - the same conjunction the release
+                # gate uses (MountObservation.usable).
+                mounted = observe_mount(host_path, allow_containing=True).usable
         else:
             mounted = None
 
