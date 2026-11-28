@@ -17,15 +17,19 @@ def _stub_optional_ml_stack_at_import_time():
     here, at conftest import time, ONLY when the real packages are absent, so a
     developer or CI job with the real stack still exercises the real thing.
     """
-    try:
-        import torch  # noqa: F401
-        import transformers  # noqa: F401
-    except ImportError:
-        pass
-    else:
-        return
-
     from unittest import mock
+
+    def missing(module: str) -> bool:
+        try:
+            __import__(module)  # noqa: F401
+        except ImportError:
+            return True
+        return False
+
+    absent = {name for name in ("torch", "transformers", "torchaudio", "soundfile")
+              if missing(name)}
+    if not absent:
+        return
 
     torch_names = (
         "torch", "torch.cuda", "torch.backends", "torch.backends.cuda",
@@ -36,12 +40,19 @@ def _stub_optional_ml_stack_at_import_time():
     for attr, dotted in (("cuda", "torch.cuda"), ("backends", "torch.backends"),
                          ("nn", "torch.nn"), ("fx", "torch.fx")):
         setattr(root, attr, nodes[dotted])
-    for name, node in nodes.items():
-        sys.modules.setdefault(name, node)
+    if "torch" in absent:
+        for name, node in nodes.items():
+            sys.modules.setdefault(name, node)
 
-    transformers_stub = sys.modules.setdefault("transformers", mock.MagicMock(name="transformers"))
-    transformers_stub.AutoTokenizer = mock.MagicMock(name="AutoTokenizer")
-    transformers_stub.AutoModel = mock.MagicMock(name="AutoModel")
+    if "transformers" in absent:
+        transformers_stub = sys.modules.setdefault(
+            "transformers", mock.MagicMock(name="transformers"))
+        transformers_stub.AutoTokenizer = mock.MagicMock(name="AutoTokenizer")
+        transformers_stub.AutoModel = mock.MagicMock(name="AutoModel")
+
+    for name in ("torchaudio", "soundfile"):
+        if name in absent:
+            sys.modules.setdefault(name, mock.MagicMock(name=name))
 
 
 _stub_optional_ml_stack_at_import_time()
