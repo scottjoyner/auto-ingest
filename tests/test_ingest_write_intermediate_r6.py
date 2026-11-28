@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -66,10 +67,10 @@ def test_json_round_trip_is_deterministic_and_preserves_types(tmp_path):
     assert ingest_write.read_intermediate(str(tmp_path), "k1", "metadata") == rows
 
     # sort_keys=True makes the artifact byte-stable across dict key orderings.
-    first = open(path, "rb").read()
+    first = Path(path).read_bytes()
     reordered = [dict(reversed(list(r.items()))) for r in rows]
     ingest_write.write_intermediate(str(tmp_path), "k1", "metadata", reordered)
-    assert open(path, "rb").read() == first
+    assert Path(path).read_bytes() == first
 
 
 def test_json_empty_records_round_trip_as_empty_list(tmp_path):
