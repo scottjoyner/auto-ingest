@@ -137,11 +137,15 @@ def curiosity_reveal(question: str, answer: str, duration: float, *,
     lead = 0.4
     if start is None:
         start = round(lead + (duration - lead) * 0.45, 2)
-    q_end = round(start + 2.2, 2)
-    a_end = round(min(duration - 0.4, start + 5.0), 2)
+    # Keep the whole device inside the runtime. Short clips (or an explicit
+    # start past the end) used to yield inverted, negative or overlong cues,
+    # which downstream caption/render code treated as valid timed lines.
+    start = min(max(start, 0.0), max(duration, 0.0))
+    q_end = min(max(start, duration), start + 2.2)
+    a_end = max(q_end, min(duration - 0.4, start + 5.0))
     return [
-        Cue(start=start, end=q_end, text=question, kind="question"),
-        Cue(start=q_end, end=a_end, text=answer, kind="reveal"),
+        Cue(start=round(start, 2), end=round(q_end, 2), text=question, kind="question"),
+        Cue(start=round(q_end, 2), end=round(a_end, 2), text=answer, kind="reveal"),
     ]
 
 
