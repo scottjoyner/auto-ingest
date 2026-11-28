@@ -8,14 +8,11 @@ from __future__ import annotations
 
 import importlib
 import json
-import os
 import sys
-import types
 import unittest.mock as mock
 from pathlib import Path
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers for importing transcripts with heavy ML deps stubbed out.
@@ -122,8 +119,8 @@ def test_chunked_child_write_fails_if_batch_underwrites(transcripts_mod):
 # ---------------------------------------------------------------------------
 
 def test_verify_destination_rejects_escaping_ledger_key(tmp_path):
+    from auto_ingest.custody.ledger import HASH_LEDGER, ledger_dir
     from auto_ingest.custody.verify import verify_destination
-    from auto_ingest.custody.ledger import ledger_dir, HASH_LEDGER
 
     bundle = tmp_path / "bundle"
     dest = tmp_path / "dest"
@@ -157,7 +154,7 @@ def test_executor_safe_join_returns_resolved_and_rejects_escape(tmp_path):
 
 
 def test_stream_copy_uses_unique_partial_name(tmp_path):
-    from auto_ingest.custody.executor import stream_copy, TEMP_DIRNAME
+    from auto_ingest.custody.executor import TEMP_DIRNAME, stream_copy
 
     src = tmp_path / "src.bin"
     src.write_bytes(b"payload")
