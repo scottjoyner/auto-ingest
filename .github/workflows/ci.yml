@@ -51,6 +51,14 @@ jobs:
       - name: No hardcoded Neo4j password (must route through NEO4J_PASSWORD_DEFAULT)
         run: python tools/lint_no_hardcoded_secrets.py
 
+      - name: Dependency pin drift check (pyproject extras vs requirements.txt)
+        # Stdlib-only: no new deps and no change to the install strategy above.
+        # Fails if an overlapping optional extra stops matching its exact pin
+        # in requirements.txt (scripts/check_dependency_pins.py).
+        run: |
+          python scripts/test_check_dependency_pins.py
+          python scripts/check_dependency_pins.py
+
       - name: Pytest (system python — moviepy tests skip/degrade)
         run: |
           python -m pytest tests/ -q
