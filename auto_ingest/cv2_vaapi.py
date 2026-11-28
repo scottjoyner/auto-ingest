@@ -31,10 +31,17 @@ def _cv2_vaapi_supported(cv2) -> bool:
 
 
 def vaapi_device() -> Optional[str]:
-    """Return the first existing VAAPI render node, or None."""
+    """Return the first usable VAAPI render node, or None.
+
+    An explicit override must be a character device: a regular file or
+    directory that merely exists is not a render node, and handing one to
+    OpenCV would make ``enable_vaapi`` claim hardware decode that cannot work.
+    ``is_char_device()`` is false for a missing path too, so the previous
+    fail-closed behaviour for a bad override is preserved.
+    """
     env = os.environ.get("AUTO_INGEST_VAAPI_DEVICE")
     if env:
-        return env if Path(env).exists() else None
+        return env if Path(env).is_char_device() else None
     for node in _VAAPI_NODES:
         if Path(node).exists():
             return node
