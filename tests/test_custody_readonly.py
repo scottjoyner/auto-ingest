@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -98,6 +99,48 @@ def _snapshot(root: Path):
     return entries
 
 
+def _has_backing_mount(path, mounts_path=None):
+    """Whether ``path`` sits inside a non-root mount.
+
+    ``resolve_destination(check_mount=True)`` reports ``mounted=True`` for any
+    path backed by a non-root mount - tmpfs on /tmp here, or an ext4 mount at
+    /media/scott/data on this host. An assertion that a destination is *not*
+    mounted is only meaningful on the root filesystem, so tests use this to
+    pick a suitable base (``containing_mount`` deliberately excludes ``/``).
+    """
+    from auto_ingest.custody.mounts import (MOUNTS_PATH, containing_mount,
+                                            read_mounts)
+
+    if mounts_path is None:
+        mounts_path = MOUNTS_PATH
+    return containing_mount(os.path.realpath(str(path)),
+                            read_mounts(mounts_path)) is not None
+
+
+def _unmounted_base(candidates):
+    """First existing, writable candidate that is not inside a non-root mount."""
+    for base in candidates:
+        try:
+            base = Path(base)
+            if base.is_dir() and os.access(base, os.W_OK) and not _has_backing_mount(base):
+                return base
+        except OSError:
+            continue
+    return None
+
+
+def test_backing_mount_detection(tmp_path):
+    """Unit coverage for the filesystem-kind helper, using a synthetic table."""
+    mounts = tmp_path / "mounts"
+    mounts.write_text(
+        "/dev/sda1 / ext4 rw 0 0\n"
+        "tmpfs /tmp tmpfs rw 0 0\n",
+        encoding="utf-8",
+    )
+    assert _has_backing_mount("/tmp/not-created", mounts) is True
+    assert _has_backing_mount("/home/scott/not-created", mounts) is False
+
+
 def test_status_and_plan_emit_no_mutating_syscall(tmp_path):
     script = AUDIT_SCRIPT % {
         "repo": str(REPO_ROOT),
@@ -173,9 +216,19 @@ def test_ledger_reading_is_read_only_and_does_not_create_ledgers(tmp_path):
 def test_resolving_a_destination_never_creates_the_path(tmp_path):
     from auto_ingest.custody.destination import resolve_destination
 
-    target = tmp_path / "not-created"
+    # /tmp is tmpfs on this host, so a target under tmp_path is reported as
+    # mounted even though it never existed - the `mounted is False` assertion
+    # would be meaningless there. Prefer a base on the root filesystem; skip
+    # only this test if the host offers no such writable location. The custody
+    # check (no path created) still runs wherever this test runs.
+    base = _unmounted_base([tmp_path, Path.home(), Path("/var/tmp")])
+    if base is None:
+        pytest.skip("requires a non-tmpfs mount (a path outside any non-root mount)")
+
+    target = base / f"custody-not-created-{uuid.uuid4().hex}"
+    assert not target.exists()
     ref = resolve_destination({}, env={"CUSTODY_DESTINATION_ROOT": str(target)},
-                             check_mount=True)
+                              check_mount=True)
     assert ref.host_path == str(target)
     assert ref.mounted is False
     assert not target.exists()

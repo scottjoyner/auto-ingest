@@ -67,9 +67,12 @@ class TestSpeakerLinking:
     """bin/auto-ingest link-speakers delegates to the package module."""
 
     def test_link_global_speakers_module_exists(self):
-        # link_global_speakers imports torch at module scope, which CI
-        # deliberately does not install (no ML stack). Skip rather than fail.
+        # link_global_speakers imports torch and torchaudio at module scope;
+        # both are optional ML deps that this environment deliberately does not
+        # install. Skip only this test rather than stubbing torchaudio or failing,
+        # so the module is still checked wherever the full ML stack IS present.
         pytest.importorskip("torch")
+        pytest.importorskip("torchaudio")  # optional dep: audio load/resample backend
         mod = importlib.import_module("auto_ingest.diarize.link_global_speakers")
         assert hasattr(mod, "main") or hasattr(mod, "run_linking")
 
